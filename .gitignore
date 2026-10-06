@@ -1,0 +1,67 @@
+# Build artifacts
+/target
+**/*.rs.bk
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Audio files (large, not committed)
+*.wav
+*.aiff
+*.flac
+*.mp3
+*.ogg
+*.zoft
+
+# Logs
+*.log
+logs/
+
+# Cache
+.cache/
+.cargo/
+.cargo-cache/
+
+# Profiling
+*.profdata
+tracy-*.prof
+
+# IDEA: Local config
+*.local
+
+# Distribution
+dist/
+installers/
+*.msi
+*.exe
+*.dmg
+*.app
+*.deb
+*.rpm
+*.AppImage
+
+# Keys/secrets (never commit)
+*.pem
+*.key
+*.crt
+*.p12
+secrets/
+.env
+.env.local
+
+# Documentation build
+docs/book/
+target/doc/
+
+# Temporary
+tmp/
+temp/
+*.tmp

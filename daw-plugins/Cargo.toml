@@ -1,0 +1,32 @@
+[package]
+name = "daw-plugins"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+description = "Built-in instruments and effects for Zoft DAW"
+categories = { workspace = true }
+keywords = { workspace = true }
+
+[dependencies]
+daw-core = { path = "../daw-core" }
+daw-engine = { path = "../daw-engine" }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+slotmap = { workspace = true }
+crossbeam = { workspace = true }
+parking_lot = { workspace = true }
+fundsp = { workspace = true }
+dasp = { workspace = true }
+packed_simd = { workspace = true }
+std-simd = { workspace = true }
+rubberband = { workspace = true }
+hound = { workspace = true }
+
+# Plugin hosting
+nih-plug = { workspace = true }
+vst3-sys = { workspace = true }
+cpdal = { workspace = true }

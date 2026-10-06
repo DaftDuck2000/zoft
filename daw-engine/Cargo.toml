@@ -1,0 +1,48 @@
+[package]
+name = "daw-engine"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+description = "Audio engine, DSP, transport, graph processing for Zoft DAW"
+categories = { workspace = true }
+keywords = { workspace = true }
+
+[dependencies]
+daw-core = { path = "../daw-core" }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+slotmap = { workspace = true }
+crossbeam = { workspace = true }
+parking_lot = { workspace = true }
+dashmap = { workspace = true }
+tokio = { workspace = true }
+
+# Audio backends
+cpal = { workspace = true }
+jack = { workspace = true }
+pipewire = { workspace = true }
+
+# MIDI
+midir = { workspace = true }
+midly = { workspace = true }
+
+# DSP
+fundsp = { workspace = true }
+dasp = { workspace = true }
+packed_simd = { workspace = true }
+std-simd = { workspace = true }
+rubberband = { workspace = true }
+hound = { workspace = true }
+dasample = { workspace = true }
+
+# Plugin hosting (later phases)
+nih-plug = { workspace = true }
+vst3-sys = { workspace = true }
+cpdal = { workspace = true }
+
+# Profiling
+tracy-client = { workspace = true }
