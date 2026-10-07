@@ -40,7 +40,7 @@
 
 | ID | Feature | Status | Est. | Actual | Notes |
 |----|---------|--------|------|--------|-------|
-| 1.1 | Audio Track & Recording | `[ ]` | 2w | | Arm, monitor, BWF write |
+| 1.1 | Audio Track & Recording | `[~]` | 2w | 1w | Arm, monitor, BWF write |
 | 1.2 | Waveform Rendering | `[ ]` | 2w | | Overview + detail views |
 | 1.3 | Non-Destructive Clip Editing | `[ ]` | 3w | | Split, trim, move, fade |
 | 1.4 | Clip Processing | `[ ]` | 2w | | Gain, pitch, stretch, reverse |

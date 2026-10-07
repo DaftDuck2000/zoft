@@ -1,4 +1,4 @@
-# Zoft — Professional Digital Audio Workstation
+# Zoft — Vibe Coded Digital Audio Workstation
 
 A fully vibe coded side project, just because I am not paying for an existing solution
 

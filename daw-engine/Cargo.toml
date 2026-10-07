@@ -36,6 +36,8 @@ dasp = { workspace = true }
 # std-simd = { workspace = true }
 rubberband = { workspace = true }
 hound = { workspace = true }
+num_traits = { package = "num-traits", version = "0.2" }
+time = { workspace = true }
 # dasample = { workspace = true }
 
 # Plugin hosting (later phases)
