@@ -43,6 +43,8 @@ struct AppUI {
     project: Project,
     engine: AudioEngine,
     playing: bool,
+    playhead_position: f32,  // 0.0 to 1.0
+    last_playhead_update: std::time::Instant,
 }
 
 impl AppUI {
@@ -51,12 +53,26 @@ impl AppUI {
             project,
             engine,
             playing: false,
+            playhead_position: 0.0,
+            last_playhead_update: std::time::Instant::now(),
         }
     }
 }
 
 impl eframe::App for AppUI {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Handle keyboard shortcuts
+        self.handle_keyboard(ctx);
+
+        // Update playhead position during playback
+        if self.playing {
+            let elapsed = self.last_playhead_update.elapsed().as_secs_f32();
+            self.playhead_position = (self.playhead_position + elapsed * 0.1) % 1.0;
+            self.last_playhead_update = std::time::Instant::now();
+        } else {
+            self.playhead_position = 0.0;
+        }
+
         // Top transport bar
         egui::TopBottomPanel::top("transport_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -113,6 +129,27 @@ impl eframe::App for AppUI {
                     egui::pos2(x, rect.bottom()),
                 ], egui::Stroke::new(1.0, egui::Color32::from_gray(60)));
             }
+            
+            // Draw playhead
+            if self.playing || self.playhead_position > 0.0 {
+                let playhead_x = rect.left() + rect.width() * self.playhead_position;
+                painter.line_segment([
+                    egui::pos2(playhead_x, rect.top()),
+                    egui::pos2(playhead_x, rect.bottom()),
+                ], egui::Stroke::new(2.0, egui::Color32::RED));
+                
+                // Playhead triangle at top
+                let triangle_size = 8.0;
+                painter.add(egui::Shape::convex_polygon(
+                    vec![
+                        egui::pos2(playhead_x, rect.top()),
+                        egui::pos2(playhead_x - triangle_size, rect.top() + triangle_size),
+                        egui::pos2(playhead_x + triangle_size, rect.top() + triangle_size),
+                    ],
+                    egui::Color32::RED,
+                    egui::Stroke::NONE,
+                ));
+            }
         });
 
         // Bottom status bar
@@ -128,5 +165,38 @@ impl eframe::App for AppUI {
 
         // Request repaint for smooth playback
         ctx.request_repaint();
+    }
+}
+
+impl AppUI {
+    fn handle_keyboard(&mut self, ctx: &egui::Context) {
+        use egui::Key;
+        
+        // Only handle keyboard if no text input is focused
+        if ctx.memory(|m| m.focused().is_none()) {
+            // Space: Play/Stop
+            if ctx.input(|i| i.key_pressed(Key::Space)) {
+                self.playing = !self.playing;
+                if self.playing {
+                    let _ = self.engine.start();
+                    self.last_playhead_update = std::time::Instant::now();
+                } else {
+                    let _ = self.engine.stop();
+                    self.playhead_position = 0.0;
+                }
+            }
+            
+            // Enter: Return to start
+            if ctx.input(|i| i.key_pressed(Key::Enter)) {
+                self.playhead_position = 0.0;
+                self.playing = false;
+                let _ = self.engine.stop();
+            }
+            
+            // R: Record (placeholder)
+            if ctx.input(|i| i.key_pressed(Key::R)) {
+                // TODO: Implement record
+            }
+        }
     }
 }
