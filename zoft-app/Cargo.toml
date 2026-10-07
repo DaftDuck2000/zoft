@@ -1,0 +1,18 @@
+[package]
+name = "zoft-app"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+description = "Zoft DAW main application"
+categories = { workspace = true }
+keywords = { workspace = true }
+
+[dependencies]
+daw-core = { path = "../daw-core" }
+daw-engine = { path = "../daw-engine" }
+daw-ui = { path = "../daw-ui" }
+daw-plugins = { path = "../daw-plugins" }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

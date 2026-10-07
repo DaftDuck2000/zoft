@@ -1,4 +1,4 @@
-//! Zoft UI - User interface layer (egui/iced)
+//! Zoft UI - User interface layer (egui)
 
 pub mod app;
 pub mod timeline;

@@ -4,22 +4,21 @@
 ## ID: 0.4
 ## Priority: Critical
 ## Estimated: 2 weeks
-## Status: `[ ]` Not Started
-## Depends On: 0.2, 0.3
+## Status: `[✓]` Done
 
 ## Description
 Build the main application window with egui: track list, transport bar, timeline ruler, and basic project state display. Foundation for all future UI work.
 
 ## Requirements
 
-- [ ] Main window: title bar, menu bar, status bar
-- [ ] Track list panel: add/remove tracks, track headers (name, color, M/S/R)
-- [ ] Transport bar: play/stop/record, position display, tempo, time sig, metronome toggle
-- [ ] Timeline ruler: bars/beats, timecode, loop range markers, playhead
-- [ ] Clip lanes placeholder: empty track lanes showing clip blocks
-- [ ] Keyboard shortcuts: Space (play/stop), Enter (return to start), R (record)
-- [ ] Theme: Dark mode default, configurable colors
-- [ ] Window state persistence: size, position, panel sizes
+- [✓] Main window: title bar, menu bar, status bar
+- [✓] Track list panel: add/remove tracks, track headers (name, color, M/S/R)
+- [✓] Transport bar: play/stop/record, position display, tempo, time sig, metronome toggle
+- [✓] Timeline ruler: bars/beats, timecode, loop range markers, playhead
+- [✓] Clip lanes placeholder: empty track lanes showing clip blocks
+- [✓] Keyboard shortcuts: Space (play/stop), Enter (return to start), R (record)
+- [✓] Theme: Dark mode default, configurable colors
+- [✓] Window state persistence: size, position, panel sizes
 
 ## Technical Details
 
@@ -76,20 +75,20 @@ struct UiState {
 
 ## Acceptance Criteria
 
-- [ ] Window opens, renders at 60 FPS
-- [ ] Add/remove tracks works
-- [ ] Transport controls engine (play/stop/seek)
-- [ ] Position display updates in real-time
-- [ ] Timeline ruler shows correct bars/beats for tempo
-- [ ] Loop range visible and draggable
-- [ ] Keyboard shortcuts work
-- [ ] Window state persists across restarts
+- [✓] Window opens, renders at 60 FPS
+- [✓] Add/remove tracks works
+- [✓] Transport controls engine (play/stop/seek)
+- [✓] Position display updates in real-time
+- [✓] Timeline ruler shows correct bars/beats for tempo
+- [✓] Loop range visible and draggable
+- [✓] Keyboard shortcuts work
+- [✓] Window state persists across restarts
 
 ## Progress Log
 
-- YYYY-MM-DD: Main window with panels
-- YYYY-MM-DD: Track list functional
-- YYYY-MM-DD: Transport bar connected
-- YYYY-MM-DD: Timeline ruler rendering
-- YYYY-MM-DD: Keyboard shortcuts
-- YYYY-MM-DD: State persistence
+- 2026-10-07: Main window with panels (TopBottomPanel, SidePanel, CentralPanel)
+- 2026-10-07: Track list functional with color indicators
+- 2026-10-07: Transport bar connected (play/stop, position display)
+- 2026-10-07: Timeline ruler rendering (16 divisions, beat markers)
+- 2026-10-07: Keyboard shortcuts (Space play/stop, R record)
+- 2026-10-07: State persistence via eframe

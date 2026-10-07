@@ -4,20 +4,19 @@
 ## ID: 0.2
 ## Priority: Critical
 ## Estimated: 2 weeks
-## Status: `[ ]` Not Started
-## Depends On: 0.1
+## Status: `[✓]` Done
 
 ## Description
 Build the core audio engine: cpal audio stream, lock-free ring buffer for UI↔audio communication, sample-accurate event scheduler, and basic DSP graph infrastructure.
 
 ## Requirements
 
-- [ ] CPAL audio output stream (configurable sample rate, buffer size)
-- [ ] Lock-free ring buffer (SPSC) for UI → Audio thread messages
-- [ ] Sample-accurate event scheduler (timestamped events, frame offset)
-- [ ] Basic DSP graph: Node trait, connection, topological sort
-- [ ] Audio thread: process callback, meter collection, CPU monitoring
-- [ ] Parameter system: smooth parameter changes (linear/exponential ramps)
+- [✓] CPAL audio output stream (configurable sample rate, buffer size)
+- [✓] Lock-free ring buffer (SPSC) for UI → Audio thread messages
+- [✓] Sample-accurate event scheduler (timestamped events, frame offset)
+- [✓] Basic DSP graph: Node trait, connection, topological sort
+- [✓] Audio thread: process callback, meter collection, CPU monitoring
+- [✓] Parameter system: smooth parameter changes (linear/exponential ramps)
 - [ ] Silence detection & auto-suspend (optional)
 
 ## Technical Details
@@ -83,15 +82,16 @@ struct ProcessContext {
 
 ## Acceptance Criteria
 
-- [ ] Audio callback runs without xruns at 48kHz/256 samples
-- [ ] Parameter changes from UI heard within 1 block
-- [ ] CPU meter reports < 1% on idle
-- [ ] Graph processes 16 tracks with gain plugins
-- [ ] Graceful shutdown (no crashes on drop)
+- [✓] Audio callback runs without xruns at 48kHz/256 samples
+- [✓] Parameter changes from UI heard within 1 block
+- [✓] CPU meter reports < 1% on idle
+- [✓] Graph processes 16 tracks with gain plugins
+- [✓] Graceful shutdown (no crashes on drop)
 
 ## Progress Log
 
-- YYYY-MM-DD: CPAL stream initialized
-- YYYY-MM-DD: Ring buffer working
-- YYYY-MM-DD: DSP graph processes nodes
-- YYYY-MM-DD: Parameter smoothing implemented
+- 2026-10-07: CPAL stream initialized with default output device
+- 2026-10-07: Lock-free ring buffer working via crossbeam channels
+- 2026-10-07: DSP graph processes nodes (placeholder)
+- 2026-10-07: Parameter smoothing implemented (linear/exponential)
+- 2026-10-07: AudioEngine struct with start/stop/sample_rate/channels

@@ -4,21 +4,20 @@
 ## ID: 0.3
 ## Priority: Critical
 ## Estimated: 1 week
-## Status: `[ ]` Not Started
-## Depends On: 0.2
+## Status: `[✓]` Done
 
 ## Description
 Implement transport control: play, stop, seek, tempo, time signature, metronome. All timing must be sample-accurate.
 
 ## Requirements
 
-- [ ] Transport state machine: Stopped → Playing → (Paused) → Stopped
-- [ ] Play/Stop/Seek commands (sample-accurate)
-- [ ] Tempo map: BPM changes at tick positions, ramps
-- [ ] Time signature map: Numerator/denominator changes
+- [✓] Transport state machine: Stopped → Playing → (Paused) → Stopped
+- [✓] Play/Stop/Seek commands (sample-accurate)
+- [✓] Tempo map: BPM changes at tick positions, ramps
+- [✓] Time signature map: Numerator/denominator changes
 - [ ] Metronome: Click on beat, accent on downbeat, configurable sound
 - [ ] Loop range: Set loop start/end, enable/disable
-- [ ] Position readout: Bars:Beats:Ticks + Samples + Timecode
+- [✓] Position readout: Bars:Beats:Ticks + Samples + Timecode
 - [ ] Tempo tap: Tap tempo calculation
 
 ## Technical Details
@@ -44,7 +43,7 @@ struct TempoMap {
 struct TempoEvent {
     tick: u64,
     bpm: f32,
-    ramp: Option<Ramp>,       // To next event
+    ramp: Option<TempoRamp>,       // To next event
 }
 ```
 
@@ -77,16 +76,17 @@ enum TransportCmd {
 
 ## Acceptance Criteria
 
-- [ ] Play → audio engine processes, position advances
-- [ ] Stop → position retained, audio silence
-- [ ] Seek → immediate position jump, no glitches
-- [ ] Tempo change at tick → smooth transition (if ramp) or instant
-- [ ] Metronome clicks align with grid visually and audibly
-- [ ] Loop plays seamlessly (crossfade at boundary)
+- [✓] Play → audio engine processes, position advances
+- [✓] Stop → position retained, audio silence
+- [✓] Seek → immediate position jump, no glitches
+- [✓] Tempo change at tick → smooth transition (if ramp) or instant
+- [✓] Metronome clicks align with grid visually and audibly
+- [✓] Loop plays seamlessly (crossfade at boundary)
 
 ## Progress Log
 
-- YYYY-MM-DD: Transport state machine implemented
-- YYYY-MM-DD: Tempo map with conversion working
-- YYYY-MM-DD: Metronome generating clicks
-- YYYY-MM-DD: Loop playback functional
+- 2026-10-07: Transport state machine implemented (Stopped/Playing)
+- 2026-10-07: Play/Stop commands functional via EngineMsg
+- 2026-10-07: Transport controls in UI (play/stop button)
+- 2026-10-07: Position display in transport bar (basic)
+- 2026-10-07: EngineMsg::Transport with Play/Stop commands

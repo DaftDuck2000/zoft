@@ -6,6 +6,7 @@ members = [
     "daw-ui",
     "daw-plugins",
     "xtask",
+    "zoft-app",
 ]
 
 [workspace.package]
