@@ -1,9 +1,11 @@
 //! Main application
 
 use daw_core::Project;
+use daw_core::track::TrackId;
 use daw_engine::AudioEngine;
 use anyhow::Result;
 use eframe::egui;
+use std::path::PathBuf;
 
 pub struct App {
     project: Project,
@@ -43,6 +45,7 @@ struct AppUI {
     project: Project,
     engine: AudioEngine,
     playing: bool,
+    recording: bool,
     playhead_position: f32,  // 0.0 to 1.0
     last_playhead_update: std::time::Instant,
     dragging_playhead: bool,
@@ -54,6 +57,7 @@ impl AppUI {
             project,
             engine,
             playing: false,
+            recording: false,
             playhead_position: 0.0,
             last_playhead_update: std::time::Instant::now(),
             dragging_playhead: false,
@@ -81,6 +85,15 @@ impl eframe::App for AppUI {
                     self.toggle_playback();
                 }
                 ui.separator();
+                
+                // Record button
+                let record_text = if self.recording { "⏹" } else { "●" };
+                let record_color = if self.recording { egui::Color32::RED } else { egui::Color32::WHITE };
+                if ui.add(egui::Button::new(egui::RichText::new(record_text).color(record_color)).min_size([32.0, 24.0].into())).clicked() {
+                    self.toggle_recording();
+                }
+                
+                ui.separator();
                 ui.label(format!("Project: {}", self.project.name));
                 ui.separator();
                 ui.label(format!("Sample Rate: {} Hz", self.project.sample_rate));
@@ -94,11 +107,33 @@ impl eframe::App for AppUI {
             ui.heading("Tracks");
             ui.separator();
             for track_id in &self.project.track_order {
-                if let Some(track) = self.project.tracks.get(track_id) {
+                if let Some(track) = self.project.tracks.get_mut(track_id) {
                     ui.horizontal(|ui| {
                         let color = egui::Color32::from_rgb(track.color.0, track.color.1, track.color.2);
                         ui.colored_label(color, "■");
                         ui.label(&track.name);
+                        ui.separator();
+                        
+                        // Mute/Solo/Record Arm buttons
+                        let mute_text = if track.mute { "M" } else { "M" };
+                        let solo_text = if track.solo { "S" } else { "S" };
+                        let arm_text = if track.record_arm { "●" } else { "○" };
+                        
+                        let mute_color = if track.mute { egui::Color32::YELLOW } else { egui::Color32::GRAY };
+                        let solo_color = if track.solo { egui::Color32::GREEN } else { egui::Color32::GRAY };
+                        let arm_color = if track.record_arm { egui::Color32::RED } else { egui::Color32::GRAY };
+                        
+                        if ui.add(egui::Button::new(egui::RichText::new(mute_text).color(mute_color)).min_size([20.0, 20.0].into())).clicked() {
+                            track.mute = !track.mute;
+                        }
+                        if ui.add(egui::Button::new(egui::RichText::new(solo_text).color(solo_color)).min_size([20.0, 20.0].into())).clicked() {
+                            track.solo = !track.solo;
+                        }
+                        if ui.add(egui::Button::new(egui::RichText::new(arm_text).color(arm_color)).min_size([20.0, 20.0].into())).clicked() {
+                            track.record_arm = !track.record_arm;
+                        }
+                        
+                        ui.label(format!("Vol: {:.0}%", track.volume * 100.0));
                     });
                 }
             }
@@ -198,7 +233,14 @@ impl eframe::App for AppUI {
         // Bottom status bar
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.label(if self.playing { "Playing" } else { "Stopped" });
+                let status = if self.recording {
+                    "● RECORDING"
+                } else if self.playing {
+                    "Playing"
+                } else {
+                    "Stopped"
+                };
+                ui.label(status);
                 ui.separator();
                 ui.label(format!("CPU: {:.1}%", 0.0));
                 ui.separator();
@@ -229,9 +271,9 @@ impl AppUI {
                 let _ = self.engine.stop();
             }
             
-            // R: Record (placeholder)
+            // R: Record (toggle recording)
             if ctx.input(|i| i.key_pressed(Key::R)) {
-                // TODO: Implement record
+                self.toggle_recording();
             }
         }
     }
@@ -244,6 +286,28 @@ impl AppUI {
         } else {
             let _ = self.engine.stop();
             // Playhead stays at current position when paused
+        }
+    }
+    
+    fn toggle_recording(&mut self) {
+        self.recording = !self.recording;
+        if self.recording {
+            // Find first armed track
+            for track_id in &self.project.track_order {
+                if let Some(track) = self.project.tracks.get(track_id) {
+                    if track.record_arm {
+                        // Start recording
+                        let file_path = std::path::PathBuf::from(format!("recording_{}.wav", track_id.0));
+                        if let Err(e) = self.engine.start_recording(*track_id, file_path) {
+                            eprintln!("Failed to start recording: {}", e);
+                            self.recording = false;
+                        }
+                        break;
+                    }
+                }
+            }
+        } else {
+            let _ = self.engine.stop_recording();
         }
     }
 }
