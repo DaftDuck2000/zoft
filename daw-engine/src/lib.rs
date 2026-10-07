@@ -150,6 +150,7 @@ impl AudioEngine {
         }.or_else(|| devices.first().cloned());
 
         if let Some(device) = device {
+            // Use default config - the backend will find the best matching config
             let config = cpal::StreamConfig {
                 channels: self.project_channels,
                 sample_rate: cpal::SampleRate(self.project_sample_rate),
@@ -157,7 +158,7 @@ impl AudioEngine {
             };
             // Use the same sender (tx) that the recording task uses
             let sender = Arc::new(std::sync::Mutex::new(Some(tx)));
-            self.backend.start_input_stream(&device.id, &config, sender)?;
+            self.backend.start_input_stream(&device.id, &config, sender, self.project_sample_rate, self.project_channels)?;
         }
 
         Ok(())

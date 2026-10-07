@@ -140,7 +140,7 @@ pub trait AudioBackend: Send + Sync {
     fn channels(&self) -> u16;
     fn input_devices(&self) -> Result<Vec<AudioDeviceInfo>>;
     fn output_devices(&self) -> Result<Vec<AudioDeviceInfo>>;
-    fn start_input_stream(&self, device_id: &str, config: &StreamConfig, sender: Arc<Mutex<Option<mpsc::Sender<AudioBuffer>>>>) -> Result<()>;
+    fn start_input_stream(&self, device_id: &str, config: &StreamConfig, sender: Arc<Mutex<Option<mpsc::Sender<AudioBuffer>>>>, project_sample_rate: u32, project_channels: u16) -> Result<()>;
     fn stop_input_stream(&self) -> Result<()>;
 }
 
@@ -370,7 +370,7 @@ impl AudioBackend for CpalBackend {
         self.list_output_devices()
     }
 
-    fn start_input_stream(&self, device_id: &str, config: &StreamConfig, sender: Arc<Mutex<Option<mpsc::Sender<AudioBuffer>>>>) -> Result<()> {
+    fn start_input_stream(&self, device_id: &str, config: &StreamConfig, sender: Arc<Mutex<Option<mpsc::Sender<AudioBuffer>>>>, project_sample_rate: u32, project_channels: u16) -> Result<()> {
         let mut input_running = self.input_running.lock().unwrap();
         if *input_running {
             return Ok(());
@@ -394,9 +394,25 @@ impl AudioBackend for CpalBackend {
                 .ok_or_else(|| anyhow::anyhow!("Input device not found (raw_name: {}), available: {:?}", device_info.raw_name, available))?
         };
 
-        let supported_config = device.default_input_config()?;
+        // Get the device's supported configs and find one matching our requirements
+        let supported_configs: Vec<_> = device.supported_input_configs()?
+            .filter(|c| c.min_sample_rate().0 <= project_sample_rate && c.max_sample_rate().0 >= project_sample_rate && c.channels() <= project_channels)
+            .collect();
+        
+        let supported_config = if supported_configs.is_empty() {
+            // Fall back to default config if no exact match
+            eprintln!("Warning: No exact config match for device, using default");
+            device.default_input_config()?
+        } else {
+            // Use the first matching config (prefer higher channel count)
+            supported_configs.into_iter()
+                .max_by_key(|c| c.channels())
+                .unwrap()
+                .with_sample_rate(cpal::SampleRate(project_sample_rate))
+        };
+        
         let _sample_rate = supported_config.sample_rate().0 as f32;
-        let _channels = supported_config.channels();
+        let _channels = supported_config.channels() as u16;
 
         let running = Arc::clone(&self.input_running);
         let sender_clone = Arc::clone(&sender);
