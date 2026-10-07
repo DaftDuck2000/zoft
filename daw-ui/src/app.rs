@@ -367,24 +367,30 @@ impl AppUI {
     }
     
     fn toggle_recording(&mut self) {
-        self.recording = !self.recording;
         if self.recording {
-            // Find first armed track
-            for track_id in &self.project.track_order {
-                if let Some(track) = self.project.tracks.get(track_id) {
-                    if track.record_arm {
-                        // Start recording
-                        let file_path = std::path::PathBuf::from(format!("recording_{}.wav", track_id.0));
-                        if let Err(e) = self.engine.start_recording(*track_id, file_path) {
-                            eprintln!("Failed to start recording: {}", e);
-                            self.recording = false;
-                        }
-                        break;
-                    }
-                }
-            }
-        } else {
+            // Stop recording
+            self.recording = false;
             let _ = self.engine.stop_recording();
+        } else {
+            // Start recording - find all armed tracks
+            let armed_tracks: Vec<TrackId> = self.project.track_order.iter()
+                .filter(|id| self.project.tracks.get(*id).map(|t| t.record_arm).unwrap_or(false))
+                .cloned()
+                .collect();
+            
+            if armed_tracks.is_empty() {
+                eprintln!("No tracks armed for recording");
+                return;
+            }
+            
+            // Start recording on all armed tracks (for now, just first one)
+            let track_id = armed_tracks[0];
+            let file_path = std::path::PathBuf::from(format!("recording_{}.wav", track_id.0));
+            if let Err(e) = self.engine.start_recording(track_id, file_path) {
+                eprintln!("Failed to start recording: {}", e);
+            } else {
+                self.recording = true;
+            }
         }
     }
 }

@@ -84,10 +84,22 @@ fn clean_device_name(name: &str) -> String {
         .replace("center", "")
         .replace("lfe", "")
         .replace("side", "")
-        .replace("unknown", "");
+        .replace("unknown", "")
+        .replace("generic", "")
+        .replace("audio", "")
+        .replace("sound", "")
+        .replace("codec", "")
+        .replace("dac", "")
+        .replace("adc", "");
     
     // Remove ALSA-style identifiers like CARD=Generic_1,DEV=0
     let name = regex::Regex::new(r"(CARD|DEV|SUBDEV)=\w+")
+        .unwrap()
+        .replace_all(&name, "")
+        .to_string();
+    
+    // Remove ALSA-style prefixes like surround51:, front:, etc.
+    let name = regex::Regex::new(r"^\w+:")
         .unwrap()
         .replace_all(&name, "")
         .to_string();
