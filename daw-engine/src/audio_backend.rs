@@ -33,6 +33,8 @@ fn is_real_hardware_device(name: &str) -> bool {
     let virtual_keywords = [
         "pipewire", "pulse", "pulseaudio", "speex", "jack", "alsa", "pipe",
         "virtual", "monitor", "null", "dummy", "easyeffects", "pipewire",
+        "link", "loopback", "hdmi", "hd audio", "hdmi", "displayport",
+        "surround", "iec958", "iec", "spdif", "digital", "hdmi",
     ];
     
     for keyword in &virtual_keywords {
@@ -41,6 +43,82 @@ fn is_real_hardware_device(name: &str) -> bool {
         }
     }
     true
+}
+
+/// Clean up device name to be more user-friendly
+fn clean_device_name(name: &str) -> String {
+    let name = name.trim();
+    
+    // Remove common prefixes/suffixes
+    let name = name
+        .replace("surround", "")
+        .replace("stereo", "")
+        .replace("multichannel", "")
+        .replace("iec958", "")
+        .replace("iec", "")
+        .replace("spdif", "")
+        .replace("digital", "")
+        .replace("hdmi", "")
+        .replace("displayport", "")
+        .replace("dp", "")
+        .replace("analog", "")
+        .replace("analog-output", "")
+        .replace("analog-input", "")
+        .replace("headphone", "")
+        .replace("speaker", "")
+        .replace("line", "")
+        .replace("mic", "")
+        .replace("microphone", "")
+        .replace("input", "")
+        .replace("output", "")
+        .replace("device", "")
+        .replace("card", "")
+        .replace("dev", "")
+        .replace("hw:", "")
+        .replace("plughw:", "")
+        .replace("default", "")
+        .replace("default:", "")
+        .replace("sysdefault", "")
+        .replace("front", "")
+        .replace("rear", "")
+        .replace("center", "")
+        .replace("lfe", "")
+        .replace("side", "")
+        .replace("unknown", "");
+    
+    // Remove ALSA-style identifiers like CARD=Generic_1,DEV=0
+    let name = regex::Regex::new(r"(CARD|DEV|SUBDEV)=\w+")
+        .unwrap()
+        .replace_all(&name, "")
+        .to_string();
+    
+    // Remove colons, equals, commas, semicolons
+    let name = name.replace([':', '=', ',', ';', '#', '@'], " ");
+    
+    // Clean up multiple spaces
+    let name = regex::Regex::new(r"\s+")
+        .unwrap()
+        .replace_all(&name, " ")
+        .to_string();
+    
+    let name = name.trim().to_string();
+    
+    // If name is empty or too short, return a default
+    if name.is_empty() || name.len() < 2 {
+        "Audio Device".to_string()
+    } else {
+        // Capitalize first letter of each word
+        name.split_whitespace()
+            .map(|w| {
+                let mut chars = w.chars();
+                match chars.next() {
+                    Some(first) => first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase(),
+                    None => String::new(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
 }
 
 pub trait AudioBackend: Send + Sync {
@@ -101,7 +179,8 @@ impl CpalBackend {
         let mut devices = Vec::new();
         
         for (index, device) in host.input_devices()?.enumerate() {
-            let name = device.name().unwrap_or_else(|_| format!("Unknown Input {}", index));
+            let raw_name = device.name().unwrap_or_else(|_| format!("Unknown Input {}", index));
+            let name = clean_device_name(&raw_name);
             let is_default = host.default_input_device()
                 .map(|d| d.name().unwrap_or_default() == name)
                 .unwrap_or(false);
@@ -140,9 +219,10 @@ impl CpalBackend {
         // If no real hardware devices found, fall back to all devices
         if devices.is_empty() {
             for (index, device) in host.input_devices()?.enumerate() {
-                let name = device.name().unwrap_or_else(|_| format!("Unknown Input {}", index));
+                let raw_name = device.name().unwrap_or_else(|_| format!("Unknown Input {}", index));
+                let name = clean_device_name(&raw_name);
                 let is_default = host.default_input_device()
-                    .map(|d| d.name().unwrap_or_default() == name)
+                    .map(|d| d.name().unwrap_or_default() == raw_name)
                     .unwrap_or(false);
                 
                 let mut sample_rates = Vec::new();
@@ -178,9 +258,10 @@ impl CpalBackend {
         let mut devices = Vec::new();
         
         for (index, device) in host.output_devices()?.enumerate() {
-            let name = device.name().unwrap_or_else(|_| format!("Unknown Output {}", index));
+            let raw_name = device.name().unwrap_or_else(|_| format!("Unknown Output {}", index));
+            let name = clean_device_name(&raw_name);
             let is_default = host.default_output_device()
-                .map(|d| d.name().unwrap_or_default() == name)
+                .map(|d| d.name().unwrap_or_default() == raw_name)
                 .unwrap_or(false);
             
             let mut sample_rates = Vec::new();

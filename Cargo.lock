@@ -1391,6 +1391,7 @@ dependencies = [
  "midly",
  "num-traits",
  "parking_lot",
+ "regex",
  "rubberband",
  "serde",
  "serde_json",
