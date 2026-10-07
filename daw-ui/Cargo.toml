@@ -26,10 +26,10 @@ egui = { workspace = true }
 eframe = { workspace = true }
 
 # Future: iced/wgpu
-iced = { workspace = true }
-wgpu = { workspace = true }
-raw-window-handle = { workspace = true }
-image = { workspace = true }
+# iced = { workspace = true }
+# wgpu = { workspace = true }
+# raw-window-handle = { workspace = true }
+# image = { workspace = true }
 
 # File dialogs
 rfd = "0.12"

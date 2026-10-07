@@ -23,8 +23,7 @@ tokio = { workspace = true }
 
 # Audio backends
 cpal = { workspace = true }
-jack = { workspace = true }
-pipewire = { workspace = true }
+# pipewire = { workspace = true }  # Compatibility issues with spa crate
 
 # MIDI
 midir = { workspace = true }
@@ -33,16 +32,16 @@ midly = { workspace = true }
 # DSP
 fundsp = { workspace = true }
 dasp = { workspace = true }
-packed_simd = { workspace = true }
-std-simd = { workspace = true }
+# packed_simd = { workspace = true }
+# std-simd = { workspace = true }
 rubberband = { workspace = true }
 hound = { workspace = true }
-dasample = { workspace = true }
+# dasample = { workspace = true }
 
 # Plugin hosting (later phases)
-nih-plug = { workspace = true }
-vst3-sys = { workspace = true }
-cpdal = { workspace = true }
+# nih-plug = { workspace = true }
+# vst3-sys = { workspace = true }
+# cpdal = { workspace = true }  # Not on crates.io
 
 # Profiling
 tracy-client = { workspace = true }

@@ -21,12 +21,12 @@ crossbeam = { workspace = true }
 parking_lot = { workspace = true }
 fundsp = { workspace = true }
 dasp = { workspace = true }
-packed_simd = { workspace = true }
-std-simd = { workspace = true }
+# packed_simd = { workspace = true }
+# std-simd = { workspace = true }
 rubberband = { workspace = true }
 hound = { workspace = true }
 
 # Plugin hosting
-nih-plug = { workspace = true }
-vst3-sys = { workspace = true }
-cpdal = { workspace = true }
+# nih-plug = { workspace = true }
+# vst3-sys = { workspace = true }
+# cpdal = { workspace = true }  # Not on crates.io

@@ -67,15 +67,19 @@ fn build_release(target: Option<String>) -> Result<()> {
     if let Some(t) = target {
         cmd.args(["--target", &t]);
     }
-    run_cmd(cmd)
+    run_cmd(&mut cmd)
 }
 
 fn run_tests() -> Result<()> {
-    run_cmd(std::process::Command::new("cargo").args(["test", "--workspace"]))
+    let mut cmd = std::process::Command::new("cargo");
+    cmd.args(["test", "--workspace"]);
+    run_cmd(&mut cmd)
 }
 
 fn run_lint() -> Result<()> {
-    run_cmd(std::process::Command::new("cargo").args(["clippy", "--workspace", "--", "-D", "warnings"]))
+    let mut cmd = std::process::Command::new("cargo");
+    cmd.args(["clippy", "--workspace", "--", "-D", "warnings"]);
+    run_cmd(&mut cmd)
 }
 
 fn run_fmt(check: bool) -> Result<()> {
@@ -84,7 +88,7 @@ fn run_fmt(check: bool) -> Result<()> {
     if check {
         cmd.arg("--check");
     }
-    run_cmd(cmd)
+    run_cmd(&mut cmd)
 }
 
 fn generate_docs(open: bool) -> Result<()> {
@@ -110,11 +114,15 @@ fn create_package(version: String) -> Result<()> {
 }
 
 fn update_deps() -> Result<()> {
-    run_cmd(std::process::Command::new("cargo").args(["update", "--workspace"]))
+    let mut cmd = std::process::Command::new("cargo");
+    cmd.args(["update", "--workspace"]);
+    run_cmd(&mut cmd)
 }
 
 fn audit_deps() -> Result<()> {
-    run_cmd(std::process::Command::new("cargo").args(["audit"]))
+    let mut cmd = std::process::Command::new("cargo");
+    cmd.args(["audit"]);
+    run_cmd(&mut cmd)
 }
 
 fn run_cmd(cmd: &mut std::process::Command) -> Result<()> {
