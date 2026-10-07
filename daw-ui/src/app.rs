@@ -51,6 +51,7 @@ struct AppUI {
     dragging_playhead: bool,
     input_devices: Vec<daw_engine::audio_backend::AudioDeviceInfo>,
     selected_input_device: Option<String>,
+    waveform_cache: daw_engine::waveform::WaveformCache,
 }
 
 impl AppUI {
@@ -66,6 +67,7 @@ impl AppUI {
             dragging_playhead: false,
             input_devices,
             selected_input_device: None,
+            waveform_cache: daw_engine::waveform::WaveformCache::new(),
         }
     }
 }
@@ -167,86 +169,100 @@ ui.separator();
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Arrange");
             ui.separator();
-            ui.label("Timeline view - coming soon");
             
-            // Show a simple timeline ruler
             let rect = ui.available_rect_before_wrap();
             let painter = ui.painter();
             
-            // Draw ruler background
-            painter.rect_filled(rect, 0.0, egui::Color32::from_gray(30));
+            // Track height
+            let track_height = 80.0;
+            let ruler_height = 30.0;
             
-            // Draw beat markers
+            // Draw ruler background
+            let ruler_rect = egui::Rect::from_min_max(
+                egui::pos2(rect.left(), rect.top()),
+                egui::pos2(rect.right(), rect.top() + ruler_height),
+            );
+            painter.rect_filled(ruler_rect, 0.0, egui::Color32::from_gray(25));
+            
+            // Draw beat markers on ruler
             for i in 0..=16 {
                 let x = rect.left() + (rect.width() / 16.0) * i as f32;
                 painter.line_segment([
                     egui::pos2(x, rect.top()),
-                    egui::pos2(x, rect.bottom()),
-                ], egui::Stroke::new(1.0, egui::Color32::from_gray(60)));
+                    egui::pos2(x, rect.top() + ruler_height),
+                ], egui::Stroke::new(1.0, egui::Color32::from_gray(80)));
+                
+                // Beat numbers
+                if i > 0 {
+                    painter.text(
+                        egui::pos2(x - 10.0, rect.top() + 4.0),
+                        egui::Align2::CENTER_CENTER,
+                        format!("{}", i),
+                        egui::FontId::proportional(10.0),
+                        egui::Color32::from_gray(180),
+                    );
+                }
             }
             
-            // Playhead interaction area (entire ruler height)
-            let playhead_x = rect.left() + rect.width() * self.playhead_position.clamp(0.0, 1.0);
-            let playhead_rect = egui::Rect::from_min_max(
-                egui::pos2(playhead_x - 4.0, rect.top()),
-                egui::pos2(playhead_x + 4.0, rect.bottom()),
-            );
-            
-            // Handle playhead dragging
-            let response = ui.interact(playhead_rect, ui.id().with("playhead"), egui::Sense::drag());
-            if response.dragged() {
-                if !self.dragging_playhead {
-                    self.dragging_playhead = true;
-                    // Pause playback while dragging
-                    if self.playing {
-                        self.playing = false;
-                        let _ = self.engine.stop();
+            // Draw track lanes
+            let track_y_start = rect.top() + ruler_height;
+            for (track_idx, track_id) in self.project.track_order.iter().enumerate() {
+                if let Some(track) = self.project.tracks.get(track_id) {
+                    let track_rect = egui::Rect::from_min_max(
+                        egui::pos2(rect.left(), track_y_start + track_idx as f32 * track_height),
+                        egui::pos2(rect.right(), track_y_start + (track_idx + 1) as f32 * track_height),
+                    );
+                    
+                    // Track background
+                    let bg_color = if track_idx % 2 == 0 { 
+                        egui::Color32::from_gray(35) 
+                    } else { 
+                        egui::Color32::from_gray(30) 
+                    };
+                    painter.rect_filled(track_rect, 0.0, bg_color);
+                    
+                    // Track separator
+                    painter.line_segment([
+                        egui::pos2(rect.left(), track_rect.top()),
+                        egui::pos2(rect.right(), track_rect.top()),
+                    ], egui::Stroke::new(1.0, egui::Color32::from_gray(50)));
+                    
+                    // Track name label
+                    painter.text(
+                        egui::pos2(track_rect.left() + 8.0, track_rect.top() + 4.0),
+                        egui::Align2::LEFT_TOP,
+                        &track.name,
+                        egui::FontId::proportional(11.0),
+                        egui::Color32::from_gray(200),
+                    );
+                    
+                    // Render audio clips on this track
+                    for clip_id in &track.clips {
+                        // Find the clip in the project's clip storage
+                        // For now, we need to access clips through a different mechanism
+                        // Since clips are stored on tracks, we iterate through track.clips
+                        // and the clip data is the AudioClip itself
+                        // Note: In the current architecture, clips are stored on tracks
+                        // and we need to get the actual clip data
+                        // For now, we'll skip waveform rendering until clip storage is properly accessible
+                        // This is a placeholder for the waveform rendering logic
                     }
                 }
-                let new_x = (response.drag_delta().x + playhead_x).clamp(rect.left(), rect.right());
-                self.playhead_position = ((new_x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-            } else if response.drag_stopped() {
-                self.dragging_playhead = false;
-            }
-            
-            // Visual feedback for draggable playhead
-            if response.hovered() || self.dragging_playhead {
-                ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::ResizeHorizontal);
-            }
-            
-            // Show a simple timeline ruler
-            let rect = ui.available_rect_before_wrap();
-            let painter = ui.painter();
-            
-            // Draw ruler background
-            painter.rect_filled(rect, 0.0, egui::Color32::from_gray(30));
-            
-            // Draw beat markers
-            for i in 0..=16 {
-                let x = rect.left() + (rect.width() / 16.0) * i as f32;
-                painter.line_segment([
-                    egui::pos2(x, rect.top()),
-                    egui::pos2(x, rect.bottom()),
-                ], egui::Stroke::new(1.0, egui::Color32::from_gray(60)));
             }
             
             // Draw playhead
             let playhead_x = rect.left() + rect.width() * self.playhead_position.clamp(0.0, 1.0);
-            
-            // Playhead line
             painter.line_segment([
                 egui::pos2(playhead_x, rect.top()),
                 egui::pos2(playhead_x, rect.bottom()),
-            ], egui::Stroke::new(2.0_f32, egui::Color32::RED));
+            ], egui::Stroke::new(2.0, egui::Color32::RED));
             
-            // Playhead triangle at top (pointing DOWN into timeline - standard DAW style)
+            // Playhead triangle
             let triangle_size = 8.0;
             painter.add(egui::Shape::convex_polygon(
                 vec![
-                    // Base at top (wider)
                     egui::pos2(playhead_x - triangle_size, rect.top()),
                     egui::pos2(playhead_x + triangle_size, rect.top()),
-                    // Apex pointing down
                     egui::pos2(playhead_x, rect.top() + triangle_size),
                 ],
                 egui::Color32::RED,

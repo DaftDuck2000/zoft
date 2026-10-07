@@ -9,6 +9,7 @@ pub mod metering;
 pub mod dsp;
 pub mod plugin_host;
 pub mod bwf_writer;
+pub mod waveform;
 
 pub use audio_backend::*;
 pub use process_graph::*;
@@ -19,6 +20,7 @@ pub use metering::*;
 pub use dsp::*;
 pub use plugin_host::*;
 pub use bwf_writer::*;
+pub use waveform::*;
 
 use crate::audio_backend::AudioBackend;
 use anyhow::Result;
