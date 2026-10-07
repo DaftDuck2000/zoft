@@ -45,11 +45,11 @@ fn is_real_hardware_device(name: &str) -> bool {
     true
 }
 
-/// Clean up device name to be more user-friendly
+/// Clean up device name to be more user-friendly (for display only)
 fn clean_device_name(name: &str) -> String {
     let name = name.trim();
     
-    // Remove common prefixes/suffixes
+    // Remove common prefixes/suffixes that are not useful for identification
     let name = name
         .replace("surround", "")
         .replace("stereo", "")
@@ -148,6 +148,7 @@ pub trait AudioBackend: Send + Sync {
 pub struct AudioDeviceInfo {
     pub id: String,
     pub name: String,
+    pub raw_name: String,
     pub is_default_input: bool,
     pub is_default_output: bool,
     pub max_input_channels: u32,
@@ -220,6 +221,7 @@ impl CpalBackend {
             devices.push(AudioDeviceInfo {
                 id,
                 name,
+                raw_name: raw_name.clone(),
                 is_default_input: is_default,
                 is_default_output: false,
                 max_input_channels: max_input_channels as u32,
@@ -250,15 +252,16 @@ impl CpalBackend {
                 
                 let id = format!("input_{}_{}", index, name.replace(' ', "_"));
                 
-                devices.push(AudioDeviceInfo {
-                    id,
-                    name,
-                    is_default_input: is_default,
-                    is_default_output: false,
-                    max_input_channels: 0,
-                    max_output_channels: 0,
-                    sample_rates,
-                });
+devices.push(AudioDeviceInfo {
+                id,
+                name,
+                raw_name: raw_name.clone(),
+                is_default_input: is_default,
+                is_default_output: false,
+                max_input_channels: 0,
+                max_output_channels: 0,
+                sample_rates,
+            });
             }
         }
         
@@ -293,6 +296,7 @@ impl CpalBackend {
             devices.push(AudioDeviceInfo {
                 id,
                 name,
+                raw_name: raw_name.clone(),
                 is_default_input: false,
                 is_default_output: is_default,
                 max_input_channels: 0,
@@ -374,9 +378,21 @@ impl AudioBackend for CpalBackend {
         drop(input_running);
 
         let host = cpal::default_host();
-        let device = host.input_devices()?
-            .find(|d| d.name().unwrap_or_default() == device_id)
-            .ok_or_else(|| anyhow::anyhow!("Input device not found: {}", device_id))?;
+        
+        // First, get all input devices to find the one matching the device_id
+        let devices = self.list_input_devices()?;
+        let device_info = devices.iter()
+            .find(|d| d.id == device_id)
+            .ok_or_else(|| anyhow::anyhow!("Input device not found: {} (available: {:?})", device_id, devices.iter().map(|d| &d.id).collect::<Vec<_>>()))?;
+        
+        let host = cpal::default_host();
+        let device = {
+            let cpal_devices: Vec<_> = host.input_devices()?.collect();
+            let available: Vec<_> = cpal_devices.iter().map(|d| d.name().unwrap_or_default()).collect();
+            cpal_devices.into_iter()
+                .find(|d| d.name().unwrap_or_default() == device_info.raw_name)
+                .ok_or_else(|| anyhow::anyhow!("Input device not found (raw_name: {}), available: {:?}", device_info.raw_name, available))?
+        };
 
         let supported_config = device.default_input_config()?;
         let _sample_rate = supported_config.sample_rate().0 as f32;
