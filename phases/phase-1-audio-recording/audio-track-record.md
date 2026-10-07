@@ -103,4 +103,7 @@ Monitor Mix        Recording           Metering
 - 2026-10-07: BWF writer implemented with `bext` chunk support
 - 2026-10-07: Input stream support added to audio backend
 - 2026-10-07: Input device enumeration implemented
-- Next: Integrate recording into engine, connect UI record button to engine
+- 2026-10-07: Recording UI integrated - record arm button, record button, R key
+- 2026-10-07: Input device selection dropdown in transport bar
+- 2026-10-07: Background writer task with tokio for BWF writing
+- Next: Waveform rendering (1.2), Multi-take support, Disk space warning

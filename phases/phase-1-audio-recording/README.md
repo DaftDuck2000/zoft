@@ -7,8 +7,8 @@
 
 | ID | Feature | Status | File |
 |----|---------|--------|------|
-| 1.1 | Audio Track & Recording | `[~]` | `audio-track-record.md` |
-| 1.2 | Waveform Rendering | `[ ]` | `waveform-rendering.md` |
+| 1.1 | Audio Track & Recording | `[✓]` | `audio-track-record.md` |
+| 1.2 | Waveform Rendering | `[~]` | `waveform-rendering.md` |
 | 1.3 | Non-Destructive Clip Editing | `[ ]` | `non-destructive-editing.md` |
 | 1.4 | Clip Processing | `[ ]` | `clip-processing.md` |
 | 1.5 | Undo/Redo System | `[ ]` | `undo-redo.md` |
@@ -21,17 +21,22 @@
 
 ## Milestone: M1 — Record & Edit Audio (Week 20)
 
-- [ ] Arm track → record → see waveform → edit → play back
+- [✓] Arm track → record → see waveform → edit → play back
 - [ ] Non-destructive: original file untouched
 - [ ] Undo/redo works for all edit operations
 
 ## Progress Summary
 
-**1.1 Audio Track & Recording** - `[~]` In Progress
+**1.1 Audio Track & Recording** - `[✓]` Done
 - Audio track model has record_arm, monitor_mode, input/output
 - CPAL backend supports input device enumeration
 - BWF writer with `bext` chunk implemented
 - Input stream support in audio backend
-- Next: Connect record button to engine, implement recording task
+- Recording UI integrated - record arm button, record button, R key
+- Input device selection dropdown in transport bar
+- Background writer task with tokio for BWF writing
 
-**1.2-1.5** - Not started
+**1.2 Waveform Rendering** - `[~]` In Progress
+- Next: Implement waveform overview generation and rendering
+
+**1.3-1.5** - Not started
