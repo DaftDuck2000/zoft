@@ -35,6 +35,7 @@ pub struct AudioEngine {
     project_sample_rate: u32,
     project_bit_depth: u16,
     project_channels: u16,
+    selected_input_device: Arc<Mutex<Option<String>>>,
 }
 
 struct RecordingState {
@@ -56,6 +57,7 @@ impl AudioEngine {
             project_sample_rate: sample_rate,
             project_bit_depth: 32, // 32-bit float
             project_channels: channels,
+            selected_input_device: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -81,6 +83,11 @@ impl AudioEngine {
 
     pub fn is_running(&self) -> bool {
         *self.running.lock().unwrap()
+    }
+
+    pub fn set_selected_input_device(&self, device_id: Option<String>) -> Result<()> {
+        *self.selected_input_device.lock().unwrap() = device_id;
+        Ok(())
     }
 
     pub fn start_recording(&self, track_id: daw_core::track::TrackId, file_path: std::path::PathBuf) -> Result<()> {
@@ -124,23 +131,32 @@ impl AudioEngine {
         });
 
         let state = RecordingState {
-            sender: tx,
+            sender: tx.clone(),
             track_id,
             file_path,
         };
 
         *recording_guard = Some(state);
         
-        // Start input stream for the first armed track
-        // For now, use default input device
+        // Start input stream for the armed track using the selected input device
+        let selected_device = self.selected_input_device.lock().unwrap().clone();
         let devices = self.backend.input_devices()?;
-        if let Some(device) = devices.first() {
+        
+        // Find the selected device, or fall back to default
+        let device = if let Some(selected_id) = selected_device {
+            devices.iter().find(|d| d.id == selected_id).cloned()
+        } else {
+            None
+        }.or_else(|| devices.first().cloned());
+
+        if let Some(device) = device {
             let config = cpal::StreamConfig {
                 channels: self.project_channels,
                 sample_rate: cpal::SampleRate(self.project_sample_rate),
                 buffer_size: cpal::BufferSize::Default,
             };
-            let sender = Arc::new(std::sync::Mutex::new(Some(mpsc::channel::<AudioBuffer>(1024).0)));
+            // Use the same sender (tx) that the recording task uses
+            let sender = Arc::new(std::sync::Mutex::new(Some(tx)));
             self.backend.start_input_stream(&device.id, &config, sender)?;
         }
 

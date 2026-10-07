@@ -110,18 +110,26 @@ ui.separator();
             if !self.input_devices.is_empty() {
                 ui.separator();
                 ui.label("Input:");
+                let mut selected_changed = false;
+                let mut new_selection = self.selected_input_device.clone();
                 egui::ComboBox::from_label("")
                     .selected_text(self.selected_input_device.as_deref().unwrap_or("Default"))
                     .show_ui(ui, |ui| {
                         for device in &self.input_devices {
                             let is_default = if device.is_default_input { " (default)" } else { "" };
-                            ui.selectable_value(
-                                &mut self.selected_input_device,
+                            if ui.selectable_value(
+                                &mut new_selection,
                                 Some(device.id.clone()),
                                 format!("{}{}", device.name, is_default)
-                            );
+                            ).changed() {
+                                selected_changed = true;
+                            }
                         }
                     });
+                if selected_changed {
+                    let _ = self.engine.set_selected_input_device(new_selection.clone());
+                    self.selected_input_device = new_selection;
+                }
             }
             ui.separator();
             ui.label(format!("Tracks: {}", self.project.track_order.len()));

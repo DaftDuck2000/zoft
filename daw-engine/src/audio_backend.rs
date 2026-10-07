@@ -6,6 +6,43 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
+/// Wrapper to make cpal::Stream Send + Sync safe
+/// cpal::Stream contains a *mut () internally which is not Send/Sync
+/// We wrap it in a struct that manually implements Send + Sync
+/// Safety: The stream is only accessed from the audio thread, so it's safe to mark as Send
+struct SendStream(Option<Stream>);
+
+unsafe impl Send for SendStream {}
+unsafe impl Sync for SendStream {}
+
+impl SendStream {
+    fn new(stream: Stream) -> Self {
+        SendStream(Some(stream))
+    }
+    
+    fn take(&mut self) -> Option<Stream> {
+        self.0.take()
+    }
+}
+
+/// Filter function to determine if an audio device is a real hardware device
+/// vs a virtual/pseudo device like pipewire, pulse, speex, etc.
+fn is_real_hardware_device(name: &str) -> bool {
+    let name_lower = name.to_lowercase();
+    // Filter out known virtual/pseudo devices
+    let virtual_keywords = [
+        "pipewire", "pulse", "pulseaudio", "speex", "jack", "alsa", "pipe",
+        "virtual", "monitor", "null", "dummy", "easyeffects", "pipewire",
+    ];
+    
+    for keyword in &virtual_keywords {
+        if name_lower.contains(keyword) {
+            return false;
+        }
+    }
+    true
+}
+
 pub trait AudioBackend: Send + Sync {
     fn start(&self) -> Result<()>;
     fn stop(&self) -> Result<()>;
@@ -34,6 +71,8 @@ pub struct CpalBackend {
     running: Arc<Mutex<bool>>,
     input_running: Arc<Mutex<bool>>,
     input_sender: Arc<Mutex<Option<tokio::sync::mpsc::Sender<AudioBuffer>>>>,
+    output_stream: Arc<Mutex<SendStream>>,
+    input_stream: Arc<Mutex<SendStream>>,
 }
 
 impl CpalBackend {
@@ -52,6 +91,8 @@ impl CpalBackend {
             running: Arc::new(Mutex::new(false)),
             input_running: Arc::new(Mutex::new(false)),
             input_sender: Arc::new(Mutex::new(None)),
+            output_stream: Arc::new(Mutex::new(SendStream(None))),
+            input_stream: Arc::new(Mutex::new(SendStream(None))),
         })
     }
 
@@ -64,6 +105,11 @@ impl CpalBackend {
             let is_default = host.default_input_device()
                 .map(|d| d.name().unwrap_or_default() == name)
                 .unwrap_or(false);
+            
+            // Filter out virtual/pseudo devices - only show real hardware
+            if !is_real_hardware_device(&name) {
+                continue;
+            }
             
             let mut sample_rates = Vec::new();
             let mut max_input_channels = 0;
@@ -89,6 +135,39 @@ impl CpalBackend {
                 max_output_channels: 0,
                 sample_rates,
             });
+        }
+        
+        // If no real hardware devices found, fall back to all devices
+        if devices.is_empty() {
+            for (index, device) in host.input_devices()?.enumerate() {
+                let name = device.name().unwrap_or_else(|_| format!("Unknown Input {}", index));
+                let is_default = host.default_input_device()
+                    .map(|d| d.name().unwrap_or_default() == name)
+                    .unwrap_or(false);
+                
+                let mut sample_rates = Vec::new();
+                let mut max_input_channels = 0;
+                if let Ok(configs) = device.supported_input_configs() {
+                    for config in configs {
+                        sample_rates.push(config.min_sample_rate().0);
+                        sample_rates.push(config.max_sample_rate().0);
+                    }
+                }
+                sample_rates.sort();
+                sample_rates.dedup();
+                
+                let id = format!("input_{}_{}", index, name.replace(' ', "_"));
+                
+                devices.push(AudioDeviceInfo {
+                    id,
+                    name,
+                    is_default_input: is_default,
+                    is_default_output: false,
+                    max_input_channels: 0,
+                    max_output_channels: 0,
+                    sample_rates,
+                });
+            }
         }
         
         Ok(devices)
@@ -135,7 +214,7 @@ impl CpalBackend {
 
 impl AudioBackend for CpalBackend {
     fn start(&self) -> Result<()> {
-        let running_lock = self.running.lock().unwrap();
+        let mut running_lock = self.running.lock().unwrap();
         if *running_lock {
             return Ok(());
         }
@@ -161,7 +240,8 @@ impl AudioBackend for CpalBackend {
         stream.play()?;
         *running.lock().unwrap() = true;
         
-        std::mem::forget(stream);
+        // Store the stream so we can stop it later
+        *self.output_stream.lock().unwrap() = SendStream::new(stream);
         
         Ok(())
     }
@@ -169,6 +249,11 @@ impl AudioBackend for CpalBackend {
     fn stop(&self) -> Result<()> {
         let mut running = self.running.lock().unwrap();
         *running = false;
+        
+        // Properly stop and drop the output stream
+        if let Some(stream) = self.output_stream.lock().unwrap().take() {
+            drop(stream);
+        }
         Ok(())
     }
 
@@ -188,7 +273,7 @@ impl AudioBackend for CpalBackend {
         self.list_output_devices()
     }
 
-    fn start_input_stream(&self, device_id: &str, _config: &StreamConfig, sender: Arc<Mutex<Option<tokio::sync::mpsc::Sender<AudioBuffer>>>>) -> Result<()> {
+    fn start_input_stream(&self, device_id: &str, config: &StreamConfig, sender: Arc<Mutex<Option<tokio::sync::mpsc::Sender<AudioBuffer>>>>) -> Result<()> {
         let mut input_running = self.input_running.lock().unwrap();
         if *input_running {
             return Ok(());
@@ -200,24 +285,25 @@ impl AudioBackend for CpalBackend {
             .find(|d| d.name().unwrap_or_default() == device_id)
             .ok_or_else(|| anyhow::anyhow!("Input device not found: {}", device_id))?;
 
-        let config = device.default_input_config()?;
-        let _sample_rate = config.sample_rate().0 as f32;
-        let _channels = config.channels();
+        let supported_config = device.default_input_config()?;
+        let _sample_rate = supported_config.sample_rate().0 as f32;
+        let _channels = supported_config.channels();
 
         let running = Arc::clone(&self.input_running);
         let sender_clone = Arc::clone(&sender);
 
-        let stream = match config.sample_format() {
-            SampleFormat::F32 => build_input_stream::<f32>(&device, &config.into(), &running, sender_clone)?,
-            SampleFormat::I16 => build_input_stream::<i16>(&device, &config.into(), &running, sender_clone)?,
-            SampleFormat::U16 => build_input_stream::<u16>(&device, &config.into(), &running, sender_clone)?,
+        let stream = match supported_config.sample_format() {
+            SampleFormat::F32 => build_input_stream::<f32>(&device, &supported_config.into(), &running, sender_clone)?,
+            SampleFormat::I16 => build_input_stream::<i16>(&device, &supported_config.into(), &running, sender_clone)?,
+            SampleFormat::U16 => build_input_stream::<u16>(&device, &supported_config.into(), &running, sender_clone)?,
             _ => return Err(anyhow::anyhow!("Unsupported sample format")),
         };
 
         stream.play()?;
         *running.lock().unwrap() = true;
         
-        std::mem::forget(stream);
+        // Store the stream so we can stop it later
+        *self.input_stream.lock().unwrap() = SendStream::new(stream);
         
         Ok(())
     }
@@ -225,6 +311,11 @@ impl AudioBackend for CpalBackend {
     fn stop_input_stream(&self) -> Result<()> {
         let mut running = self.input_running.lock().unwrap();
         *running = false;
+        
+        // Properly stop and drop the input stream
+        if let Some(stream) = self.input_stream.lock().unwrap().take() {
+            drop(stream);
+        }
         Ok(())
     }
 }
