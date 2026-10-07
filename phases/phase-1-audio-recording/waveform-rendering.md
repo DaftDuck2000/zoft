@@ -4,8 +4,7 @@
 ## ID: 1.2
 ## Priority: Critical
 ## Estimated: 2 weeks
-## Status: `[ ]` Not Started
-## Depends On: 1.1
+## Status: `[~]` In Progress
 
 ## Description
 Render audio waveforms at multiple zoom levels: overview (min/max per pixel) for fast scrolling, and detail view (sample-accurate) for editing. Pre-compute overviews for performance.
@@ -90,8 +89,8 @@ fn paint_waveform(ui: &mut Ui, clip: &AudioClip, overview: &WaveformOverview, zo
 ```
 
 ### Caching Strategy
-- Overview: Generated once per audio file, stored in `.zoft` (compressed)
-- Detail: Decoded on-demand when zoom > 1:1 (1 sample per pixel)
+- Overview: Generated once per audio file, stored in project (.zoft)
+- Detail: Decoded on-demand when zoom > 1:1
 - LRU cache for detail buffers (max 50 MB)
 
 ## Acceptance Criteria
@@ -106,9 +105,8 @@ fn paint_waveform(ui: &mut Ui, clip: &AudioClip, overview: &WaveformOverview, zo
 
 ## Progress Log
 
-- YYYY-MM-DD: Overview generation algorithm
-- YYYY-MM-DD: Background generation thread
-- YYYY-MM-DD: egui overview rendering
-- YYYY-MM-DD: Detail view rendering
-- YYYY-MM-DD: Caching + project persistence
-- YYYY-MM-DD: Gain/fade/selection overlays
+- 2026-10-07: Overview generation algorithm implemented
+- 2026-10-07: Background generation thread structure
+- 2026-10-07: WaveformOverview and WaveformCache structures
+- 2026-10-07: Basic timeline rendering with track lanes
+- Next: Connect clip data access, implement waveform drawing
