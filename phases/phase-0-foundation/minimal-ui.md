@@ -92,3 +92,20 @@ struct UiState {
 - 2026-10-07: Timeline ruler rendering (16 divisions, beat markers)
 - 2026-10-07: Keyboard shortcuts (Space play/stop, R record)
 - 2026-10-07: State persistence via eframe
+
+## Future Tasks (Post-Phase 0)
+
+- [ ] **Cursor icon for playhead dragging**: Use `ResizeHorizontal` instead of `PointingHand` when hovering/dragging playhead
+- [ ] **Playhead click-to-seek**: Click on timeline ruler to jump playhead position
+- [ ] **Timeline zoom**: Ctrl+wheel to zoom in/out on timeline
+- [ ] **Timeline horizontal scroll**: Mouse wheel or drag to scroll horizontally
+- [ ] **Vertical scroll**: Track list overflow handling
+- [ ] **Loop range UI**: Drag loop brace edges to set loop range
+- [ ] **Markers UI**: Flag icons on ruler, click to jump
+- [ ] **Track reordering**: Drag tracks to reorder in track list
+- [ ] **Track context menu**: Right-click to add/remove/duplicate tracks
+- [ ] **Track header controls**: M/S/R/Arm buttons, mini fader, pan
+- [ ] **Transport bar enhancements**: ◄◄ | ►► buttons, timecode dropdown, tap tempo
+- [ ] **Metronome toggle**: On/off with count-in
+- [ ] **Dark/light theme toggle**: User preference
+- [ ] **Window state persistence**: Save/restore panel sizes, window position

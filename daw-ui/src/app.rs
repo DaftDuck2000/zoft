@@ -45,6 +45,7 @@ struct AppUI {
     playing: bool,
     playhead_position: f32,  // 0.0 to 1.0
     last_playhead_update: std::time::Instant,
+    dragging_playhead: bool,
 }
 
 impl AppUI {
@@ -55,6 +56,7 @@ impl AppUI {
             playing: false,
             playhead_position: 0.0,
             last_playhead_update: std::time::Instant::now(),
+            dragging_playhead: false,
         }
     }
 }
@@ -69,20 +71,14 @@ impl eframe::App for AppUI {
             let elapsed = self.last_playhead_update.elapsed().as_secs_f32();
             self.playhead_position = (self.playhead_position + elapsed * 0.1) % 1.0;
             self.last_playhead_update = std::time::Instant::now();
-        } else {
-            self.playhead_position = 0.0;
         }
+        // When paused, playhead stays at current position
 
         // Top transport bar
         egui::TopBottomPanel::top("transport_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if ui.button(if self.playing { "⏸" } else { "▶" }).clicked() {
-                    self.playing = !self.playing;
-                    if self.playing {
-                        let _ = self.engine.start();
-                    } else {
-                        let _ = self.engine.stop();
-                    }
+                    self.toggle_playback();
                 }
                 ui.separator();
                 ui.label(format!("Project: {}", self.project.name));
@@ -130,26 +126,73 @@ impl eframe::App for AppUI {
                 ], egui::Stroke::new(1.0, egui::Color32::from_gray(60)));
             }
             
-            // Draw playhead
-            if self.playing || self.playhead_position > 0.0 {
-                let playhead_x = rect.left() + rect.width() * self.playhead_position;
-                painter.line_segment([
-                    egui::pos2(playhead_x, rect.top()),
-                    egui::pos2(playhead_x, rect.bottom()),
-                ], egui::Stroke::new(2.0, egui::Color32::RED));
-                
-                // Playhead triangle at top
-                let triangle_size = 8.0;
-                painter.add(egui::Shape::convex_polygon(
-                    vec![
-                        egui::pos2(playhead_x, rect.top()),
-                        egui::pos2(playhead_x - triangle_size, rect.top() + triangle_size),
-                        egui::pos2(playhead_x + triangle_size, rect.top() + triangle_size),
-                    ],
-                    egui::Color32::RED,
-                    egui::Stroke::NONE,
-                ));
+            // Playhead interaction area (entire ruler height)
+            let playhead_x = rect.left() + rect.width() * self.playhead_position.clamp(0.0, 1.0);
+            let playhead_rect = egui::Rect::from_min_max(
+                egui::pos2(playhead_x - 4.0, rect.top()),
+                egui::pos2(playhead_x + 4.0, rect.bottom()),
+            );
+            
+            // Handle playhead dragging
+            let response = ui.interact(playhead_rect, ui.id().with("playhead"), egui::Sense::drag());
+            if response.dragged() {
+                if !self.dragging_playhead {
+                    self.dragging_playhead = true;
+                    // Pause playback while dragging
+                    if self.playing {
+                        self.playing = false;
+                        let _ = self.engine.stop();
+                    }
+                }
+                let new_x = (response.drag_delta().x + playhead_x).clamp(rect.left(), rect.right());
+                self.playhead_position = ((new_x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+            } else if response.drag_stopped() {
+                self.dragging_playhead = false;
             }
+            
+            // Visual feedback for draggable playhead
+            if response.hovered() || self.dragging_playhead {
+                ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::ResizeHorizontal);
+            }
+            
+            // Show a simple timeline ruler
+            let rect = ui.available_rect_before_wrap();
+            let painter = ui.painter();
+            
+            // Draw ruler background
+            painter.rect_filled(rect, 0.0, egui::Color32::from_gray(30));
+            
+            // Draw beat markers
+            for i in 0..=16 {
+                let x = rect.left() + (rect.width() / 16.0) * i as f32;
+                painter.line_segment([
+                    egui::pos2(x, rect.top()),
+                    egui::pos2(x, rect.bottom()),
+                ], egui::Stroke::new(1.0, egui::Color32::from_gray(60)));
+            }
+            
+            // Draw playhead
+            let playhead_x = rect.left() + rect.width() * self.playhead_position.clamp(0.0, 1.0);
+            
+            // Playhead line
+            painter.line_segment([
+                egui::pos2(playhead_x, rect.top()),
+                egui::pos2(playhead_x, rect.bottom()),
+            ], egui::Stroke::new(2.0_f32, egui::Color32::RED));
+            
+            // Playhead triangle at top (pointing DOWN into timeline - standard DAW style)
+            let triangle_size = 8.0;
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    // Base at top (wider)
+                    egui::pos2(playhead_x - triangle_size, rect.top()),
+                    egui::pos2(playhead_x + triangle_size, rect.top()),
+                    // Apex pointing down
+                    egui::pos2(playhead_x, rect.top() + triangle_size),
+                ],
+                egui::Color32::RED,
+                egui::Stroke::NONE,
+            ));
         });
 
         // Bottom status bar
@@ -174,19 +217,12 @@ impl AppUI {
         
         // Only handle keyboard if no text input is focused
         if ctx.memory(|m| m.focused().is_none()) {
-            // Space: Play/Stop
+            // Space: Play/Pause (toggle) - resumes from current position
             if ctx.input(|i| i.key_pressed(Key::Space)) {
-                self.playing = !self.playing;
-                if self.playing {
-                    let _ = self.engine.start();
-                    self.last_playhead_update = std::time::Instant::now();
-                } else {
-                    let _ = self.engine.stop();
-                    self.playhead_position = 0.0;
-                }
+                self.toggle_playback();
             }
             
-            // Enter: Return to start
+            // Enter: Return to start (reset playhead to 0, stop)
             if ctx.input(|i| i.key_pressed(Key::Enter)) {
                 self.playhead_position = 0.0;
                 self.playing = false;
@@ -197,6 +233,17 @@ impl AppUI {
             if ctx.input(|i| i.key_pressed(Key::R)) {
                 // TODO: Implement record
             }
+        }
+    }
+    
+    fn toggle_playback(&mut self) {
+        self.playing = !self.playing;
+        if self.playing {
+            let _ = self.engine.start();
+            self.last_playhead_update = std::time::Instant::now();
+        } else {
+            let _ = self.engine.stop();
+            // Playhead stays at current position when paused
         }
     }
 }
