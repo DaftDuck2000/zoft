@@ -175,7 +175,10 @@ impl AudioEngine {
 
 impl Drop for AudioEngine {
     fn drop(&mut self) {
-        let _ = self.stop();
-        let _ = self.stop_recording();
+        // Use catch_unwind to prevent panic in destructor from causing abort
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = self.stop();
+            let _ = self.stop_recording();
+        }));
     }
 }

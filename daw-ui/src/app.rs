@@ -268,6 +268,35 @@ ui.separator();
                 egui::Color32::RED,
                 egui::Stroke::NONE,
             ));
+
+            // Playhead drag interaction
+            let playhead_rect = egui::Rect::from_min_max(
+                egui::pos2(playhead_x - 6.0, rect.top()),
+                egui::pos2(playhead_x + 6.0, rect.bottom()),
+            );
+            let response = ui.interact(playhead_rect, ui.id().with("playhead"), egui::Sense::drag());
+            if response.dragged() {
+                if !self.dragging_playhead {
+                    self.dragging_playhead = true;
+                    if self.playing {
+                        self.playing = false;
+                        let _ = self.engine.stop();
+                    }
+                }
+                let new_x = (response.drag_delta().x + playhead_x).clamp(rect.left(), rect.right());
+                self.playhead_position = ((new_x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+            } else if response.drag_stopped() {
+                self.dragging_playhead = false;
+            }
+            
+            // Visual feedback for draggable playhead
+            let playhead_interact_rect = egui::Rect::from_min_max(
+                egui::pos2(playhead_x - 6.0, rect.top()),
+                egui::pos2(playhead_x + 6.0, rect.bottom()),
+            );
+            if ui.rect_contains_pointer(playhead_interact_rect) || self.dragging_playhead {
+                ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::ResizeHorizontal);
+            }
         });
 
         // Bottom status bar

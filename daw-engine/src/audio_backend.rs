@@ -59,33 +59,33 @@ impl CpalBackend {
         let host = cpal::default_host();
         let mut devices = Vec::new();
         
-        for device in host.input_devices()? {
-            let name = device.name().unwrap_or_default();
-            let is_default = host.default_input_device().map(|d| d.name().unwrap_or_default() == name).unwrap_or(false);
+        for (index, device) in host.input_devices()?.enumerate() {
+            let name = device.name().unwrap_or_else(|_| format!("Unknown Input {}", index));
+            let is_default = host.default_input_device()
+                .map(|d| d.name().unwrap_or_default() == name)
+                .unwrap_or(false);
             
             let mut sample_rates = Vec::new();
+            let mut max_input_channels = 0;
             if let Ok(configs) = device.supported_input_configs() {
                 for config in configs {
                     sample_rates.push(config.min_sample_rate().0);
                     sample_rates.push(config.max_sample_rate().0);
+                    max_input_channels = max_input_channels.max(config.channels());
                 }
             }
             sample_rates.sort();
             sample_rates.dedup();
             
-            let max_input_channels = device
-                .supported_input_configs()
-                .ok()
-                .and_then(|configs| configs.max_by_key(|c| c.channels()))
-                .map(|c| c.channels() as u32)
-                .unwrap_or(0);
+            // Create a unique ID using index and name
+            let id = format!("input_{}_{}", index, name.replace(' ', "_"));
             
             devices.push(AudioDeviceInfo {
-                id: name.clone(),
+                id,
                 name,
                 is_default_input: is_default,
                 is_default_output: false,
-                max_input_channels,
+                max_input_channels: max_input_channels as u32,
                 max_output_channels: 0,
                 sample_rates,
             });
@@ -98,34 +98,33 @@ impl CpalBackend {
         let host = cpal::default_host();
         let mut devices = Vec::new();
         
-        for device in host.output_devices()? {
-            let name = device.name().unwrap_or_default();
-            let is_default = host.default_output_device().map(|d| d.name().unwrap_or_default() == name).unwrap_or(false);
+        for (index, device) in host.output_devices()?.enumerate() {
+            let name = device.name().unwrap_or_else(|_| format!("Unknown Output {}", index));
+            let is_default = host.default_output_device()
+                .map(|d| d.name().unwrap_or_default() == name)
+                .unwrap_or(false);
             
             let mut sample_rates = Vec::new();
+            let mut max_output_channels = 0;
             if let Ok(configs) = device.supported_output_configs() {
                 for config in configs {
                     sample_rates.push(config.min_sample_rate().0);
                     sample_rates.push(config.max_sample_rate().0);
+                    max_output_channels = max_output_channels.max(config.channels());
                 }
             }
             sample_rates.sort();
             sample_rates.dedup();
             
-            let max_output_channels = device
-                .supported_output_configs()
-                .ok()
-                .and_then(|configs| configs.max_by_key(|c| c.channels()))
-                .map(|c| c.channels() as u32)
-                .unwrap_or(0);
+            let id = format!("output_{}_{}", index, name.replace(' ', "_"));
             
             devices.push(AudioDeviceInfo {
-                id: name.clone(),
+                id,
                 name,
                 is_default_input: false,
                 is_default_output: is_default,
                 max_input_channels: 0,
-                max_output_channels,
+                max_output_channels: max_output_channels as u32,
                 sample_rates,
             });
         }
