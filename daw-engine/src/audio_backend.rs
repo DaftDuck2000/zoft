@@ -4,7 +4,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Sample, SampleFormat, SizedSample, Stream, StreamConfig};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc;
+use std::sync::mpsc;
 
 /// Wrapper to make cpal::Stream Send + Sync safe
 /// cpal::Stream contains a *mut () internally which is not Send/Sync
@@ -128,7 +128,7 @@ pub trait AudioBackend: Send + Sync {
     fn channels(&self) -> u16;
     fn input_devices(&self) -> Result<Vec<AudioDeviceInfo>>;
     fn output_devices(&self) -> Result<Vec<AudioDeviceInfo>>;
-    fn start_input_stream(&self, device_id: &str, config: &StreamConfig, sender: Arc<Mutex<Option<tokio::sync::mpsc::Sender<AudioBuffer>>>>) -> Result<()>;
+    fn start_input_stream(&self, device_id: &str, config: &StreamConfig, sender: Arc<Mutex<Option<mpsc::Sender<AudioBuffer>>>>) -> Result<()>;
     fn stop_input_stream(&self) -> Result<()>;
 }
 
@@ -148,7 +148,7 @@ pub struct CpalBackend {
     channels: u16,
     running: Arc<Mutex<bool>>,
     input_running: Arc<Mutex<bool>>,
-    input_sender: Arc<Mutex<Option<tokio::sync::mpsc::Sender<AudioBuffer>>>>,
+    input_sender: Arc<Mutex<Option<mpsc::Sender<AudioBuffer>>>>,
     output_stream: Arc<Mutex<SendStream>>,
     input_stream: Arc<Mutex<SendStream>>,
 }
@@ -354,7 +354,7 @@ impl AudioBackend for CpalBackend {
         self.list_output_devices()
     }
 
-    fn start_input_stream(&self, device_id: &str, config: &StreamConfig, sender: Arc<Mutex<Option<tokio::sync::mpsc::Sender<AudioBuffer>>>>) -> Result<()> {
+    fn start_input_stream(&self, device_id: &str, config: &StreamConfig, sender: Arc<Mutex<Option<mpsc::Sender<AudioBuffer>>>>) -> Result<()> {
         let mut input_running = self.input_running.lock().unwrap();
         if *input_running {
             return Ok(());
@@ -430,7 +430,7 @@ fn build_input_stream<T: Sample + SizedSample + Send + 'static + Default + num_t
     device: &cpal::Device,
     config: &StreamConfig,
     running: &Arc<Mutex<bool>>,
-    sender: Arc<Mutex<Option<tokio::sync::mpsc::Sender<AudioBuffer>>>>,
+    sender: Arc<Mutex<Option<mpsc::Sender<AudioBuffer>>>>,
 ) -> Result<Stream> {
     let err_fn = |err: cpal::StreamError| eprintln!("Audio input stream error: {}", err);
     let running = Arc::clone(running);
@@ -449,7 +449,7 @@ fn build_input_stream<T: Sample + SizedSample + Send + 'static + Default + num_t
                                 buffer.data[i] = val;
                             }
                         }
-                        let _ = tx.try_send(buffer);
+                        let _ = tx.send(buffer);
                     }
                 }
             }

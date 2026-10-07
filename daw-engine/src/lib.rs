@@ -26,7 +26,7 @@ use crate::audio_backend::AudioBackend;
 use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc;
+use std::sync::mpsc;
 
 pub struct AudioEngine {
     backend: Box<dyn AudioBackend>,
@@ -114,12 +114,12 @@ impl AudioEngine {
             metadata,
         )?;
 
-        let (tx, mut rx) = mpsc::channel::<AudioBuffer>(1024);
+        let (tx, rx) = mpsc::channel::<AudioBuffer>();
 
         // Spawn background writer task
         let mut writer = writer;
-        tokio::spawn(async move {
-            while let Some(buffer) = rx.recv().await {
+        std::thread::spawn(move || {
+            while let Ok(buffer) = rx.recv() {
                 if let Err(e) = writer.write_samples(&buffer.data) {
                     eprintln!("Recording write error: {}", e);
                     break;
@@ -164,7 +164,7 @@ impl AudioEngine {
     }
 
     pub fn stop_recording(&self) -> Result<()> {
-        let mut recording_guard = self.recording.lock().unwrap();
+        let mut recording_guard = self.recording.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(state) = recording_guard.take() {
             // Signal end of recording by dropping sender
             drop(state.sender);
