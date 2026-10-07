@@ -225,7 +225,8 @@ impl BwfWriter {
         
         // UMID (64 bytes)
         let mut umid = [0u8; 64];
-        umid.copy_from_slice(&metadata.umid);
+        let umid_len = metadata.umid.len().min(64);
+        umid[..umid_len].copy_from_slice(&metadata.umid[..umid_len]);
         chunk.extend_from_slice(&umid);
         
         // LoudnessValue (2 bytes) - not used
