@@ -165,6 +165,10 @@ impl AudioEngine {
         self.project_bit_depth = bit_depth;
         self.project_channels = channels;
     }
+
+    pub fn input_devices(&self) -> Result<Vec<crate::audio_backend::AudioDeviceInfo>> {
+        self.backend.input_devices()
+    }
 }
 
 impl Drop for AudioEngine {

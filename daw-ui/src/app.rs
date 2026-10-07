@@ -49,10 +49,13 @@ struct AppUI {
     playhead_position: f32,  // 0.0 to 1.0
     last_playhead_update: std::time::Instant,
     dragging_playhead: bool,
+    input_devices: Vec<daw_engine::audio_backend::AudioDeviceInfo>,
+    selected_input_device: Option<String>,
 }
 
 impl AppUI {
     fn new(project: Project, engine: AudioEngine) -> Self {
+        let input_devices = engine.input_devices().unwrap_or_default();
         Self {
             project,
             engine,
@@ -61,6 +64,8 @@ impl AppUI {
             playhead_position: 0.0,
             last_playhead_update: std::time::Instant::now(),
             dragging_playhead: false,
+            input_devices,
+            selected_input_device: None,
         }
     }
 }
@@ -95,10 +100,29 @@ impl eframe::App for AppUI {
                 
                 ui.separator();
                 ui.label(format!("Project: {}", self.project.name));
+ui.separator();
+            ui.label(format!("Sample Rate: {} Hz", self.project.sample_rate));
+            ui.separator();
+            
+            // Input device selector
+            if !self.input_devices.is_empty() {
                 ui.separator();
-                ui.label(format!("Sample Rate: {} Hz", self.project.sample_rate));
-                ui.separator();
-                ui.label(format!("Tracks: {}", self.project.track_order.len()));
+                ui.label("Input:");
+                egui::ComboBox::from_label("")
+                    .selected_text(self.selected_input_device.as_deref().unwrap_or("Default"))
+                    .show_ui(ui, |ui| {
+                        for device in &self.input_devices {
+                            let is_default = if device.is_default_input { " (default)" } else { "" };
+                            ui.selectable_value(
+                                &mut self.selected_input_device,
+                                Some(device.id.clone()),
+                                format!("{}{}", device.name, is_default)
+                            );
+                        }
+                    });
+            }
+            ui.separator();
+            ui.label(format!("Tracks: {}", self.project.track_order.len()));
             });
         });
 
