@@ -29,12 +29,30 @@ impl UdevDeviceEnumerator {
             return Some(cached.clone());
         }
 
-        let raw_name = device.property_value("ID_MODEL")
+        // Try multiple udev properties to get the best device name
+        let raw_name = device.property_value("ID_MODEL_FROM_DATABASE")
+            .or_else(|| device.property_value("ID_MODEL"))
             .or_else(|| device.property_value("ID_MODEL_ID"))
+            .or_else(|| device.property_value("ID_VENDOR_FROM_DATABASE"))
             .or_else(|| device.property_value("ID_VENDOR"))
+            .or_else(|| device.property_value("ID_VENDOR_ID"))
+            .or_else(|| device.property_value("ID_MODEL_ID"))
+            .or_else(|| device.property_value("ID_PATH"))
+            .or_else(|| device.property_value("ID_PATH_TAG"))
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string())
             .unwrap_or_else(|| "Unknown Device".to_string());
+
+        // Also get vendor info from database
+        let vendor_name = device.property_value("ID_VENDOR_FROM_DATABASE")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        let raw_name = if let Some(vendor) = vendor_name {
+            format!("{} {}", vendor, raw_name)
+        } else {
+            raw_name
+        };
 
         let cleaned_name = clean_device_name(&raw_name);
         
@@ -42,6 +60,14 @@ impl UdevDeviceEnumerator {
         let subsystem = device.subsystem().to_string_lossy().to_string();
         let is_input = subsystem == "sound" && device.property_value("ID_USB_INTERFACE_NUM").is_some();
         let is_output = subsystem == "sound" && device.property_value("ID_USB_INTERFACE_NUM").is_none();
+        
+        // Get channel info from device properties
+        let max_input_channels = device.property_value("ID_USB_INTERFACE_NUM")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(if device.property_value("ID_USB_INTERFACE_NUM").is_some() { 2 } else { 0 });
+            
+        let max_output_channels = if device.property_value("ID_USB_INTERFACE_NUM").is_none() { 2 } else { 0 };
 
         let device_info = AudioDeviceInfo {
             id: format!("udev_{}", device.syspath().to_string_lossy().replace('/', "_")),
@@ -95,6 +121,23 @@ impl UdevDeviceEnumerator {
             }
         }
         
+        // Also check for output-specific devices
+        let mut enumerator2 = libudev::Enumerator::new()?;
+        enumerator2.match_subsystem("sound")?;
+        enumerator2.match_property("ID_TYPE", "audio")?;
+        enumerator2.match_property("ID_USB_INTERFACE_NUM", "")?;
+        
+        for device in enumerator2.scan_devices()? {
+            if let Some(info) = self.query_device_info(&device) {
+                if info.max_output_channels > 0 {
+                    // Check if we already have this device
+                    if !devices.iter().any(|d| d.raw_name == info.raw_name) {
+                        devices.push(info);
+                    }
+                }
+            }
+        }
+        
         Ok(devices)
     }
 }
@@ -102,49 +145,6 @@ impl UdevDeviceEnumerator {
 /// Clean up device name to be more user-friendly
 fn clean_device_name(name: &str) -> String {
     let name = name.trim();
-    
-    // Remove common prefixes/suffixes
-    let name = name
-        .replace("surround", "")
-        .replace("stereo", "")
-        .replace("multichannel", "")
-        .replace("iec958", "")
-        .replace("iec", "")
-        .replace("spdif", "")
-        .replace("digital", "")
-        .replace("hdmi", "")
-        .replace("displayport", "")
-        .replace("dp", "")
-        .replace("analog", "")
-        .replace("analog-output", "")
-        .replace("analog-input", "")
-        .replace("headphone", "")
-        .replace("speaker", "")
-        .replace("line", "")
-        .replace("mic", "")
-        .replace("microphone", "")
-        .replace("input", "")
-        .replace("output", "")
-        .replace("device", "")
-        .replace("card", "")
-        .replace("dev", "")
-        .replace("hw:", "")
-        .replace("plughw:", "")
-        .replace("default", "")
-        .replace("default:", "")
-        .replace("sysdefault", "")
-        .replace("front", "")
-        .replace("rear", "")
-        .replace("center", "")
-        .replace("lfe", "")
-        .replace("side", "")
-        .replace("unknown", "")
-        .replace("generic", "")
-        .replace("audio", "")
-        .replace("sound", "")
-        .replace("codec", "")
-        .replace("dac", "")
-        .replace("adc", "");
     
     // Remove ALSA-style identifiers like CARD=Generic_1,DEV=0
     let name = regex::Regex::new(r"(CARD|DEV|SUBDEV)=\w+")

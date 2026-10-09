@@ -386,13 +386,28 @@ impl AudioBackend for CpalBackend {
             .ok_or_else(|| anyhow::anyhow!("Input device not found: {} (available: {:?})", device_id, devices.iter().map(|d| &d.id).collect::<Vec<_>>()))?;
         
         let host = cpal::default_host();
-        let device = {
-            let cpal_devices: Vec<_> = host.input_devices()?.collect();
-            let available: Vec<_> = cpal_devices.iter().map(|d| d.name().unwrap_or_default()).collect();
-            cpal_devices.into_iter()
-                .find(|d| d.name().unwrap_or_default() == device_info.raw_name)
-                .ok_or_else(|| anyhow::anyhow!("Input device not found (raw_name: {}), available: {:?}", device_info.raw_name, available))?
-        };
+        
+let cpal_devices: Vec<_> = host.input_devices()?.collect();
+
+        // Try multiple matching strategies
+        let cpal_device = cpal_devices.into_iter()
+            // First try exact match on raw_name
+            .find(|d| d.name().unwrap_or_default() == device_info.raw_name)
+            // Fallback: try matching by cleaned name
+            .or_else(|| {
+                let cpal_devices2: Vec<_> = host.input_devices().ok()?.collect();
+                cpal_devices2.into_iter().find(|d| {
+                    let cpal_name = d.name().unwrap_or_default();
+                    let cleaned_cpal = clean_device_name(&cpal_name);
+                    cleaned_cpal == device_info.name
+                })
+            })
+.ok_or_else(|| {
+                        let available: Vec<_> = host.input_devices().ok().into_iter().flat_map(|d| d.map(|d| d.name().unwrap_or_default())).collect();
+                        anyhow::anyhow!("Input device not found (raw_name: {}), available: {:?}", device_info.raw_name, available)
+                    })?;
+        
+        let device = cpal_device;
 
         // Get the device's supported configs and find one matching our requirements
         let supported_configs: Vec<_> = device.supported_input_configs()?
@@ -433,7 +448,7 @@ impl AudioBackend for CpalBackend {
         Ok(())
     }
 
-    fn stop_input_stream(&self) -> Result<()> {
+fn stop_input_stream(&self) -> Result<()> {
         let mut running = self.input_running.lock().unwrap();
         *running = false;
         
