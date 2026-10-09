@@ -8,6 +8,10 @@ description = "Audio engine, DSP, transport, graph processing for Zoft DAW"
 categories = { workspace = true }
 keywords = { workspace = true }
 
+[features]
+default = []
+pipewire-support = ["pipewire", "spa", "libudev"]
+
 [dependencies]
 daw-core = { path = "../daw-core" }
 anyhow = { workspace = true }
@@ -24,6 +28,11 @@ tokio = { workspace = true }
 # Audio backends
 cpal = { workspace = true }
 # pipewire = { workspace = true }  # Compatibility issues with spa crate
+
+# Device enumeration
+libudev = { workspace = true, optional = true, features = [] }
+pipewire = { workspace = true, optional = true }
+spa = { version = "0.5", optional = true }
 
 # MIDI
 midir = { workspace = true }

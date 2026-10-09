@@ -36,6 +36,10 @@
 
 **Goal**: Record, edit, and manipulate audio clips non-destructively
 
+## Phase 1: Audio Recording & Editing (Months 4-8)
+
+**Goal**: Record, edit, and manipulate audio clips non-destructively
+
 ### Phase 1 Features
 
 | ID | Feature | Status | Est. | Actual | Notes |
@@ -45,6 +49,7 @@
 | 1.3 | Non-Destructive Clip Editing | `[ ]` | 3w | | Split, trim, move, fade |
 | 1.4 | Clip Processing | `[ ]` | 2w | | Gain, pitch, stretch, reverse |
 | 1.5 | Undo/Redo System | `[ ]` | 1w | | Command pattern, snapshots |
+| 1.6 | Audio Device Enumeration | `[~]` | 2w | | libudev + optional PipeWire |
 
 ---
 

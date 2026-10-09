@@ -8,6 +8,10 @@ description = "Zoft DAW main application"
 categories = { workspace = true }
 keywords = { workspace = true }
 
+[features]
+default = []
+pipewire = ["daw-engine/pipewire-support"]
+
 [dependencies]
 daw-core = { path = "../daw-core" }
 daw-engine = { path = "../daw-engine" }
