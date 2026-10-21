@@ -70,8 +70,10 @@
 **1.4 Clip Processing** - `[~]` In Progress
 - Peak Normalize (to −1 dBFS) in the clip inspector and right-click Process menu; implemented as a gain edit and fully undoable
 - Reverse renders the clip's visible audio backwards to a new `*_reverse_<uuid>.wav` (original file untouched) and repoints the clip; undoable
-- Right-click a clip for the Process menu (Normalize / Reverse)
-- Reverse regenerates the waveform overview in the background; stale overviews from a replaced file are ignored
-- Not yet: pitch shift, time stretch, fade rendering, consolidate, bounce in place, LUFS normalize
+- Pitch shift (±12 semitones) and time stretch (0.5×–2.0×) rendered through Rubber Band R3, with optional formant preservation; clip length follows the rendered audio and undo restores the original source
+- Right-click a clip for the Process menu (Normalize / Reverse); processing controls live in the clip inspector
+- Rendered files regenerate their waveform overview in the background; stale overviews from a replaced file are ignored
+- Note: pitch/time rendering requires the `rubberband` binary in `PATH`
+- Not yet: stretch mode presets, fade rendering, consolidate, bounce in place, LUFS normalize
 
 **1.5 Undo/Redo** - Not started (basic undo/redo already available in the arrange view)

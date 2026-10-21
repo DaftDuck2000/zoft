@@ -13,8 +13,9 @@ Offline clip processing: gain, pitch shift, time stretch, reverse, normalize. No
 ## Requirements
 
 - [ ] Clip gain: Apply gain to create new rendered file
-- [ ] Pitch shift: Semitone + fine tune, formant preservation option
-- [ ] Time stretch: Multiple algorithms (tape, elastic, musical)
+- [x] Pitch shift: Semitone slider with optional formant preservation (Rubber Band R3)
+- [x] Time stretch: 0.5×–2.0× via Rubber Band R3
+- [ ] Time-stretch modes: tape / elastic / musical presets
 - [x] Reverse: Render the clip backwards to a new file (original preserved)
 - [x] Normalize: Peak to −1 dBFS, per clip
 - [ ] Fade in/out render: Bake fades into new file
@@ -37,6 +38,14 @@ Offline clip processing: gain, pitch shift, time stretch, reverse, normalize. No
   previous `AudioFileRef`, offset and length via a `Source` undo entry. A fresh
   waveform overview is generated in the background; results for a replaced path
   are discarded.
+- **Pitch shift / time stretch**: the clip inspector exposes a pitch slider
+  (−12…+12 semitones), a stretch slider (0.5×–2.0×) and a formant-preservation
+  toggle. Rendering writes the visible source range to a temporary 32-bit float
+  WAV, runs `rubberband --fine --pitch <st> --time <ratio> [--formant]`, and
+  points the clip at a new `<name>_process_<uuid>.wav`. The clip length follows
+  the rendered duration, fades are clamped to it, and undo restores the previous
+  source, offset, length and fades via a `Source` entry. Controls reset after a
+  successful render. Rubber Band must be available in `PATH`.
 - **Process menu**: right-click a clip in the arrange view. The same actions
   are available in the clip inspector.
 
@@ -71,11 +80,12 @@ enum NormalizeMode {
 ```
 
 ### Implementation: Rubber Band Library
-- Use `rubberband` CLI via `std::process::Command` for Phase 1
+- Use `rubberband` CLI via `std::process::Command` for Phase 1 (implemented in
+  fine/R3 mode with optional formant preservation)
 - Later: Port to Rust or use `rubberband-sys` FFI
 - Input: Source file + clip parameters (offset, length, gain, fades)
-- Output: New WAV file in project audio folder
-- Update clip: `source = new_file`, `source_offset = 0`, `gain = 1.0`
+- Output: New WAV file next to the source; clip points at it
+- Update clip: `source = new_file`, `source_offset = 0`, `length = rendered frames`; fades are kept (and clamped if the clip becomes shorter)
 
 ### Consolidation
 - Adjacent clips on same track, same source file → single clip
@@ -102,6 +112,7 @@ enum NormalizeMode {
 
 - 2026-10-21: Peak normalize to −1 dBFS (exact per-channel peak over the clip range, gain edit, undoable)
 - 2026-10-21: Reverse rendered to a new WAV per clip (channel-safe frame reversal, undo via source state); repeated reverses reuse a stable base filename
+- 2026-10-21: Pitch shift (±12 st) and time stretch (0.5×–2.0×) via Rubber Band R3, with optional formant preservation and undoable source replacement
 - 2026-10-21: Snap grid defaults to Beat
 - 2026-10-21: Right-click Process menu in the arrange view
-- Remaining: pitch shift, time stretch, fade rendering, consolidate, bounce in place, LUFS normalize
+- Remaining: listening tests for pitch/time, stretch mode presets, fade rendering, consolidate, bounce in place, LUFS normalize

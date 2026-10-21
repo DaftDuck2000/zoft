@@ -207,6 +207,8 @@ struct ClipSourceState {
     source: AudioFileRef,
     source_offset: u64,
     length: u64,
+    fade_in: Option<Fade>,
+    fade_out: Option<Fade>,
 }
 
 impl ClipSourceState {
@@ -215,6 +217,8 @@ impl ClipSourceState {
             source: clip.source.clone(),
             source_offset: clip.source_offset,
             length: clip.length,
+            fade_in: clip.fade_in,
+            fade_out: clip.fade_out,
         }
     }
 
@@ -222,6 +226,8 @@ impl ClipSourceState {
         clip.source = self.source.clone();
         clip.source_offset = self.source_offset;
         clip.length = self.length;
+        clip.fade_in = self.fade_in;
+        clip.fade_out = self.fade_out;
     }
 }
 
@@ -356,6 +362,11 @@ struct AppUI {
     /// Deferred mixer refresh for edits made while a pointer gesture is active.
     needs_audio_refresh: bool,
 
+    // Offline clip-processing controls
+    process_pitch: f32,
+    process_stretch: f32,
+    process_formants: bool,
+
     // Waveform overview generation
     waveform_tx: mpsc::Sender<(ClipId, PathBuf, Result<WaveformOverview>)>,
     waveform_rx: mpsc::Receiver<(ClipId, PathBuf, Result<WaveformOverview>)>,
@@ -397,6 +408,9 @@ impl AppUI {
             redo_stack: Vec::new(),
             merge_chain: false,
             needs_audio_refresh: false,
+            process_pitch: 0.0,
+            process_stretch: 1.0,
+            process_formants: true,
             waveform_tx,
             waveform_rx,
             detail_cache: DetailCache::default(),
@@ -1286,6 +1300,8 @@ impl AppUI {
             source: new_source,
             source_offset: 0,
             length: frame_count as u64,
+            fade_in: from.fade_in,
+            fade_out: from.fade_out,
         };
         if let Some(clip) = self.project.audio_clips.get_mut(clip_id) {
             to.apply(clip);
@@ -1295,6 +1311,121 @@ impl AppUI {
         self.refresh_playback_if_playing();
         // The rendered file has no cached waveform yet.
         self.spawn_overview(clip_id, new_path);
+    }
+
+    /// Render a pitch shift and/or time stretch to a new WAV and point the clip
+    /// at it. The original file is untouched and the edit is undoable.
+    fn apply_pitch_stretch(
+        &mut self,
+        clip_id: ClipId,
+        semitones: f32,
+        stretch: f32,
+        preserve_formants: bool,
+    ) {
+        let semitones = semitones.clamp(-24.0, 24.0);
+        let stretch = stretch.clamp(0.25, 4.0);
+        let pitch_active = semitones.abs() >= 0.05;
+        let stretch_active = (stretch - 1.0).abs() >= 0.005;
+        if !pitch_active && !stretch_active {
+            return;
+        }
+
+        let Some(clip) = self.project.audio_clips.get(clip_id) else {
+            return;
+        };
+        if clip.locked || clip.length == 0 {
+            return;
+        }
+
+        let from = ClipSourceState::of(clip);
+        let source_path = clip.source.path.clone();
+        let source_offset = clip.source_offset;
+        let source_length = clip.length;
+
+        let parent = source_path.parent().unwrap_or_else(|| Path::new(""));
+        let render_id = uuid::Uuid::new_v4();
+        let temp_path = parent.join(format!(".zoft_process_{}.wav", render_id));
+        let output_path = parent.join(format!(
+            "{}_process_{}.wav",
+            processed_file_stem(&source_path),
+            render_id
+        ));
+
+        if let Err(e) = write_wav_range(&source_path, source_offset, source_length, &temp_path)
+        {
+            let _ = std::fs::remove_file(&temp_path);
+            self.error_message = Some(format!("Could not prepare clip audio: {}", e));
+            return;
+        }
+
+        let render = render_pitch_stretch(
+            &temp_path,
+            &output_path,
+            semitones,
+            stretch,
+            preserve_formants,
+        );
+        let _ = std::fs::remove_file(&temp_path);
+        if let Err(e) = render {
+            let _ = std::fs::remove_file(&output_path);
+            self.error_message = Some(format!(
+                "Pitch/time processing failed: {}. Is rubberband installed?",
+                e
+            ));
+            return;
+        }
+
+        let (frames, spec) = match wav_file_info(&output_path) {
+            Ok(info) => info,
+            Err(e) => {
+                let _ = std::fs::remove_file(&output_path);
+                self.error_message = Some(format!("Could not read processed audio: {}", e));
+                return;
+            }
+        };
+        if frames == 0 {
+            let _ = std::fs::remove_file(&output_path);
+            self.error_message = Some("Processed audio is empty.".to_string());
+            return;
+        }
+
+        // Keep fade lengths within the rendered clip, which may be shorter
+        // after a 0.5x–1.0x stretch.
+        let mut fade_in = from.fade_in;
+        if let Some(fade) = &mut fade_in {
+            fade.length = fade.length.min(frames);
+        }
+        let mut fade_out = from.fade_out;
+        if let Some(fade) = &mut fade_out {
+            fade.length = fade.length.min(frames);
+        }
+
+        let new_source = AudioFileRef::new(
+            output_path.clone(),
+            frames,
+            spec.sample_rate,
+            spec.channels,
+            bit_depth_from_spec(spec),
+        );
+        let to = ClipSourceState {
+            source: new_source,
+            source_offset: 0,
+            length: frames,
+            fade_in,
+            fade_out,
+        };
+        if let Some(clip) = self.project.audio_clips.get_mut(clip_id) {
+            to.apply(clip);
+        }
+        self.push_undo(EditAction::Source { clip_id, from, to }, false);
+        self.error_message = None;
+        self.after_edit();
+        self.refresh_playback_if_playing();
+        self.spawn_overview(clip_id, output_path);
+
+        // The controls are baked into the rendered file now.
+        self.process_pitch = 0.0;
+        self.process_stretch = 1.0;
     }
 
     fn copy_selected_clip(&mut self) {
@@ -1381,8 +1512,8 @@ impl AppUI {
         self.refresh_playback_if_playing();
     }
 
-    /// Clip inspector in the arrange toolbar: gain, fades, color. Every change
-    /// is recorded for undo.
+    /// Clip inspector in the arrange toolbar: gain, processing, fades and
+    /// color. Every change is recorded for undo.
     fn clip_properties_ui(&mut self, ui: &mut egui::Ui) {
         let Some(clip_id) = self.selected_clip else {
             return;
@@ -1395,6 +1526,7 @@ impl AppUI {
         let mut after = before;
         let mut normalize_clicked = false;
         let mut reverse_clicked = false;
+        let mut apply_processing = false;
         let name = clip
             .source
             .path
@@ -1435,6 +1567,31 @@ impl AppUI {
                 reverse_clicked = true;
             }
         });
+        ui.separator();
+
+        // Pitch shift and time stretch are rendered offline into a new file.
+        ui.label("Pitch:");
+        ui.add(
+            egui::Slider::new(&mut self.process_pitch, -12.0..=12.0)
+                .suffix(" st")
+                .max_decimals(2),
+        );
+        ui.label("Stretch:");
+        ui.add(
+            egui::Slider::new(&mut self.process_stretch, 0.5..=2.0)
+                .suffix("×")
+                .max_decimals(2),
+        );
+        ui.checkbox(&mut self.process_formants, "Formants");
+        if ui
+            .button("Render")
+            .on_hover_text(
+                "Render pitch shift / time stretch to a new file (original audio is kept)",
+            )
+            .clicked()
+        {
+            apply_processing = true;
+        }
         ui.separator();
 
         // Fades: curve + length, editable numerically as well as by dragging
@@ -1496,6 +1653,12 @@ impl AppUI {
         }
         if reverse_clicked {
             self.reverse_clip(clip_id);
+        }
+        let pitch = self.process_pitch;
+        let stretch = self.process_stretch;
+        let formants = self.process_formants;
+        if apply_processing {
+            self.apply_pitch_stretch(clip_id, pitch, stretch, formants);
         }
     }
 }
@@ -2633,16 +2796,13 @@ impl AppUI {
     }
 
     fn create_audio_clip(&mut self, track_id: TrackId, file_path: PathBuf, start_sample: u64) {
-        let reader = match hound::WavReader::open(&file_path) {
-            Ok(reader) => reader,
+        let (duration_samples, spec) = match wav_file_info(&file_path) {
+            Ok(info) => info,
             Err(e) => {
                 self.error_message = Some(format!("Failed to open recorded file: {}", e));
                 return;
             }
         };
-        let spec = reader.spec();
-        let duration_samples = reader.duration() as u64;
-        drop(reader);
 
         if duration_samples == 0 {
             self.error_message = Some(format!(
@@ -2652,13 +2812,7 @@ impl AppUI {
             return;
         }
 
-        let bit_depth = match spec.bits_per_sample {
-            16 => BitDepth::Int16,
-            24 => BitDepth::Int24,
-            32 if spec.sample_format == hound::SampleFormat::Float => BitDepth::Float32,
-            32 => BitDepth::Int32,
-            _ => BitDepth::Float32,
-        };
+        let bit_depth = bit_depth_from_spec(spec);
 
         // Overview is generated in the background so the UI never blocks on I/O.
         let file_ref = AudioFileRef::new(
@@ -3071,13 +3225,7 @@ fn read_mono_window(
             }
         }
         hound::SampleFormat::Int => {
-            let scale = match spec.bits_per_sample {
-                8 => 1.0 / 128.0,
-                16 => 1.0 / 32_768.0,
-                24 => 1.0 / 8_388_608.0,
-                32 => 1.0 / 2_147_483_648.0,
-                _ => 1.0 / 32_768.0,
-            };
+            let scale = pcm_scale(spec.bits_per_sample);
             let mut samples = reader.samples::<i32>();
             'frames: for _ in 0..frames {
                 let mut sum = 0.0f32;
@@ -3181,6 +3329,122 @@ fn reverse_interleaved(samples: &[f32], channels: usize) -> Vec<f32> {
     reversed
 }
 
+/// Convert integer PCM samples at the given bit depth to [-1, 1] floats.
+fn pcm_scale(bits: u16) -> f32 {
+    match bits {
+        8 => 1.0 / 128.0,
+        16 => 1.0 / 32_768.0,
+        24 => 1.0 / 8_388_608.0,
+        32 => 1.0 / 2_147_483_648.0,
+        _ => 1.0 / 32_768.0,
+    }
+}
+
+/// Map a WAV format to the project's bit-depth enum.
+fn bit_depth_from_spec(spec: hound::WavSpec) -> BitDepth {
+    match spec.bits_per_sample {
+        16 => BitDepth::Int16,
+        24 => BitDepth::Int24,
+        32 if spec.sample_format == hound::SampleFormat::Float => BitDepth::Float32,
+        32 => BitDepth::Int32,
+        _ => BitDepth::Float32,
+    }
+}
+
+/// Read only a WAV header: duration in frames and format.
+fn wav_file_info(path: &Path) -> Result<(u64, hound::WavSpec)> {
+    let reader = hound::WavReader::open(path)?;
+    let spec = reader.spec();
+    Ok((reader.duration() as u64, spec))
+}
+
+/// Write a frame range from a WAV to a new 32-bit float WAV, converting
+/// integer PCM as needed. Only the requested range is read from the source.
+fn write_wav_range(
+    source_path: &Path,
+    first_frame: u64,
+    frames: u64,
+    dest: &Path,
+) -> Result<()> {
+    let mut reader = hound::WavReader::open(source_path)?;
+    let spec = reader.spec();
+    let total_frames = reader.duration() as u64;
+    let first = first_frame.min(total_frames);
+    let frames = frames.min(total_frames - first);
+    if frames == 0 {
+        anyhow::bail!("no audio in the selected range");
+    }
+    reader.seek(first as u32)?;
+
+    let channels = spec.channels.max(1);
+    let out_spec = hound::WavSpec {
+        channels,
+        sample_rate: spec.sample_rate,
+        bits_per_sample: 32,
+        sample_format: hound::SampleFormat::Float,
+    };
+    let mut writer = hound::WavWriter::create(dest, out_spec)?;
+    let sample_count = (frames * channels as u64) as usize;
+
+    match spec.sample_format {
+        hound::SampleFormat::Float => {
+            for sample in reader.samples::<f32>().take(sample_count) {
+                writer.write_sample(sample?)?;
+            }
+        }
+        hound::SampleFormat::Int => {
+            let scale = pcm_scale(spec.bits_per_sample);
+            for sample in reader.samples::<i32>().take(sample_count) {
+                writer.write_sample(sample? as f32 * scale)?;
+            }
+        }
+    }
+
+    writer.finalize()?;
+    Ok(())
+}
+
+/// Run Rubber Band in fine (R3) mode to pitch-shift and/or time-stretch a WAV.
+fn render_pitch_stretch(
+    input: &Path,
+    output: &Path,
+    semitones: f32,
+    stretch: f32,
+    preserve_formants: bool,
+) -> Result<()> {
+    let pitch_active = semitones.abs() >= 0.05;
+    let stretch_active = (stretch - 1.0).abs() >= 0.005;
+    if !pitch_active && !stretch_active {
+        anyhow::bail!("no pitch or time change requested");
+    }
+
+    let mut command = std::process::Command::new("rubberband");
+    command.arg("--quiet").arg("--fine");
+    if pitch_active {
+        command.arg("--pitch").arg(format!("{:.4}", semitones));
+        if preserve_formants {
+            command.arg("--formant");
+        }
+    }
+    if stretch_active {
+        command.arg("--time").arg(format!("{:.6}", stretch));
+    }
+    command.arg(input).arg(output);
+
+    let result = command
+        .output()
+        .map_err(|e| anyhow::anyhow!("could not run rubberband: {}", e))?;
+    if !result.status.success() {
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        let message = stderr.trim();
+        if message.is_empty() {
+            anyhow::bail!("rubberband exited with {}", result.status);
+        }
+        anyhow::bail!("rubberband: {}", message);
+    }
+    Ok(())
+}
+
 /// Peak absolute sample of a WAV frame range, without loading the whole file.
 fn wav_peak(path: &Path, first_frame: u64, frames: u64) -> Result<f32> {
     let mut reader = hound::WavReader::open(path)?;
@@ -3194,13 +3458,7 @@ fn wav_peak(path: &Path, first_frame: u64, frames: u64) -> Result<f32> {
     }
     reader.seek(first.min(u32::MAX as u64) as u32)?;
 
-    let scale = match spec.bits_per_sample {
-        8 => 1.0 / 128.0,
-        16 => 1.0 / 32_768.0,
-        24 => 1.0 / 8_388_608.0,
-        32 => 1.0 / 2_147_483_648.0,
-        _ => 1.0 / 32_768.0,
-    };
+    let scale = pcm_scale(spec.bits_per_sample);
     let sample_count = (frames * channels) as usize;
     let mut peak = 0.0f32;
 
@@ -3231,13 +3489,7 @@ fn load_wav_interleaved(path: &Path) -> Result<(Vec<f32>, u16, u32)> {
             .samples::<f32>()
             .collect::<std::result::Result<Vec<_>, _>>()?,
         hound::SampleFormat::Int => {
-            let scale = match spec.bits_per_sample {
-                8 => 1.0 / 128.0,
-                16 => 1.0 / 32_768.0,
-                24 => 1.0 / 8_388_608.0,
-                32 => 1.0 / 2_147_483_648.0,
-                _ => 1.0 / 32_768.0,
-            };
+            let scale = pcm_scale(spec.bits_per_sample);
             reader
                 .samples::<i32>()
                 .filter_map(std::result::Result::ok)
@@ -3251,7 +3503,13 @@ fn load_wav_interleaved(path: &Path) -> Result<(Vec<f32>, u16, u32)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{processed_file_stem, reverse_interleaved, wav_peak};
+    use super::{
+        load_wav_interleaved, processed_file_stem, render_pitch_stretch, reverse_interleaved,
+        wav_file_info, wav_peak, write_wav_range, ClipSourceState,
+    };
+    use daw_core::audio_pool::AudioFileRef;
+    use daw_core::clip::{AudioClip, Fade, FadeCurve, TimelinePos};
+    use daw_core::project::BitDepth;
 
     #[test]
     fn processed_stem_strips_generated_suffixes() {
@@ -3281,6 +3539,127 @@ mod tests {
         let input = [1.0, 10.0, 2.0, 20.0, 9.0];
         let reversed = reverse_interleaved(&input, 2);
         assert_eq!(reversed, vec![2.0, 20.0, 1.0, 10.0]);
+    }
+
+    #[test]
+    fn source_state_restores_length_and_fades() {
+        let source = AudioFileRef::new(
+            std::path::PathBuf::from("source.wav"),
+            1_000,
+            48_000,
+            2,
+            BitDepth::Float32,
+        );
+        let mut clip = AudioClip::new(
+            source,
+            TimelinePos::from_sample(0, 48_000.0, 120.0),
+            1_000,
+        );
+        clip.source_offset = 25;
+        clip.fade_in = Some(Fade::new(120, FadeCurve::Linear));
+
+        let before = ClipSourceState::of(&clip);
+        clip.source_offset = 0;
+        clip.length = 500;
+        clip.fade_in = Some(Fade::new(50, FadeCurve::Exponential));
+        let after = ClipSourceState::of(&clip);
+
+        after.apply(&mut clip);
+        assert_eq!(clip.source_offset, 0);
+        assert_eq!(clip.length, 500);
+        assert_eq!(clip.fade_in.unwrap().length, 50);
+
+        before.apply(&mut clip);
+        assert_eq!(clip.source_offset, 25);
+        assert_eq!(clip.length, 1_000);
+        assert_eq!(clip.fade_in.unwrap().length, 120);
+    }
+
+    #[test]
+    fn write_wav_range_extracts_selected_frames() {
+        let input = std::env::temp_dir().join(format!(
+            "zoft_range_in_{}.wav",
+            uuid::Uuid::new_v4()
+        ));
+        let output = std::env::temp_dir().join(format!(
+            "zoft_range_out_{}.wav",
+            uuid::Uuid::new_v4()
+        ));
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: 48_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(&input, spec).unwrap();
+        for frame in [[0.25f32, -0.25], [0.5, -0.5], [-0.75, 0.75]] {
+            writer
+                .write_sample((frame[0] * 32_767.0) as i16)
+                .unwrap();
+            writer
+                .write_sample((frame[1] * 32_767.0) as i16)
+                .unwrap();
+        }
+        writer.finalize().unwrap();
+
+        write_wav_range(&input, 1, 2, &output).unwrap();
+        let (frames, out_spec) = wav_file_info(&output).unwrap();
+        assert_eq!(frames, 2);
+        assert_eq!(out_spec.channels, 2);
+        assert_eq!(out_spec.sample_rate, 48_000);
+        assert_eq!(out_spec.bits_per_sample, 32);
+        assert_eq!(out_spec.sample_format, hound::SampleFormat::Float);
+
+        let (samples, _, _) = load_wav_interleaved(&output).unwrap();
+        assert_eq!(samples.len(), 4);
+        assert!((samples[0] - 0.5).abs() < 1e-3);
+        assert!((samples[1] + 0.5).abs() < 1e-3);
+        assert!((samples[2] + 0.75).abs() < 1e-3);
+        assert!((samples[3] - 0.75).abs() < 1e-3);
+
+        std::fs::remove_file(input).ok();
+        std::fs::remove_file(output).ok();
+    }
+
+    #[test]
+    fn rubberband_renders_time_stretched_audio() {
+        let available = std::process::Command::new("rubberband")
+            .arg("--version")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false);
+        if !available {
+            return;
+        }
+
+        let input = std::env::temp_dir().join(format!(
+            "zoft_rb_in_{}.wav",
+            uuid::Uuid::new_v4()
+        ));
+        let output = std::env::temp_dir().join(format!(
+            "zoft_rb_out_{}.wav",
+            uuid::Uuid::new_v4()
+        ));
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 48_000,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let mut writer = hound::WavWriter::create(&input, spec).unwrap();
+        for frame in 0..4_800 {
+            let value =
+                (frame as f32 / 48_000.0 * 440.0 * std::f32::consts::TAU).sin() * 0.5;
+            writer.write_sample(value).unwrap();
+        }
+        writer.finalize().unwrap();
+
+        render_pitch_stretch(&input, &output, 0.0, 1.5, false).unwrap();
+        let (frames, _) = wav_file_info(&output).unwrap();
+        assert!((frames as f64 - 7_200.0).abs() <= 2.0);
+
+        std::fs::remove_file(input).ok();
+        std::fs::remove_file(output).ok();
     }
 
     #[test]
