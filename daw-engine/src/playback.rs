@@ -131,52 +131,11 @@ impl PlaybackMixer {
         let frames = data.len() / out_ch;
         let needed = frames * out_ch;
 
-        if self.scratch.len() < needed {
-            // Only allocates on the first callback (or if the buffer grows).
-            self.scratch.resize(needed, 0.0);
-        }
+        self.mix_into_scratch(frames);
 
-        {
-            let scratch = &mut self.scratch[..needed];
-            scratch.fill(0.0);
-
-            for frame in 0..frames {
-                let pos = self.position + frame as u64;
-                for (idx, clip) in self.clips.iter().enumerate() {
-                    let clip_frames =
-                        (clip.samples.len() / clip.channels.max(1) as usize) as u64;
-                    if clip_frames == 0 {
-                        continue;
-                    }
-
-                    // Clip extent on the output timeline.
-                    let len_out = self.lengths[idx];
-                    if pos < clip.start_frame || pos >= clip.start_frame + len_out {
-                        continue;
-                    }
-
-                    let src_pos = (pos - clip.start_frame) as f64
-                        * clip.sample_rate.max(1) as f64
-                        / self.out_sample_rate as f64;
-                    let gain = clip.gain
-                        * fade_gain(clip, src_pos)
-                        * auto_fade_gain(
-                            self.auto_fades[idx],
-                            pos - clip.start_frame,
-                            len_out,
-                        );
-
-                    for channel in 0..out_ch {
-                        scratch[frame * out_ch + channel] +=
-                            sample_at(clip, src_pos, channel) * gain;
-                    }
-                }
-            }
-
-            // Hard limit so summed clips can't clip the device.
-            for value in scratch.iter_mut() {
-                *value = value.clamp(-1.0, 1.0);
-            }
+        // Hard limit so summed clips can't clip the device.
+        for value in &mut self.scratch[..needed] {
+            *value = value.clamp(-1.0, 1.0);
         }
 
         for (i, sample) in data[..needed].iter_mut().enumerate() {
@@ -187,6 +146,68 @@ impl PlaybackMixer {
         }
 
         self.position += frames as u64;
+    }
+
+    /// Offline render without the device safety limiter. Used when bouncing or
+    /// consolidating so headroom above full scale is preserved in the file.
+    pub fn fill_unclamped(&mut self, data: &mut [f32]) {
+        let out_ch = self.out_channels as usize;
+        let frames = data.len() / out_ch;
+        let needed = frames * out_ch;
+
+        self.mix_into_scratch(frames);
+        data[..needed].copy_from_slice(&self.scratch[..needed]);
+        for sample in data[needed..].iter_mut() {
+            *sample = 0.0;
+        }
+
+        self.position += frames as u64;
+    }
+
+    fn mix_into_scratch(&mut self, frames: usize) {
+        let out_ch = self.out_channels as usize;
+        let needed = frames * out_ch;
+
+        if self.scratch.len() < needed {
+            // Only allocates on the first callback (or if the buffer grows).
+            self.scratch.resize(needed, 0.0);
+        }
+
+        let scratch = &mut self.scratch[..needed];
+        scratch.fill(0.0);
+
+        for frame in 0..frames {
+            let pos = self.position + frame as u64;
+            for (idx, clip) in self.clips.iter().enumerate() {
+                let clip_frames =
+                    (clip.samples.len() / clip.channels.max(1) as usize) as u64;
+                if clip_frames == 0 {
+                    continue;
+                }
+
+                // Clip extent on the output timeline.
+                let len_out = self.lengths[idx];
+                if pos < clip.start_frame || pos >= clip.start_frame + len_out {
+                    continue;
+                }
+
+                let src_pos = (pos - clip.start_frame) as f64
+                    * clip.sample_rate.max(1) as f64
+                    / self.out_sample_rate as f64;
+                let gain = clip.gain
+                    * fade_gain(clip, src_pos)
+                    * auto_fade_gain(
+                        self.auto_fades[idx],
+                        pos - clip.start_frame,
+                        len_out,
+                    );
+
+                for channel in 0..out_ch {
+                    scratch[frame * out_ch + channel] +=
+                        sample_at(clip, src_pos, channel) * gain;
+                }
+            }
+        }
     }
 }
 
@@ -274,6 +295,17 @@ mod tests {
             fade_in: None,
             fade_out: None,
         }
+    }
+
+    #[test]
+    fn unclamped_fill_preserves_headroom_above_full_scale() {
+        let a = clip(vec![1.0; 4], 0, 0);
+        let b = clip(vec![1.0; 4], 0, 0);
+        let mut mixer = PlaybackMixer::new(10, 1, vec![a, b], 0);
+        let mut out = [0.0f32; 4];
+        mixer.fill_unclamped(&mut out);
+
+        assert!(out.iter().all(|sample| (sample - 2.0).abs() < 1e-6));
     }
 
     #[test]

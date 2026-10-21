@@ -7,7 +7,7 @@ use daw_core::project::{BitDepth, Color};
 use daw_core::track::TrackId;
 use daw_core::Project;
 use daw_core::WaveformOverview;
-use daw_engine::playback::PlayableClip;
+use daw_engine::playback::{PlayableClip, PlaybackMixer};
 use daw_engine::AudioEngine;
 use eframe::egui;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -234,6 +234,49 @@ impl ClipSourceState {
     }
 }
 
+/// Clips on one track that touch or overlap the selected clip. Consolidation
+/// renders this whole chain into one file.
+#[derive(Debug, Clone)]
+struct ConsolidationPlan {
+    track: TrackId,
+    clip_ids: Vec<ClipId>,
+    start: u64,
+    end: u64,
+}
+
+/// Expand a sorted list of `(clip, start, end)` spans around `selected`. A run
+/// grows while clips touch or overlap.
+fn contiguous_clip_span(
+    spans: &[(ClipId, u64, u64)],
+    selected: ClipId,
+) -> Option<(Vec<ClipId>, u64, u64)> {
+    let index = spans.iter().position(|(id, _, _)| *id == selected)?;
+    let mut first = index;
+    let mut last = index;
+    let mut start = spans[index].1;
+    let mut end = spans[index].2;
+
+    while first > 0 && spans[first - 1].2 >= start {
+        first -= 1;
+        start = start.min(spans[first].1);
+        end = end.max(spans[first].2);
+    }
+    while last + 1 < spans.len() && spans[last + 1].1 <= end {
+        last += 1;
+        start = start.min(spans[last].1);
+        end = end.max(spans[last].2);
+    }
+
+    Some((
+        spans[first..=last]
+            .iter()
+            .map(|(id, _, _)| *id)
+            .collect(),
+        start,
+        end,
+    ))
+}
+
 /// One undoable edit. Structural commands reference clips by id (the clip data
 /// stays in the project pool), so history entries are cheap.
 #[derive(Debug, Clone)]
@@ -290,10 +333,11 @@ enum EffectKind {
     Saturation,
     Filter,
     Tremolo,
+    Consolidate,
 }
 
 impl EffectKind {
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 11] = [
         Self::Normalize,
         Self::LufsNormalize,
         Self::BakeIntoClip,
@@ -304,6 +348,7 @@ impl EffectKind {
         Self::Saturation,
         Self::Filter,
         Self::Tremolo,
+        Self::Consolidate,
     ];
 
     fn label(self) -> &'static str {
@@ -318,6 +363,7 @@ impl EffectKind {
             Self::Saturation => "Saturation",
             Self::Filter => "Filter",
             Self::Tremolo => "Tremolo",
+            Self::Consolidate => "Consolidate",
         }
     }
 }
@@ -802,6 +848,40 @@ impl AppUI {
                     .unwrap_or(false)
             })
             .copied()
+    }
+
+    /// Find the contiguous run of clips on the selected clip's track. A run
+    /// grows while clips touch (`end >= next.start`) or overlap.
+    fn consolidation_plan(&self, clip_id: ClipId) -> Option<ConsolidationPlan> {
+        let track_id = self.clip_track(clip_id)?;
+        let track = self.project.tracks.get(&track_id)?;
+        let project_sr = self.project.sample_rate.max(1) as f64;
+
+        let mut spans: Vec<(ClipId, u64, u64)> = track
+            .clips
+            .iter()
+            .filter_map(|id| {
+                let clip = self.project.audio_clips.get(*id)?;
+                if clip.length == 0 {
+                    return None;
+                }
+                let start = clip.timeline_position.sample;
+                let source_sr = clip.source.sample_rate.max(1) as f64;
+                let out_frames =
+                    (clip.length as f64 * project_sr / source_sr).ceil() as u64;
+                let end = start.saturating_add(out_frames);
+                Some((*id, start, end))
+            })
+            .collect();
+        spans.sort_by_key(|(_, start, end)| (*start, *end));
+        let (clip_ids, start, end) = contiguous_clip_span(&spans, clip_id)?;
+
+        Some(ConsolidationPlan {
+            track: track_id,
+            clip_ids,
+            start,
+            end,
+        })
     }
 
     fn after_edit(&mut self) {
@@ -1689,6 +1769,162 @@ impl AppUI {
         true
     }
 
+    /// Merge the selected clip's contiguous chain on its track into one file.
+    /// Gain, fades and automatic crossfades are rendered into the new clip;
+    /// the original clips remain in the project and are restored by undo.
+    fn consolidate_clip(&mut self, clip_id: ClipId) {
+        let Some(plan) = self.consolidation_plan(clip_id) else {
+            self.error_message = Some("The clip is no longer on a track.".to_string());
+            return;
+        };
+        if plan.clip_ids.len() < 2 {
+            self.error_message =
+                Some("This clip does not touch another clip on its track.".to_string());
+            return;
+        }
+
+        let project_sr = self.project.sample_rate.max(1);
+        let bpm = self.project.tempo_map.default_bpm();
+        let color = self
+            .project
+            .audio_clips
+            .get(clip_id)
+            .and_then(|clip| clip.color);
+        let mut playable = Vec::new();
+        let mut base_path = None;
+        let mut out_channels = 1u16;
+        let mut any_unmuted = false;
+
+        for id in &plan.clip_ids {
+            let Some(clip) = self.project.audio_clips.get(*id) else {
+                continue;
+            };
+            if clip.locked {
+                self.error_message =
+                    Some("Unlock every clip in the chain before consolidating.".to_string());
+                return;
+            }
+            if base_path.is_none() {
+                base_path = Some(clip.source.path.clone());
+            }
+            if clip.muted || clip.length == 0 {
+                continue;
+            }
+
+            let (samples, channels, sample_rate) = match load_wav_range_interleaved(
+                &clip.source.path,
+                clip.source_offset,
+                clip.length,
+            ) {
+                Ok(range) => range,
+                Err(e) => {
+                    self.error_message =
+                        Some(format!("Could not read clip audio: {}", e));
+                    return;
+                }
+            };
+            any_unmuted = true;
+            out_channels = out_channels.max(channels.max(1));
+            playable.push(PlayableClip {
+                samples,
+                channels,
+                sample_rate,
+                start_frame: clip.timeline_position.sample.saturating_sub(plan.start),
+                track: 0,
+                gain: clip.gain,
+                fade_in: clip.fade_in,
+                fade_out: clip.fade_out,
+            });
+        }
+
+        if !any_unmuted {
+            self.error_message =
+                Some("All clips in the chain are muted; nothing to consolidate.".to_string());
+            return;
+        }
+        let frames = plan.end.saturating_sub(plan.start);
+        if frames == 0 {
+            self.error_message = Some("The clips have no audio to consolidate.".to_string());
+            return;
+        }
+        let Some(base_path) = base_path else {
+            self.error_message = Some("Could not find the chain's source files.".to_string());
+            return;
+        };
+        let out_channels = out_channels.clamp(1, 2);
+        let parent = base_path.parent().unwrap_or_else(|| Path::new(""));
+        let output_path = parent.join(format!(
+            "{}_process_{}.wav",
+            processed_file_stem(&base_path),
+            uuid::Uuid::new_v4()
+        ));
+
+        let mut mixer = PlaybackMixer::new(project_sr, out_channels, playable, 0);
+        let render_result: Result<()> = (|| {
+            let spec = hound::WavSpec {
+                channels: out_channels,
+                sample_rate: project_sr,
+                bits_per_sample: 32,
+                sample_format: hound::SampleFormat::Float,
+            };
+            let mut writer = hound::WavWriter::create(&output_path, spec)?;
+            let mut remaining = frames;
+            let mut buffer = vec![0.0f32; 8_192 * out_channels as usize];
+            while remaining > 0 {
+                let chunk = remaining.min(8_192) as usize;
+                let samples = chunk * out_channels as usize;
+                mixer.fill_unclamped(&mut buffer[..samples]);
+                for sample in &buffer[..samples] {
+                    writer.write_sample(*sample)?;
+                }
+                remaining -= chunk as u64;
+            }
+            writer.finalize()?;
+            Ok(())
+        })();
+        if let Err(e) = render_result {
+            let _ = std::fs::remove_file(&output_path);
+            self.error_message = Some(format!("Could not write consolidated audio: {}", e));
+            return;
+        }
+
+        let new_source = AudioFileRef::new(
+            output_path.clone(),
+            frames,
+            project_sr,
+            out_channels,
+            BitDepth::Float32,
+        );
+        let mut new_clip = AudioClip::new(
+            new_source,
+            TimelinePos::from_sample(plan.start, project_sr as f64, bpm),
+            frames,
+        );
+        new_clip.color = color;
+        let new_id = self.project.audio_clips.insert(new_clip);
+
+        let mut actions: Vec<EditAction> = plan
+            .clip_ids
+            .iter()
+            .map(|id| EditAction::Detach {
+                track: plan.track,
+                clip_id: *id,
+            })
+            .collect();
+        actions.push(EditAction::Attach {
+            track: plan.track,
+            clip_id: new_id,
+        });
+        let action = EditAction::Group(actions);
+        self.apply_action(&action, true);
+        self.push_undo(action, false);
+        self.selected_clip = Some(new_id);
+        self.error_message = None;
+        self.after_edit();
+        self.refresh_playback_if_playing();
+        self.spawn_overview(new_id, output_path);
+    }
+
     /// Apply an offline effect to the clip's visible source range and point the
     /// clip at a new rendered WAV. Gain, fades and placement are preserved.
     fn render_clip_effect<F>(&mut self, clip_id: ClipId, mut process: F) -> bool
@@ -1989,6 +2225,22 @@ impl AppUI {
                 || clip.fade_in.is_some()
                 || clip.fade_out.is_some()
         });
+        let consolidation = self.consolidation_plan(window.clip_id);
+        let consolidation_count = consolidation
+            .as_ref()
+            .map_or(0, |plan| plan.clip_ids.len());
+        let consolidation_seconds = consolidation.as_ref().map(|plan| {
+            plan.end.saturating_sub(plan.start) as f64
+                / self.project.sample_rate.max(1) as f64
+        });
+        let consolidation_locked = consolidation.as_ref().map_or(false, |plan| {
+            plan.clip_ids.iter().any(|id| {
+                self.project
+                    .audio_clips
+                    .get(*id)
+                    .map_or(false, |clip| clip.locked)
+            })
+        });
         let mut open = true;
         let mut apply = false;
 
@@ -2263,6 +2515,32 @@ impl AppUI {
                                 });
                                 ui.weak("Modulates the clip volume at the chosen rate.");
                             }
+                            EffectKind::Consolidate => {
+                                ui.label(egui::RichText::new("Consolidate").strong());
+                                if let Some(seconds) = consolidation_seconds {
+                                    ui.label(format!(
+                                        "Clips in chain: {}  ·  {:.2} s",
+                                        consolidation_count, seconds
+                                    ));
+                                } else {
+                                    ui.weak("This clip is no longer on a track.");
+                                }
+                                if consolidation_count < 2 {
+                                    ui.weak(
+                                        "This clip does not touch another clip on its track.",
+                                    );
+                                } else if consolidation_locked {
+                                    ui.weak(
+                                        "Unlock every clip in the chain before consolidating.",
+                                    );
+                                }
+                                ui.weak(
+                                    "Renders touching or overlapping clips on this track into \
+                                     one new file, baking in gain, fades and automatic \
+                                     crossfades. The original clips stay in the project and \
+                                     undo restores them.",
+                                );
+                            }
                         }
 
                         ui.add_space(10.0);
@@ -2278,6 +2556,9 @@ impl AppUI {
                             EffectKind::BitCrusher | EffectKind::Filter => true,
                             EffectKind::Saturation => window.saturation_mix > 0.0,
                             EffectKind::Tremolo => window.tremolo_depth > 0.0,
+                            EffectKind::Consolidate => {
+                                consolidation_count >= 2 && !consolidation_locked
+                            }
                         };
                         if ui
                             .add_enabled(can_apply, egui::Button::new("Apply"))
@@ -2365,6 +2646,15 @@ impl AppUI {
                             tremolo(samples, channels, sample_rate, rate, depth);
                         },
                     );
+                }
+                EffectKind::Consolidate => {
+                    let previous = window.clip_id;
+                    self.consolidate_clip(previous);
+                    if self.selected_clip != Some(previous) {
+                        // The clip was replaced by the consolidated result.
+                        self.effects_window = None;
+                        return;
+                    }
                 }
             }
         }
@@ -4844,15 +5134,17 @@ fn load_wav_interleaved(path: &Path) -> Result<(Vec<f32>, u16, u32)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        bit_crush, clip_gain_at, filter_audio, knob_from_normalized, knob_to_normalized,
-        load_wav_interleaved, load_wav_range_interleaved, measure_integrated_loudness,
-        processed_file_stem, render_pitch_stretch, reverse_interleaved, saturate, tremolo,
-        tape_stretch_interleaved, wav_file_info, wav_peak, write_wav_f32, write_wav_range,
-        write_wav_range_with_envelope, ClipSourceState, FilterKind,
+        bit_crush, clip_gain_at, contiguous_clip_span, filter_audio, knob_from_normalized,
+        knob_to_normalized, load_wav_interleaved, load_wav_range_interleaved,
+        measure_integrated_loudness, processed_file_stem, render_pitch_stretch,
+        reverse_interleaved, saturate, tape_stretch_interleaved, tremolo, wav_file_info,
+        wav_peak, write_wav_f32, write_wav_range, write_wav_range_with_envelope,
+        ClipSourceState, FilterKind,
     };
     use daw_core::audio_pool::AudioFileRef;
     use daw_core::clip::{AudioClip, Fade, FadeCurve, TimeStretchMode, TimelinePos};
     use daw_core::project::BitDepth;
+    use daw_core::Project;
 
     #[test]
     fn processed_stem_strips_generated_suffixes() {
@@ -5000,6 +5292,32 @@ mod tests {
             let round_trip = knob_from_normalized(norm, 20.0, 20_000.0, true);
             assert!((round_trip - value).abs() < 0.1);
         }
+    }
+
+    #[test]
+    fn contiguous_spans_expand_across_touching_and_overlapping_clips() {
+        let mut project = Project::new("test");
+        let source = AudioFileRef::new(
+            std::path::PathBuf::from("source.wav"),
+            100,
+            48_000,
+            1,
+            BitDepth::Float32,
+        );
+        let template = AudioClip::new(source, TimelinePos::default(), 1);
+        let a = project.audio_clips.insert(template.clone());
+        let b = project.audio_clips.insert(template.clone());
+        let c = project.audio_clips.insert(template.clone());
+        let d = project.audio_clips.insert(template.clone());
+        let spans = [(a, 0, 10), (b, 10, 20), (c, 18, 30), (d, 40, 50)];
+
+        let (ids, start, end) = contiguous_clip_span(&spans, b).unwrap();
+        assert_eq!(ids, vec![a, b, c]);
+        assert_eq!((start, end), (0, 30));
+
+        let (ids, start, end) = contiguous_clip_span(&spans, d).unwrap();
+        assert_eq!(ids, vec![d]);
+        assert_eq!((start, end), (40, 50));
     }
 
     #[test]

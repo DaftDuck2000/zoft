@@ -24,7 +24,7 @@ Offline clip processing: gain, pitch shift, time stretch, reverse, normalize, bi
 - [x] Saturation: soft-clip drive with dry/wet mix
 - [x] Filter: low-pass or high-pass cutoff
 - [x] Tremolo: rate and depth modulation
-- [ ] Consolidate: Merge adjacent clips on same track into one file
+- [x] Consolidate: Merge adjacent clips on same track into one file
 - [ ] Bounce in place: Render clip with inserts/sends to new file
 - [x] Audio Effects window: right-click a clip, choose an effect from the list, adjust parameters, then press Apply
 
@@ -81,6 +81,15 @@ Offline clip processing: gain, pitch shift, time stretch, reverse, normalize, bi
 - **Filter**: first-order low-pass or high-pass with a logarithmic 20 Hz–20 kHz
   cutoff. The cutoff is clamped below Nyquist on render.
 - **Tremolo**: sine amplitude modulation with 0.1–20 Hz rate and 0–100 % depth.
+- **Consolidate**: merges the selected clip with the contiguous run of clips
+  that touch or overlap it on the same track. The run is rendered through the
+  playback mixer at the project sample rate, so clip gain, fades and automatic
+  equal-power crossfades are baked into one new `*_process_<uuid>.wav`. The new
+  clip spans the run, keeps the selected clip's colour, and has unity gain with
+  no fades. The original clips remain in the project (undo restores them; the
+  consolidated result is detached on undo). Headroom above full scale is
+  preserved in the float file. The Audio Effects window closes after a
+  successful consolidation because the selected clip was replaced.
 - The creative effects preserve the clip's gain, fades, timeline position and
   track; undo/redo uses the same `Source` state as the other file-rendering
   operations.
@@ -140,7 +149,7 @@ enum NormalizeMode {
 - [x] Reverse plays correctly
 - [x] Normalize to -1 dB peak works
 - [x] LUFS normalize reaches the target without clipping sample peaks
-- [ ] Consolidate merges clips correctly
+- [x] Consolidate merges clips correctly
 - [ ] Bounce in place includes plugin processing
 - [x] All operations create undoable commands
 - [x] Original files untouched
@@ -157,4 +166,5 @@ enum NormalizeMode {
 - 2026-10-21: Replaced the Audio Effects sliders with Logic-style rotary knobs (vertical drag, Shift fine adjustment, double-click reset)
 - 2026-10-21: Added LUFS Normalize with ITU-R BS.1770 integrated loudness measurement, −30…−6 LUFS target, and a −1 dBFS sample-peak safety cap
 - 2026-10-21: Added Time Stretch modes: Tape varispeed, Elastic (R3 fine), Musical (R3 fine with centre focus)
-- Remaining: listening tests for pitch/time and creative effects, consolidate, bounce in place
+- 2026-10-21: Added Consolidate: renders a touching/overlapping run of clips on a track through the playback mixer, preserving gain, fades and automatic crossfades; undo restores the originals
+- Remaining: listening tests for pitch/time and creative effects, bounce in place
