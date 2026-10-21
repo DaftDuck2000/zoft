@@ -10,7 +10,7 @@ use daw_core::WaveformOverview;
 use daw_engine::playback::PlayableClip;
 use daw_engine::AudioEngine;
 use eframe::egui;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
@@ -200,6 +200,31 @@ impl ClipShape {
     }
 }
 
+/// Source reference and trimmed range, used by processing operations that
+/// render a new file (the original file is never modified).
+#[derive(Debug, Clone)]
+struct ClipSourceState {
+    source: AudioFileRef,
+    source_offset: u64,
+    length: u64,
+}
+
+impl ClipSourceState {
+    fn of(clip: &AudioClip) -> Self {
+        Self {
+            source: clip.source.clone(),
+            source_offset: clip.source_offset,
+            length: clip.length,
+        }
+    }
+
+    fn apply(&self, clip: &mut AudioClip) {
+        clip.source = self.source.clone();
+        clip.source_offset = self.source_offset;
+        clip.length = self.length;
+    }
+}
+
 /// One undoable edit. Structural commands reference clips by id (the clip data
 /// stays in the project pool), so history entries are cheap.
 #[derive(Debug, Clone)]
@@ -217,6 +242,12 @@ enum EditAction {
         clip_id: ClipId,
         from: ClipShape,
         to: ClipShape,
+    },
+    /// Replace the clip's source file and trimmed range (offline processing).
+    Source {
+        clip_id: ClipId,
+        from: ClipSourceState,
+        to: ClipSourceState,
     },
     /// Place an existing clip on a track (undo takes it off).
     Attach { track: TrackId, clip_id: ClipId },
@@ -306,10 +337,17 @@ struct AppUI {
     snap_mode: SnapMode,
     /// How the ruler labels positions (musical bars/beats or clock time).
     ruler_mode: RulerMode,
+    /// Snap clip moves relative to the clip's original position, preserving an
+    /// off-grid offset instead of pulling the clip onto the absolute grid.
+    snap_relative: bool,
     /// Alt bypasses snapping while held.
     snap_suspended: bool,
     drag: Option<ClipDrag>,
     clipboard: Option<AudioClip>,
+    /// Clip under the last right-click, used by the process context menu.
+    context_clip: Option<ClipId>,
+    /// Where a trashed clip was last attached, so Restore can put it back.
+    deleted_from: HashMap<ClipId, TrackId>,
     undo_stack: Vec<EditAction>,
     redo_stack: Vec<EditAction>,
     /// True while consecutive edits (e.g. a slider drag) belong to one gesture
@@ -319,8 +357,8 @@ struct AppUI {
     needs_audio_refresh: bool,
 
     // Waveform overview generation
-    waveform_tx: mpsc::Sender<(ClipId, Result<WaveformOverview>)>,
-    waveform_rx: mpsc::Receiver<(ClipId, Result<WaveformOverview>)>,
+    waveform_tx: mpsc::Sender<(ClipId, PathBuf, Result<WaveformOverview>)>,
+    waveform_rx: mpsc::Receiver<(ClipId, PathBuf, Result<WaveformOverview>)>,
     detail_cache: DetailCache,
 }
 
@@ -348,10 +386,13 @@ impl AppUI {
             last_timeline_width: 1000.0,
             selected_clip: None,
             snap_mode: SnapMode::Off,
+            snap_relative: false,
             ruler_mode: RulerMode::BarsBeats,
             snap_suspended: false,
             drag: None,
             clipboard: None,
+            context_clip: None,
+            deleted_from: HashMap::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             merge_chain: false,
@@ -387,21 +428,26 @@ impl AppUI {
 
     fn spawn_overview(&self, clip_id: ClipId, path: PathBuf) {
         let tx = self.waveform_tx.clone();
+        let thread_path = path.clone();
         std::thread::spawn(move || {
-            let result = WaveformOverview::generate_from_file(&path, FRAMES_PER_PIXEL);
-            let _ = tx.send((clip_id, result));
+            let result = WaveformOverview::generate_from_file(&thread_path, FRAMES_PER_PIXEL);
+            let _ = tx.send((clip_id, thread_path, result));
         });
     }
 
     fn poll_waveforms(&mut self) {
         loop {
             match self.waveform_rx.try_recv() {
-                Ok((clip_id, Ok(overview))) => {
+                Ok((clip_id, path, Ok(overview))) => {
                     if let Some(clip) = self.project.audio_clips.get_mut(clip_id) {
-                        clip.source.overview = Some(overview);
+                        // Ignore stale results if the clip now points at a
+                        // different file (e.g. after reversing it).
+                        if clip.source.path == path {
+                            clip.source.overview = Some(overview);
+                        }
                     }
                 }
-                Ok((_, Err(e))) => eprintln!("Waveform generation failed: {}", e),
+                Ok((_, _, Err(e))) => eprintln!("Waveform generation failed: {}", e),
                 Err(mpsc::TryRecvError::Empty) | Err(mpsc::TryRecvError::Disconnected) => break,
             }
         }
@@ -467,19 +513,24 @@ impl AppUI {
         60.0 / bpm * (4.0 / denominator.max(1) as f64)
     }
 
+    /// Current snap spacing in seconds, or `None` when snapping is off/Alt is
+    /// held.
+    fn snap_grid_secs(&self) -> Option<f64> {
+        if self.snap_suspended {
+            return None;
+        }
+        let (numerator, _) = self.time_signature();
+        self.snap_mode
+            .interval_secs(self.secs_per_beat(), numerator.max(1) as f64)
+            .filter(|grid| *grid > 1e-6)
+    }
+
     /// Snap `t` to the current grid (Alt bypasses snapping).
     fn snap_secs(&self, t: f64) -> f64 {
         let t = t.max(0.0);
-        if self.snap_suspended {
-            return t;
-        }
-        let (numerator, _) = self.time_signature();
-        match self
-            .snap_mode
-            .interval_secs(self.secs_per_beat(), numerator.max(1) as f64)
-        {
-            Some(grid) if grid > 1e-6 => (t / grid).round() * grid,
-            _ => t,
+        match self.snap_grid_secs() {
+            Some(grid) => (t / grid).round() * grid,
+            None => t,
         }
     }
 
@@ -615,12 +666,16 @@ impl AppUI {
             if !track.clips.contains(&clip_id) {
                 track.clips.push(clip_id);
             }
+            self.deleted_from.remove(&clip_id);
         }
     }
 
     fn detach_clip(&mut self, track_id: TrackId, clip_id: ClipId) {
         if let Some(track) = self.project.tracks.get_mut(&track_id) {
             track.remove_clip(clip_id);
+        }
+        if self.project.audio_clips.contains_key(clip_id) {
+            self.deleted_from.insert(clip_id, track_id);
         }
     }
 
@@ -700,6 +755,21 @@ impl AppUI {
             EditAction::Shape { clip_id, from, to } => {
                 if let Some(clip) = self.project.audio_clips.get_mut(*clip_id) {
                     (if forward { *to } else { *from }).apply(clip);
+                }
+            }
+            EditAction::Source { clip_id, from, to } => {
+                let state = if forward { to } else { from };
+                let mut missing_overview = None;
+                if let Some(clip) = self.project.audio_clips.get_mut(*clip_id) {
+                    state.apply(clip);
+                    if clip.source.overview.is_none() {
+                        missing_overview = Some(clip.source.path.clone());
+                    }
+                }
+                if let Some(path) = missing_overview {
+                    // The rendered file's overview may not exist on the undo
+                    // entry yet (it is generated asynchronously).
+                    self.spawn_overview(*clip_id, path);
                 }
             }
             EditAction::Attach { track, clip_id } => {
@@ -857,7 +927,18 @@ impl AppUI {
 
         match drag.mode {
             DragMode::Move => {
-                let start = self.snap_secs(pointer_t - drag.grab_offset_secs);
+                let raw_start = (pointer_t - drag.grab_offset_secs).max(0.0);
+                let start = match (self.snap_relative, self.snap_grid_secs()) {
+                    (true, Some(grid)) => {
+                        // Relative snap: move in grid-sized steps from the
+                        // clip's original position, preserving any off-grid
+                        // offset instead of pulling it onto the absolute grid.
+                        let anchor =
+                            drag.from_shape.position.sample as f64 / project_sr;
+                        (anchor + ((raw_start - anchor) / grid).round() * grid).max(0.0)
+                    }
+                    _ => self.snap_secs(raw_start),
+                };
                 shape.position = TimelinePos::from_sample(
                     (start * project_sr).round() as u64,
                     project_sr,
@@ -1071,6 +1152,156 @@ impl AppUI {
         self.refresh_playback_if_playing();
     }
 
+    /// Put a clip that was removed from its track back into the arrangement.
+    fn restore_clip(&mut self, clip_id: ClipId) {
+        let track_id = self
+            .deleted_from
+            .get(&clip_id)
+            .copied()
+            .filter(|id| self.project.tracks.contains_key(id))
+            .or_else(|| self.project.track_order.first().copied());
+        let Some(track_id) = track_id else {
+            self.error_message = Some("No track available to restore the clip.".to_string());
+            return;
+        };
+
+        let action = EditAction::Attach { track: track_id, clip_id };
+        self.apply_action(&action, true);
+        self.push_undo(action, false);
+        self.selected_clip = Some(clip_id);
+        self.after_edit();
+        self.refresh_playback_if_playing();
+    }
+
+    /// Peak absolute sample in the clip's visible source range. Seeks to the
+    /// range and streams it, so long files are not loaded into memory.
+    fn clip_source_peak(clip: &AudioClip) -> Option<f32> {
+        wav_peak(&clip.source.path, clip.source_offset, clip.length).ok()
+    }
+
+    /// Set the clip gain so the loudest sample in its visible range peaks at
+    /// -1 dBFS. Non-destructive: only the gain changes.
+    fn normalize_clip(&mut self, clip_id: ClipId) {
+        let Some(clip) = self.project.audio_clips.get(clip_id) else {
+            return;
+        };
+        if clip.locked {
+            return;
+        }
+        let Some(peak) = Self::clip_source_peak(clip) else {
+            self.error_message =
+                Some("Could not read the clip's audio for normalization.".to_string());
+            return;
+        };
+        if peak <= 1e-6 {
+            self.error_message = Some("The clip is silent; nothing to normalize.".to_string());
+            return;
+        }
+
+        let target = 10.0f32.powf(-1.0 / 20.0);
+        let before = ClipShape::of(clip);
+        let mut after = before;
+        after.gain = (target / peak).clamp(0.0, 10.0);
+        if let Some(clip) = self.project.audio_clips.get_mut(clip_id) {
+            after.apply(clip);
+        }
+        self.push_undo(
+            EditAction::Shape {
+                clip_id,
+                from: before,
+                to: after,
+            },
+            false,
+        );
+        self.after_edit();
+        self.refresh_playback_if_playing();
+    }
+
+    /// Render the clip's visible audio backwards into a new WAV file and point
+    /// the clip at it. The original file is never modified.
+    fn reverse_clip(&mut self, clip_id: ClipId) {
+        let Some(clip) = self.project.audio_clips.get(clip_id) else {
+            return;
+        };
+        if clip.locked || clip.length == 0 {
+            return;
+        }
+
+        let (samples, channels, sample_rate) = match load_wav_interleaved(&clip.source.path) {
+            Ok(data) => data,
+            Err(e) => {
+                self.error_message = Some(format!("Cannot read clip audio: {}", e));
+                return;
+            }
+        };
+        let channel_count = channels.max(1) as usize;
+        let total_frames = samples.len() / channel_count;
+        let first_frame = (clip.source_offset as usize).min(total_frames);
+        let frame_count = (clip.length as usize).min(total_frames - first_frame);
+        if frame_count == 0 {
+            self.error_message = Some("The clip has no audio to reverse.".to_string());
+            return;
+        }
+
+        let start = first_frame * channel_count;
+        let end = start + frame_count * channel_count;
+        let reversed = reverse_interleaved(&samples[start..end], channel_count);
+
+        let parent = clip.source.path.parent().unwrap_or_else(|| Path::new(""));
+        let stem = clip
+            .source
+            .path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("clip");
+        let new_path = parent.join(format!(
+            "{}_reverse_{}.wav",
+            stem,
+            uuid::Uuid::new_v4()
+        ));
+
+        let spec = hound::WavSpec {
+            channels: channels.max(1),
+            sample_rate,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let write_result = (|| -> Result<()> {
+            let mut writer = hound::WavWriter::create(&new_path, spec)?;
+            for sample in &reversed {
+                writer.write_sample(*sample)?;
+            }
+            writer.finalize()?;
+            Ok(())
+        })();
+        if let Err(e) = write_result {
+            self.error_message = Some(format!("Failed to write reversed audio: {}", e));
+            return;
+        }
+
+        let new_source = AudioFileRef::new(
+            new_path.clone(),
+            frame_count as u64,
+            sample_rate,
+            channels.max(1),
+            BitDepth::Float32,
+        );
+        let from = ClipSourceState::of(clip);
+        let to = ClipSourceState {
+            source: new_source,
+            source_offset: 0,
+            length: frame_count as u64,
+        };
+        if let Some(clip) = self.project.audio_clips.get_mut(clip_id) {
+            to.apply(clip);
+        }
+        self.push_undo(EditAction::Source { clip_id, from, to }, false);
+        self.after_edit();
+        self.refresh_playback_if_playing();
+        // The rendered file has no cached waveform yet.
+        self.spawn_overview(clip_id, new_path);
+    }
+
     fn copy_selected_clip(&mut self) {
         if let Some(clip) = self
             .selected_clip
@@ -1167,6 +1398,8 @@ impl AppUI {
 
         let before = ClipShape::of(clip);
         let mut after = before;
+        let mut normalize_clicked = false;
+        let mut reverse_clicked = false;
         let name = clip
             .source
             .path
@@ -1191,6 +1424,22 @@ impl AppUI {
         if gain_response.changed() {
             after.gain = 10.0f32.powf(gain_db / 20.0);
         }
+        ui.horizontal(|ui| {
+            if ui
+                .button("Normalize −1 dB")
+                .on_hover_text("Set the clip gain so its loudest sample peaks at −1 dBFS")
+                .clicked()
+            {
+                normalize_clicked = true;
+            }
+            if ui
+                .button("Reverse")
+                .on_hover_text("Render a reversed copy of the clip's audio (original file is kept)")
+                .clicked()
+            {
+                reverse_clicked = true;
+            }
+        });
         ui.separator();
 
         // Fades: curve + length, editable numerically as well as by dragging
@@ -1244,6 +1493,14 @@ impl AppUI {
 
         if gain_response.drag_stopped() {
             self.refresh_playback_if_playing();
+        }
+
+        // Offline/process actions run after the shape sliders have been applied.
+        if normalize_clicked {
+            self.normalize_clip(clip_id);
+        }
+        if reverse_clicked {
+            self.reverse_clip(clip_id);
         }
     }
 }
@@ -1546,6 +1803,51 @@ impl eframe::App for AppUI {
                     });
                 }
             }
+
+            // ---- Trash browser ----
+            // Deleting a clip only detaches it from its track; the audio and
+            // clip data stay in the project and can be restored here.
+            ui.separator();
+            let attached: HashSet<ClipId> = self
+                .project
+                .tracks
+                .values()
+                .flat_map(|track| track.clips.iter().copied())
+                .collect();
+            let trash: Vec<(ClipId, String, f64)> = self
+                .project
+                .audio_clips
+                .iter()
+                .filter(|(id, _)| !attached.contains(id))
+                .map(|(id, clip)| {
+                    let name = clip
+                        .source
+                        .path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("clip")
+                        .to_string();
+                    let secs =
+                        clip.length as f64 / clip.source.sample_rate.max(1) as f64;
+                    (id, name, secs)
+                })
+                .collect();
+            egui::CollapsingHeader::new(format!("Trash ({})", trash.len()))
+                .default_open(false)
+                .show(ui, |ui| {
+                    if trash.is_empty() {
+                        ui.weak("Deleted clips appear here and can be restored.");
+                        return;
+                    }
+                    for (clip_id, name, secs) in &trash {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("{} ({:.2}s)", name, secs));
+                            if ui.small_button("Restore").clicked() {
+                                self.restore_clip(*clip_id);
+                            }
+                        });
+                    }
+                });
         });
 
         // Central timeline/arrange area
@@ -1600,6 +1902,9 @@ impl eframe::App for AppUI {
                             ui.selectable_value(&mut self.snap_mode, mode, mode.label());
                         }
                     });
+                ui.checkbox(&mut self.snap_relative, "Relative").on_hover_text(
+                    "Move clips in grid steps relative to their original position, preserving off-grid offsets",
+                );
                 ui.separator();
 
                 // Ruler display: musical bars/beats (default) or clock time.
@@ -1620,7 +1925,7 @@ impl eframe::App for AppUI {
                 ));
             });
             if self.selected_clip.is_some() {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     self.clip_properties_ui(ui);
                 });
             }
@@ -1831,6 +2136,65 @@ impl eframe::App for AppUI {
                         }
                     }
                 }
+
+                // ---- Automatic crossfade overlay ----
+                // The mixer equal-power crossfades overlapping unmuted clips
+                // on the same track; show where that happens.
+                let mut spans: Vec<(f64, f64)> = Vec::new();
+                for clip_id in clips {
+                    if let Some(clip) = self.project.audio_clips.get(*clip_id) {
+                        if clip.muted || clip.length == 0 {
+                            continue;
+                        }
+                        let start = clip.timeline_position.sample as f64 / project_sr;
+                        let end = start
+                            + clip.length as f64 / clip.source.sample_rate.max(1) as f64;
+                        spans.push((start, end));
+                    }
+                }
+                for i in 0..spans.len() {
+                    for j in (i + 1)..spans.len() {
+                        // Match the mixer: only clips that partially overlap
+                        // get an automatic crossfade.
+                        let a_contains_b = spans[i].0 <= spans[j].0 && spans[i].1 >= spans[j].1;
+                        let b_contains_a = spans[j].0 <= spans[i].0 && spans[j].1 >= spans[i].1;
+                        if a_contains_b || b_contains_a {
+                            continue;
+                        }
+                        let start = spans[i].0.max(spans[j].0);
+                        let end = spans[i].1.min(spans[j].1);
+                        if end <= start {
+                            continue;
+                        }
+                        let x0 = view.x(rect, start);
+                        let x1 = view.x(rect, end);
+                        if x1 < rect.left() || x0 > rect.right() {
+                            continue;
+                        }
+                        let top = track_rect.top() + 18.0;
+                        let bottom = track_rect.bottom() - 6.0;
+                        painter.rect_filled(
+                            egui::Rect::from_min_max(
+                                egui::pos2(x0.max(rect.left()), top),
+                                egui::pos2(x1.min(rect.right()), bottom),
+                            ),
+                            0.0,
+                            egui::Color32::from_rgba_unmultiplied(255, 214, 120, 18),
+                        );
+                        let stroke = egui::Stroke::new(
+                            1.5_f32,
+                            egui::Color32::from_rgba_unmultiplied(255, 214, 120, 90),
+                        );
+                        painter.line_segment(
+                            [egui::pos2(x0, top), egui::pos2(x1, bottom)],
+                            stroke,
+                        );
+                        painter.line_segment(
+                            [egui::pos2(x0, bottom), egui::pos2(x1, top)],
+                            stroke,
+                        );
+                    }
+                }
             }
 
             // ---- Clip selection (click) ----
@@ -1882,6 +2246,42 @@ impl eframe::App for AppUI {
             if edit_response.drag_stopped() {
                 self.finish_clip_drag();
             }
+
+            // ---- Clip context menu (right-click) ----
+            if ui.input(|i| i.pointer.secondary_clicked()) && hovered {
+                if let Some(pos) = pointer_pos {
+                    if let Some((clip_id, _)) = Self::clip_hit(&clip_rects, pos) {
+                        self.selected_clip = Some(clip_id);
+                        self.context_clip = Some(clip_id);
+                    } else {
+                        self.context_clip = None;
+                    }
+                }
+            }
+            edit_response.context_menu(|ui| {
+                let Some(clip_id) = self.context_clip else {
+                    ui.label("No clip here");
+                    return;
+                };
+                let name = self
+                    .project
+                    .audio_clips
+                    .get(clip_id)
+                    .and_then(|clip| clip.source.path.file_name())
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("clip")
+                    .to_string();
+                ui.label(name);
+                ui.separator();
+                if ui.button("Normalize to −1 dB").clicked() {
+                    self.normalize_clip(clip_id);
+                    ui.close_menu();
+                }
+                if ui.button("Reverse").clicked() {
+                    self.reverse_clip(clip_id);
+                    ui.close_menu();
+                }
+            });
 
             // Hover feedback: resize cursor over trim/fade zones, grab over bodies.
             if self.drag.is_none() && !self.dragging_playhead && hovered {
@@ -2108,7 +2508,7 @@ impl AppUI {
         let project_sr = self.project.sample_rate.max(1) as f64;
         let mut playable = Vec::new();
 
-        for track_id in &self.project.track_order {
+        for (track_index, track_id) in self.project.track_order.iter().enumerate() {
             let Some(track) = self.project.tracks.get(track_id) else {
                 continue;
             };
@@ -2143,6 +2543,7 @@ impl AppUI {
                             channels,
                             sample_rate,
                             start_frame,
+                            track: track_index as u32,
                             gain: clip.gain,
                             fade_in: clip.fade_in,
                             fade_out: clip.fade_out,
@@ -2738,6 +3139,58 @@ fn format_clock(secs: f64) -> String {
     format!("{:02}:{:06.3}", minutes, rem)
 }
 
+/// Reverse interleaved audio frame-wise, preserving channel order inside each
+/// frame. A trailing incomplete frame is dropped.
+fn reverse_interleaved(samples: &[f32], channels: usize) -> Vec<f32> {
+    let channels = channels.max(1);
+    let frames = samples.len() / channels;
+    let mut reversed = Vec::with_capacity(frames * channels);
+    for frame in samples[..frames * channels].chunks_exact(channels).rev() {
+        reversed.extend_from_slice(frame);
+    }
+    reversed
+}
+
+/// Peak absolute sample of a WAV frame range, without loading the whole file.
+fn wav_peak(path: &Path, first_frame: u64, frames: u64) -> Result<f32> {
+    let mut reader = hound::WavReader::open(path)?;
+    let spec = reader.spec();
+    let channels = spec.channels.max(1) as u64;
+    let total_frames = reader.duration() as u64;
+    let first = first_frame.min(total_frames);
+    let frames = frames.min(total_frames - first);
+    if frames == 0 {
+        return Ok(0.0);
+    }
+    reader.seek(first.min(u32::MAX as u64) as u32)?;
+
+    let scale = match spec.bits_per_sample {
+        8 => 1.0 / 128.0,
+        16 => 1.0 / 32_768.0,
+        24 => 1.0 / 8_388_608.0,
+        32 => 1.0 / 2_147_483_648.0,
+        _ => 1.0 / 32_768.0,
+    };
+    let sample_count = (frames * channels) as usize;
+    let mut peak = 0.0f32;
+
+    if spec.sample_format == hound::SampleFormat::Float {
+        for sample in reader.samples::<f32>().take(sample_count) {
+            if let Ok(sample) = sample {
+                peak = peak.max(sample.abs());
+            }
+        }
+    } else {
+        for sample in reader.samples::<i32>().take(sample_count) {
+            if let Ok(sample) = sample {
+                peak = peak.max((sample as f32 * scale).abs());
+            }
+        }
+    }
+
+    Ok(peak)
+}
+
 /// Read an entire WAV file into interleaved f32 samples.
 fn load_wav_interleaved(path: &Path) -> Result<(Vec<f32>, u16, u32)> {
     let mut reader = hound::WavReader::open(path)?;
@@ -2764,4 +3217,54 @@ fn load_wav_interleaved(path: &Path) -> Result<(Vec<f32>, u16, u32)> {
     };
 
     Ok((samples, spec.channels, spec.sample_rate))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{reverse_interleaved, wav_peak};
+
+    #[test]
+    fn reverse_preserves_channel_order_within_frames() {
+        let input = [1.0, 10.0, 2.0, 20.0, 3.0, 30.0];
+        let reversed = reverse_interleaved(&input, 2);
+        assert_eq!(reversed, vec![3.0, 30.0, 2.0, 20.0, 1.0, 10.0]);
+    }
+
+    #[test]
+    fn reverse_drops_incomplete_trailing_frame() {
+        let input = [1.0, 10.0, 2.0, 20.0, 9.0];
+        let reversed = reverse_interleaved(&input, 2);
+        assert_eq!(reversed, vec![2.0, 20.0, 1.0, 10.0]);
+    }
+
+    #[test]
+    fn wav_peak_reads_only_the_requested_range() {
+        let path = std::env::temp_dir().join(format!(
+            "zoft_peak_{}.wav",
+            uuid::Uuid::new_v4()
+        ));
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: 48_000,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let mut writer = hound::WavWriter::create(&path, spec).unwrap();
+        for frame in [
+            [0.1, -0.2],
+            [-0.9, 0.3],
+            [0.2, 0.25],
+            [0.5, -0.6],
+        ] {
+            writer.write_sample(frame[0]).unwrap();
+            writer.write_sample(frame[1]).unwrap();
+        }
+        writer.finalize().unwrap();
+
+        // Frames 1..3 contain the -0.9 peak; the later -0.6 and 0.5 are outside.
+        let peak = wav_peak(&path, 1, 2).unwrap();
+        assert!((peak - 0.9).abs() < 1e-6);
+
+        std::fs::remove_file(path).ok();
+    }
 }

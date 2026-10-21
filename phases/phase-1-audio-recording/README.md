@@ -10,7 +10,7 @@
 | 1.1 | Audio Track & Recording | `[✓]` | `audio-track-record.md` |
 | 1.2 | Waveform Rendering | `[~]` | `waveform-rendering.md` |
 | 1.3 | Non-Destructive Clip Editing | `[~]` | `non-destructive-editing.md` |
-| 1.4 | Clip Processing | `[ ]` | `clip-processing.md` |
+| 1.4 | Clip Processing | `[~]` | `clip-processing.md` |
 | 1.5 | Undo/Redo System | `[ ]` | `undo-redo.md` |
 
 ## Dependencies
@@ -60,8 +60,18 @@
 - Split at the playhead (S) creates a second clip referencing the same source
 - Copy/paste/duplicate (Ctrl+C / Ctrl+V / Ctrl+D); Delete removes the clip from the track (data stays in the pool, undo restores it)
 - Fade handles in the clip's top corners; clip inspector with fade curve (linear/exp/log/S/equal-power), fade length, gain and color
+- Automatic equal-power crossfade where clips overlap on the same track, with an X overlay in the overlap region; contained clips are layered instead
+- Snap: Off / Bar / Beat / 1/8 / 1/16, optional Relative mode, Alt bypass; the grid follows the chosen time signature
+- Trash browser in the track panel: deleted clips stay in the project and can be restored
 - Undo/redo (Ctrl+Z, Ctrl+Shift+Z, Ctrl+Y) with merge for continuous slider edits — Phase 1.5 groundwork
 - Playback mixer now slices clips by `source_offset`/`length`
-- Not yet: automatic crossfades on overlap, relative snap, trash browser
+- Next: the remaining 1.4 processing operations (pitch shift, time stretch, consolidate, bounce)
 
-**1.4-1.5** - Not started (basic undo/redo already available in the arrange view)
+**1.4 Clip Processing** - `[~]` In Progress
+- Peak Normalize (to −1 dBFS) in the clip inspector and right-click Process menu; implemented as a gain edit and fully undoable
+- Reverse renders the clip's visible audio backwards to a new `*_reverse_<uuid>.wav` (original file untouched) and repoints the clip; undoable
+- Right-click a clip for the Process menu (Normalize / Reverse)
+- Reverse regenerates the waveform overview in the background; stale overviews from a replaced file are ignored
+- Not yet: pitch shift, time stretch, fade rendering, consolidate, bounce in place, LUFS normalize
+
+**1.5 Undo/Redo** - Not started (basic undo/redo already available in the arrange view)

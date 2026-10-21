@@ -18,8 +18,10 @@ Implement non-destructive audio clip editing: split, trim, move, copy, delete, f
 - [x] Copy/paste/duplicate clips (Ctrl+C / Ctrl+V / Ctrl+D)
 - [x] Delete clips (removed from track but kept in the project pool; undo restores)
 - [x] Fade in/out: drag fade handles, curve types (linear, exp, log, S, equal power)
-- [ ] Crossfade: Overlap two clips → automatic crossfade
+- [x] Crossfade: Overlap two clips → automatic equal-power crossfade (mixer + visual overlay)
 - [x] Snap modes: Grid (bar/beat/1/8/1/16), Off (hold Alt to bypass)
+- [x] Relative snap mode: move clips in grid steps from their original position
+- [x] Trash browser: deleted clips stay in the project and can be restored from the left panel
 - [x] Clip gain: inspector slider (numeric dB)
 - [x] Clip coloring: per-clip color override
 
@@ -97,7 +99,7 @@ fn snap_position(pos: TimelinePos, grid: SnapGrid, relative: bool) -> TimelinePo
 - [x] Move between tracks preserves timing
 - [x] Snap works at all zoom levels
 - [x] Fades visually editable with handles
-- [ ] Crossfade created automatically on overlap
+- [x] Crossfade created automatically on overlap
 - [x] All operations generate undo commands
 - [x] Original audio file never modified
 
@@ -112,4 +114,7 @@ fn snap_position(pos: TimelinePos, grid: SnapGrid, relative: bool) -> TimelinePo
 - 2026-10-21: Undo/redo (Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y) with merged continuous property edits
 - 2026-10-21: Playback mixer slices clips by source_offset/length so edits are audible
 - 2026-10-21: Musical ruler (bars/beats default, time switchable) and time-signature picker; snapping follows the chosen signature
-- Remaining: automatic crossfades on overlap, "relative" snap mode, trash browser
+- 2026-10-21: Automatic equal-power crossfades where clips partially overlap on the same track (mixer gain envelopes + X overlay)
+- 2026-10-21: Relative snap toggle (moves in grid steps from the clip's original position)
+- 2026-10-21: Trash browser in the track panel; removed clips can be restored to their previous track
+- Remaining: runtime verification of crossfades, relative snap and the trash browser

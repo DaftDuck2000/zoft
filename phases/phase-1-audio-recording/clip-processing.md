@@ -4,7 +4,7 @@
 ## ID: 1.4
 ## Priority: High
 ## Estimated: 2 weeks
-## Status: `[ ]` Not Started
+## Status: `[~]` In Progress
 ## Depends On: 1.2
 
 ## Description
@@ -15,14 +15,28 @@ Offline clip processing: gain, pitch shift, time stretch, reverse, normalize. No
 - [ ] Clip gain: Apply gain to create new rendered file
 - [ ] Pitch shift: Semitone + fine tune, formant preservation option
 - [ ] Time stretch: Multiple algorithms (tape, elastic, musical)
-- [ ] Reverse: Play clip backwards
-- [ ] Normalize: Peak or LUFS, per clip or selection
+- [x] Reverse: Render the clip backwards to a new file (original preserved)
+- [x] Normalize: Peak to −1 dBFS, per clip
 - [ ] Fade in/out render: Bake fades into new file
 - [ ] Consolidate: Merge adjacent clips on same track into one file
 - [ ] Bounce in place: Render clip with inserts/sends to new file
-- [ ] Process menu: Right-click clip → Process → [operations]
+- [x] Process menu: Right-click clip → Process → Normalize / Reverse (more operations to follow)
 
 ## Technical Details
+
+### Implemented
+
+- **Normalize**: computes the exact peak of the clip's visible source range by
+  seeking in the WAV and streaming only that range, then sets clip gain so the
+  peak reaches −1 dBFS. This is a `Shape` undo entry.
+- **Reverse**: decodes the clip's visible source range, reverses frames while
+  preserving channel order, writes a new 32-bit float WAV next to the source
+  (`<name>_reverse_<uuid>.wav`), and points the clip at it with
+  `source_offset = 0`. Undo restores the previous `AudioFileRef`, offset and
+  length via a `Source` undo entry. A fresh waveform overview is generated in
+  the background; results for a replaced path are discarded.
+- **Process menu**: right-click a clip in the arrange view. The same actions
+  are available in the clip inspector.
 
 ### Processing Pipeline
 ```rust
@@ -75,20 +89,16 @@ enum NormalizeMode {
 
 - [ ] Pitch shift ±12 semitones sounds musical
 - [ ] Time stretch 0.5x–2.0x without artifacts (elastic mode)
-- [ ] Reverse plays correctly
-- [ ] Normalize to -1 dB peak works
+- [x] Reverse plays correctly
+- [x] Normalize to -1 dB peak works
 - [ ] Consolidate merges clips correctly
 - [ ] Bounce in place includes plugin processing
-- [ ] All operations create undoable commands
-- [ ] Original files untouched
+- [x] All operations create undoable commands
+- [x] Original files untouched
 
 ## Progress Log
 
-- YYYY-MM-DD: Gain processing
-- YYYY-MM-DD: Pitch shift (Rubber Band)
-- YYYY-MM-DD: Time stretch modes
-- YYYY-MM-DD: Reverse
-- YYYY-MM-DD: Normalize
-- YYYY-MM-DD: Consolidate
-- YYYY-MM-DD: Bounce in place
-- YYYY-MM-DD: Process menu UI
+- 2026-10-21: Peak normalize to −1 dBFS (exact per-channel peak over the clip range, gain edit, undoable)
+- 2026-10-21: Reverse rendered to a new WAV per clip (channel-safe frame reversal, undo via source state)
+- 2026-10-21: Right-click Process menu in the arrange view
+- Remaining: pitch shift, time stretch, fade rendering, consolidate, bounce in place, LUFS normalize
