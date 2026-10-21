@@ -1,11 +1,39 @@
 //! Main application
 
-use daw_core::Project;
-use daw_core::track::TrackId;
-use daw_engine::AudioEngine;
 use anyhow::Result;
+use daw_core::audio_pool::AudioFileRef;
+use daw_core::clip::{AudioClip, ClipId, Fade, FadeCurve, TimelinePos};
+use daw_core::project::{BitDepth, Color};
+use daw_core::track::TrackId;
+use daw_core::Project;
+use daw_core::WaveformOverview;
+use daw_engine::playback::PlayableClip;
+use daw_engine::AudioEngine;
 use eframe::egui;
-use std::path::PathBuf;
+use std::collections::{HashMap, VecDeque};
+use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+
+/// Minimum horizontal zoom (pixels per second).
+const MIN_PPS: f32 = 0.02;
+/// Maximum horizontal zoom (~8 samples per pixel at 48 kHz).
+const MAX_PPS: f32 = 400_000.0;
+/// Samples per overview entry when generating waveforms.
+const FRAMES_PER_PIXEL: u32 = 256;
+/// Smallest timeline span when fitting the view to the project.
+const MIN_TIMELINE_SECS: f64 = 4.0;
+/// Number of decoded detail windows kept in memory.
+const DETAIL_CACHE_ENTRIES: usize = 8;
+/// Largest detail window we are willing to decode in one go.
+const DETAIL_MAX_FRAMES: usize = 262_144;
+/// Switch to sample-accurate rendering below this many samples per pixel.
+const DETAIL_TRIGGER_SAMPLES_PER_PX: f64 = 4.0;
+/// Horizontal click tolerance for the trim handles on a clip's edges.
+const CLIP_EDGE_PX: f32 = 8.0;
+/// Size of the fade-handle hit area in a clip's top corners.
+const FADE_HANDLE_PX: f32 = 16.0;
+/// Smallest duration a clip may be trimmed/split to (seconds).
+const MIN_CLIP_SECS: f64 = 0.02;
 
 pub struct App {
     project: Project,
@@ -33,11 +61,220 @@ impl App {
                 Ok(Box::new(AppUI::new(self.project, self.engine)))
             }),
         );
-        
+
         match result {
             Ok(_) => Ok(()),
             Err(e) => Err(anyhow::anyhow!("eframe error: {:?}", e)),
         }
+    }
+}
+
+/// Horizontal timeline mapping: `start_secs` is the time at the left edge,
+/// `pps` is the zoom in pixels per second.
+#[derive(Debug, Clone, Copy)]
+struct TimelineView {
+    start_secs: f64,
+    pps: f32,
+}
+
+impl TimelineView {
+    fn x(&self, rect: egui::Rect, t_secs: f64) -> f32 {
+        rect.left() + ((t_secs - self.start_secs) * self.pps as f64) as f32
+    }
+
+    fn t(&self, rect: egui::Rect, x: f32) -> f64 {
+        self.start_secs + ((x - rect.left()) / self.pps.max(f32::EPSILON)) as f64
+    }
+
+    fn visible_secs(&self, rect: egui::Rect) -> f64 {
+        rect.width() as f64 / self.pps.max(f32::EPSILON) as f64
+    }
+}
+
+/// Snap resolution used while dragging clip positions and trims.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SnapMode {
+    Off,
+    Bar,
+    Beat,
+    Eighth,
+    Sixteenth,
+}
+
+impl SnapMode {
+    fn label(self) -> &'static str {
+        match self {
+            SnapMode::Off => "Off",
+            SnapMode::Bar => "Bar",
+            SnapMode::Beat => "Beat",
+            SnapMode::Eighth => "1/8",
+            SnapMode::Sixteenth => "1/16",
+        }
+    }
+
+    /// Grid spacing in seconds. `beat_secs` is one signature beat (the
+    /// denominator note), not necessarily a quarter note.
+    fn interval_secs(self, beat_secs: f64, beats_per_bar: f64) -> Option<f64> {
+        match self {
+            SnapMode::Off => None,
+            SnapMode::Bar => Some(beat_secs * beats_per_bar.max(1.0)),
+            SnapMode::Beat => Some(beat_secs),
+            SnapMode::Eighth => Some(beat_secs * 0.5),
+            SnapMode::Sixteenth => Some(beat_secs * 0.25),
+        }
+    }
+}
+
+/// How the timeline ruler labels positions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RulerMode {
+    BarsBeats,
+    Time,
+}
+
+impl RulerMode {
+    fn label(self) -> &'static str {
+        match self {
+            RulerMode::BarsBeats => "Bars/Beats",
+            RulerMode::Time => "Time",
+        }
+    }
+}
+
+/// One tick line in the ruler. Major ticks carry a label and are also drawn
+/// as grid lines over the track lanes.
+struct RulerTick {
+    secs: f64,
+    label: Option<String>,
+    major: bool,
+}
+
+/// Signatures offered in the transport bar picker.
+const TIME_SIGNATURES: [(u8, u8); 10] = [
+    (4, 4),
+    (3, 4),
+    (2, 4),
+    (5, 4),
+    (7, 4),
+    (6, 8),
+    (7, 8),
+    (9, 8),
+    (12, 8),
+    (3, 8),
+];
+
+/// The editable (non-destructive) part of an audio clip. Kept small so undo
+/// entries never clone the whole source reference with its waveform overview.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ClipShape {
+    source_offset: u64,
+    position: TimelinePos,
+    length: u64,
+    gain: f32,
+    fade_in: Option<Fade>,
+    fade_out: Option<Fade>,
+    color: Option<Color>,
+}
+
+impl ClipShape {
+    fn of(clip: &AudioClip) -> Self {
+        Self {
+            source_offset: clip.source_offset,
+            position: clip.timeline_position,
+            length: clip.length,
+            gain: clip.gain,
+            fade_in: clip.fade_in,
+            fade_out: clip.fade_out,
+            color: clip.color,
+        }
+    }
+
+    fn apply(self, clip: &mut AudioClip) {
+        clip.source_offset = self.source_offset;
+        clip.timeline_position = self.position;
+        clip.length = self.length;
+        clip.gain = self.gain;
+        clip.fade_in = self.fade_in;
+        clip.fade_out = self.fade_out;
+        clip.color = self.color;
+    }
+}
+
+/// One undoable edit. Structural commands reference clips by id (the clip data
+/// stays in the project pool), so history entries are cheap.
+#[derive(Debug, Clone)]
+enum EditAction {
+    /// Move a clip to another timeline position and/or track.
+    Move {
+        clip_id: ClipId,
+        from_track: TrackId,
+        from_pos: TimelinePos,
+        to_track: TrackId,
+        to_pos: TimelinePos,
+    },
+    /// Non-destructive change: trim, fade, gain or color.
+    Shape {
+        clip_id: ClipId,
+        from: ClipShape,
+        to: ClipShape,
+    },
+    /// Place an existing clip on a track (undo takes it off).
+    Attach { track: TrackId, clip_id: ClipId },
+    /// Take a clip off its track (undo puts it back). The audio and clip data
+    /// remain in the project, so deleted clips are recoverable.
+    Detach { track: TrackId, clip_id: ClipId },
+    /// Change the project time signature.
+    TimeSignature { from: (u8, u8), to: (u8, u8) },
+    Group(Vec<EditAction>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DragMode {
+    Move,
+    TrimStart,
+    TrimEnd,
+    FadeIn,
+    FadeOut,
+}
+
+/// In-progress clip drag (move, trim or fade handle).
+struct ClipDrag {
+    clip_id: ClipId,
+    mode: DragMode,
+    from_shape: ClipShape,
+    from_track: TrackId,
+    last_track: TrackId,
+    grab_offset_secs: f64,
+}
+
+/// Decoded mono windows used for sample-accurate rendering at high zoom.
+#[derive(Default)]
+struct DetailCache {
+    entries: HashMap<(PathBuf, u64, usize), Vec<f32>>,
+    order: VecDeque<(PathBuf, u64, usize)>,
+}
+
+impl DetailCache {
+    fn get(
+        &mut self,
+        path: &Path,
+        start_frame: u64,
+        frames: usize,
+        channels: u16,
+        sample_rate: u32,
+    ) -> Option<&[f32]> {
+        let key = (path.to_path_buf(), start_frame, frames);
+        if !self.entries.contains_key(&key) {
+            let window = read_mono_window(path, start_frame, frames, channels, sample_rate).ok()?;
+            while self.order.len() >= DETAIL_CACHE_ENTRIES {
+                if let Some(old) = self.order.pop_front() {
+                    self.entries.remove(&old);
+                }
+            }
+            self.order.push_back(key.clone());
+            self.entries.insert(key.clone(), window);
+        }
+        self.entries.get(&key).map(|v| v.as_slice())
     }
 }
 
@@ -46,44 +283,1106 @@ struct AppUI {
     engine: AudioEngine,
     playing: bool,
     recording: bool,
-    playhead_position: f32,  // 0.0 to 1.0
+    /// Playhead position in seconds.
+    playhead_secs: f64,
+    /// Where recording started, so the clip lands at the right spot.
+    record_start_secs: Option<f64>,
+    /// Armed take waiting for the transport to roll (see `begin_recording`).
+    pending_record_track: Option<TrackId>,
     last_playhead_update: std::time::Instant,
     dragging_playhead: bool,
     input_devices: Vec<daw_engine::audio_backend::AudioDeviceInfo>,
     selected_input_device: Option<String>,
-    waveform_cache: daw_engine::waveform::WaveformCache,
+    error_message: Option<String>,
+
+    // Timeline view state
+    view_start_secs: f64,
+    pixels_per_sec: f32,
+    needs_fit: bool,
+    last_timeline_width: f32,
+    selected_clip: Option<ClipId>,
+
+    // Non-destructive editing
+    snap_mode: SnapMode,
+    /// How the ruler labels positions (musical bars/beats or clock time).
+    ruler_mode: RulerMode,
+    /// Alt bypasses snapping while held.
+    snap_suspended: bool,
+    drag: Option<ClipDrag>,
+    clipboard: Option<AudioClip>,
+    undo_stack: Vec<EditAction>,
+    redo_stack: Vec<EditAction>,
+    /// True while consecutive edits (e.g. a slider drag) belong to one gesture
+    /// and should share a single undo entry.
+    merge_chain: bool,
+    /// Deferred mixer refresh for edits made while a pointer gesture is active.
+    needs_audio_refresh: bool,
+
+    // Waveform overview generation
+    waveform_tx: mpsc::Sender<(ClipId, Result<WaveformOverview>)>,
+    waveform_rx: mpsc::Receiver<(ClipId, Result<WaveformOverview>)>,
+    detail_cache: DetailCache,
 }
 
 impl AppUI {
     fn new(project: Project, engine: AudioEngine) -> Self {
         let input_devices = engine.input_devices().unwrap_or_default();
-        Self {
+        let (waveform_tx, waveform_rx) = mpsc::channel();
+
+        let mut app = Self {
             project,
             engine,
             playing: false,
             recording: false,
-            playhead_position: 0.0,
+            playhead_secs: 0.0,
+            record_start_secs: None,
+            pending_record_track: None,
             last_playhead_update: std::time::Instant::now(),
             dragging_playhead: false,
             input_devices,
             selected_input_device: None,
-            waveform_cache: daw_engine::waveform::WaveformCache::new(),
+            error_message: None,
+            view_start_secs: 0.0,
+            pixels_per_sec: 100.0,
+            needs_fit: true,
+            last_timeline_width: 1000.0,
+            selected_clip: None,
+            snap_mode: SnapMode::Off,
+            ruler_mode: RulerMode::BarsBeats,
+            snap_suspended: false,
+            drag: None,
+            clipboard: None,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            merge_chain: false,
+            needs_audio_refresh: false,
+            waveform_tx,
+            waveform_rx,
+            detail_cache: DetailCache::default(),
+        };
+
+        // Projects loaded from disk may predate stored overviews; generate any
+        // that are missing in the background.
+        app.spawn_missing_overviews();
+        app
+    }
+
+    fn timeline_duration(&self) -> f64 {
+        self.project.duration_samples() as f64 / self.project.sample_rate.max(1) as f64
+    }
+
+    fn spawn_missing_overviews(&mut self) {
+        let missing: Vec<(ClipId, PathBuf)> = self
+            .project
+            .audio_clips
+            .iter()
+            .filter(|(_, clip)| clip.source.overview.is_none() && clip.source.path.exists())
+            .map(|(id, clip)| (id, clip.source.path.clone()))
+            .collect();
+
+        for (clip_id, path) in missing {
+            self.spawn_overview(clip_id, path);
+        }
+    }
+
+    fn spawn_overview(&self, clip_id: ClipId, path: PathBuf) {
+        let tx = self.waveform_tx.clone();
+        std::thread::spawn(move || {
+            let result = WaveformOverview::generate_from_file(&path, FRAMES_PER_PIXEL);
+            let _ = tx.send((clip_id, result));
+        });
+    }
+
+    fn poll_waveforms(&mut self) {
+        loop {
+            match self.waveform_rx.try_recv() {
+                Ok((clip_id, Ok(overview))) => {
+                    if let Some(clip) = self.project.audio_clips.get_mut(clip_id) {
+                        clip.source.overview = Some(overview);
+                    }
+                }
+                Ok((_, Err(e))) => eprintln!("Waveform generation failed: {}", e),
+                Err(mpsc::TryRecvError::Empty) | Err(mpsc::TryRecvError::Disconnected) => break,
+            }
+        }
+    }
+
+    fn fit_view(&mut self, width: f32) {
+        let duration = self.timeline_duration();
+        let span = (duration * 1.05).max(MIN_TIMELINE_SECS);
+        self.view_start_secs = 0.0;
+        self.pixels_per_sec = (width as f64 / span) as f32;
+        self.pixels_per_sec = self.pixels_per_sec.clamp(MIN_PPS, MAX_PPS);
+        self.needs_fit = false;
+    }
+
+    fn clamp_view(&mut self, width: f32) {
+        let view_len = width as f64 / self.pixels_per_sec.max(MIN_PPS) as f64;
+        // The timeline is never shorter than the project content or the
+        // playhead, so the playhead can sit past the last clip, and half a view
+        // of empty space is always available beyond the end for placing new
+        // material.
+        let content_end = self
+            .timeline_duration()
+            .max(self.playhead_secs)
+            .max(MIN_TIMELINE_SECS);
+        let max_start = (content_end - view_len).max(0.0) + view_len * 0.5;
+        self.view_start_secs = self.view_start_secs.clamp(0.0, max_start);
+    }
+
+    fn zoom_at(&mut self, rect: egui::Rect, pointer_x: f32, factor: f32) {
+        let view = TimelineView {
+            start_secs: self.view_start_secs,
+            pps: self.pixels_per_sec,
+        };
+        let anchor_t = view.t(rect, pointer_x);
+        let new_pps = (self.pixels_per_sec * factor).clamp(MIN_PPS, MAX_PPS);
+        self.pixels_per_sec = new_pps;
+        self.view_start_secs = anchor_t - ((pointer_x - rect.left()) / new_pps) as f64;
+        self.clamp_view(rect.width());
+    }
+
+    fn zoom_center(&mut self, factor: f32) {
+        let width = self.last_timeline_width.max(1.0);
+        let view_len = width as f64 / self.pixels_per_sec.max(MIN_PPS) as f64;
+        let center_t = self.view_start_secs + view_len * 0.5;
+        self.pixels_per_sec = (self.pixels_per_sec * factor).clamp(MIN_PPS, MAX_PPS);
+        let new_len = width as f64 / self.pixels_per_sec.max(MIN_PPS) as f64;
+        self.view_start_secs = center_t - new_len * 0.5;
+        self.clamp_view(width);
+    }
+}
+
+impl AppUI {
+    // ---- Non-destructive editing -------------------------------------------------
+
+    fn time_signature(&self) -> (u8, u8) {
+        self.project.time_signature_map.time_sig_at_tick(0)
+    }
+
+    /// Length of one signature beat (the denominator note) in seconds.
+    fn secs_per_beat(&self) -> f64 {
+        let bpm = self.project.tempo_map.default_bpm().max(1.0) as f64;
+        let (_, denominator) = self.time_signature();
+        60.0 / bpm * (4.0 / denominator.max(1) as f64)
+    }
+
+    /// Snap `t` to the current grid (Alt bypasses snapping).
+    fn snap_secs(&self, t: f64) -> f64 {
+        let t = t.max(0.0);
+        if self.snap_suspended {
+            return t;
+        }
+        let (numerator, _) = self.time_signature();
+        match self
+            .snap_mode
+            .interval_secs(self.secs_per_beat(), numerator.max(1) as f64)
+        {
+            Some(grid) if grid > 1e-6 => (t / grid).round() * grid,
+            _ => t,
+        }
+    }
+
+    /// Build the ruler/grid tick lines for the visible range in the current
+    /// ruler mode. In Bars/Beats mode this labels every beat when there is
+    /// room, otherwise every 2/4/8... bars.
+    fn build_ruler_ticks(&self, start_secs: f64, end_secs: f64) -> Vec<RulerTick> {
+        let mut ticks = Vec::new();
+        let start = start_secs.max(0.0);
+        if end_secs <= start {
+            return ticks;
+        }
+
+        match self.ruler_mode {
+            RulerMode::Time => {
+                let major = nice_interval(self.pixels_per_sec);
+                let minor = major / 4.0;
+
+                let mut t = (start / minor).floor() * minor;
+                let mut guard = 0;
+                while t <= end_secs && guard < 4096 {
+                    if t >= 0.0 {
+                        ticks.push(RulerTick { secs: t, label: None, major: false });
+                    }
+                    t += minor;
+                    guard += 1;
+                }
+
+                let mut t = (start / major).floor() * major;
+                let mut guard = 0;
+                while t <= end_secs && guard < 4096 {
+                    if t >= 0.0 {
+                        ticks.push(RulerTick {
+                            secs: t,
+                            label: Some(format_ruler_time(t, major)),
+                            major: true,
+                        });
+                    }
+                    t += major;
+                    guard += 1;
+                }
+            }
+            RulerMode::BarsBeats => {
+                let (numerator, denominator) = self.time_signature();
+                let bpm = self.project.tempo_map.default_bpm().max(1.0) as f64;
+                let secs_per_tick = 60.0 / bpm / 960.0;
+                let beat_ticks = 960.0 * 4.0 / denominator.max(1) as f64;
+                let bar_ticks = beat_ticks * numerator.max(1) as f64;
+                let beat_secs = beat_ticks * secs_per_tick;
+                let bar_secs = bar_ticks * secs_per_tick;
+                let beat_px = beat_secs * self.pixels_per_sec as f64;
+                let bar_px = bar_secs * self.pixels_per_sec as f64;
+
+                // Label each beat when there is room; otherwise space the bar
+                // labels out in powers of two.
+                let label_beats = beat_px >= 44.0;
+                let major_step = if label_beats {
+                    beat_ticks
+                } else {
+                    let mut bars_per_label = 1.0;
+                    while bar_px * bars_per_label < 64.0 && bars_per_label < 4096.0 {
+                        bars_per_label *= 2.0;
+                    }
+                    bar_ticks * bars_per_label
+                };
+                let minor_step = if label_beats {
+                    beat_ticks / 4.0
+                } else if beat_px >= 6.0 {
+                    beat_ticks
+                } else {
+                    bar_ticks
+                };
+
+                let start_tick = start / secs_per_tick;
+                let end_tick = end_secs / secs_per_tick;
+
+                let mut tick = (start_tick / minor_step).floor() * minor_step;
+                let mut guard = 0;
+                while tick <= end_tick && guard < 4096 {
+                    if tick >= 0.0 {
+                        ticks.push(RulerTick {
+                            secs: tick * secs_per_tick,
+                            label: None,
+                            major: false,
+                        });
+                    }
+                    tick += minor_step;
+                    guard += 1;
+                }
+
+                let mut tick = (start_tick / major_step).floor() * major_step;
+                let mut guard = 0;
+                while tick <= end_tick && guard < 4096 {
+                    if tick >= 0.0 {
+                        let bar_index = (tick / bar_ticks).floor().max(0.0) as u64 + 1;
+                        let label = if label_beats {
+                            // Tiny epsilon so float drift at bar boundaries
+                            // still reports beat 1, not the last beat.
+                            let beat_index = ((tick.rem_euclid(bar_ticks) / beat_ticks)
+                                + 1e-6)
+                                .floor()
+                                .max(0.0) as u64
+                                + 1;
+                            format!("{}.{}", bar_index, beat_index)
+                        } else {
+                            format!("{}", bar_index)
+                        };
+                        ticks.push(RulerTick {
+                            secs: tick * secs_per_tick,
+                            label: Some(label),
+                            major: true,
+                        });
+                    }
+                    tick += major_step;
+                    guard += 1;
+                }
+            }
+        }
+
+        ticks
+    }
+
+    /// Move `clip_id` onto `track_id`, removing it from any other track.
+    fn place_clip(&mut self, clip_id: ClipId, track_id: TrackId) {
+        for track in self.project.tracks.values_mut() {
+            track.remove_clip(clip_id);
+        }
+        self.attach_clip(track_id, clip_id);
+    }
+
+    fn attach_clip(&mut self, track_id: TrackId, clip_id: ClipId) {
+        if let Some(track) = self.project.tracks.get_mut(&track_id) {
+            if !track.clips.contains(&clip_id) {
+                track.clips.push(clip_id);
+            }
+        }
+    }
+
+    fn detach_clip(&mut self, track_id: TrackId, clip_id: ClipId) {
+        if let Some(track) = self.project.tracks.get_mut(&track_id) {
+            track.remove_clip(clip_id);
+        }
+    }
+
+    fn clip_track(&self, clip_id: ClipId) -> Option<TrackId> {
+        self.project
+            .track_order
+            .iter()
+            .find(|track_id| {
+                self.project
+                    .tracks
+                    .get(*track_id)
+                    .map(|track| track.clips.contains(&clip_id))
+                    .unwrap_or(false)
+            })
+            .copied()
+    }
+
+    fn after_edit(&mut self) {
+        self.project.modified = true;
+    }
+
+    /// Reload the mixer so playback reflects the edited arrangement.
+    fn refresh_playback_if_playing(&mut self) {
+        if self.playing {
+            let out_rate = self.engine.output_sample_rate().max(1);
+            let clips = self.collect_playable_clips(out_rate);
+            let start_frame = (self.playhead_secs.max(0.0) * out_rate as f64) as u64;
+            self.engine.set_playback_clips(clips, start_frame);
+        }
+    }
+
+    fn push_undo(&mut self, action: EditAction, merge: bool) {
+        self.redo_stack.clear();
+
+        // Merge continuous edits of the same clip (e.g. dragging a gain slider)
+        // into a single history entry while the pointer stays down.
+        if merge && self.merge_chain {
+            if let EditAction::Shape { clip_id, from, to } = &action {
+                let (clip_id, from, to) = (*clip_id, *from, *to);
+                if let Some(EditAction::Shape {
+                    clip_id: prev_id,
+                    to: prev_to,
+                    ..
+                }) = self.undo_stack.last_mut()
+                {
+                    if *prev_id == clip_id && *prev_to == from {
+                        *prev_to = to;
+                        return;
+                    }
+                }
+            }
+        }
+
+        self.undo_stack.push(action);
+        self.merge_chain = merge;
+    }
+
+    fn apply_action(&mut self, action: &EditAction, forward: bool) {
+        match action {
+            EditAction::Move {
+                clip_id,
+                from_track,
+                from_pos,
+                to_track,
+                to_pos,
+            } => {
+                let (track_id, position) = if forward {
+                    (*to_track, *to_pos)
+                } else {
+                    (*from_track, *from_pos)
+                };
+                self.place_clip(*clip_id, track_id);
+                if let Some(clip) = self.project.audio_clips.get_mut(*clip_id) {
+                    clip.timeline_position = position;
+                }
+            }
+            EditAction::Shape { clip_id, from, to } => {
+                if let Some(clip) = self.project.audio_clips.get_mut(*clip_id) {
+                    (if forward { *to } else { *from }).apply(clip);
+                }
+            }
+            EditAction::Attach { track, clip_id } => {
+                if forward {
+                    self.attach_clip(*track, *clip_id);
+                } else {
+                    self.detach_clip(*track, *clip_id);
+                }
+            }
+            EditAction::Detach { track, clip_id } => {
+                if forward {
+                    self.detach_clip(*track, *clip_id);
+                } else {
+                    self.attach_clip(*track, *clip_id);
+                }
+            }
+            EditAction::TimeSignature { from, to } => {
+                let (numerator, denominator) = if forward { *to } else { *from };
+                self.project
+                    .time_signature_map
+                    .set_change(0, numerator, denominator);
+            }
+            EditAction::Group(actions) => {
+                if forward {
+                    for action in actions {
+                        self.apply_action(action, true);
+                    }
+                } else {
+                    for action in actions.iter().rev() {
+                        self.apply_action(action, false);
+                    }
+                }
+            }
+        }
+    }
+
+    fn undo(&mut self) {
+        self.merge_chain = false;
+        if let Some(action) = self.undo_stack.pop() {
+            self.apply_action(&action, false);
+            self.redo_stack.push(action);
+            self.after_edit();
+            self.refresh_playback_if_playing();
+        }
+    }
+
+    fn redo(&mut self) {
+        self.merge_chain = false;
+        if let Some(action) = self.redo_stack.pop() {
+            self.apply_action(&action, true);
+            self.undo_stack.push(action);
+            self.after_edit();
+            self.refresh_playback_if_playing();
+        }
+    }
+
+    /// Hit-test a pointer position against drawn clips and choose the gesture
+    /// for that spot: fade handle, trim edge or move.
+    fn clip_hit(
+        clip_rects: &[(ClipId, egui::Rect)],
+        pos: egui::Pos2,
+    ) -> Option<(ClipId, DragMode)> {
+        for (clip_id, rect) in clip_rects.iter().rev() {
+            if !rect.contains(pos) {
+                continue;
+            }
+            let wide = rect.width() > FADE_HANDLE_PX * 4.0;
+            let top = pos.y <= rect.top() + FADE_HANDLE_PX;
+            let mode = if wide && top && pos.x <= rect.left() + FADE_HANDLE_PX {
+                DragMode::FadeIn
+            } else if wide && top && pos.x >= rect.right() - FADE_HANDLE_PX {
+                DragMode::FadeOut
+            } else if pos.x <= rect.left() + CLIP_EDGE_PX {
+                DragMode::TrimStart
+            } else if pos.x >= rect.right() - CLIP_EDGE_PX {
+                DragMode::TrimEnd
+            } else {
+                DragMode::Move
+            };
+            return Some((*clip_id, mode));
+        }
+        None
+    }
+
+    fn track_at_y(&self, y: f32, track_y_start: f32, track_height: f32) -> Option<TrackId> {
+        if self.project.track_order.is_empty() || track_height <= 0.0 {
+            return None;
+        }
+        let index = (((y - track_y_start) / track_height).floor() as i64)
+            .clamp(0, self.project.track_order.len() as i64 - 1) as usize;
+        self.project.track_order.get(index).copied()
+    }
+
+    fn begin_clip_drag(
+        &mut self,
+        pos: egui::Pos2,
+        clip_rects: &[(ClipId, egui::Rect)],
+        rect: egui::Rect,
+        view: TimelineView,
+    ) {
+        let Some((clip_id, mode)) = Self::clip_hit(clip_rects, pos) else {
+            return;
+        };
+        let Some(clip) = self.project.audio_clips.get(clip_id) else {
+            return;
+        };
+        if clip.locked {
+            return;
+        }
+        let Some(track_id) = self.clip_track(clip_id) else {
+            return;
+        };
+        // Don't start a clip drag on top of the playhead handle; that gesture
+        // belongs to the playhead.
+        let playhead_x = view.x(rect, self.playhead_secs);
+        if (pos.x - playhead_x).abs() <= CLIP_EDGE_PX {
+            return;
+        }
+        let project_sr = self.project.sample_rate.max(1) as f64;
+        let clip_start = clip.timeline_position.sample as f64 / project_sr;
+
+        self.selected_clip = Some(clip_id);
+        self.drag = Some(ClipDrag {
+            clip_id,
+            mode,
+            from_shape: ClipShape::of(clip),
+            from_track: track_id,
+            last_track: track_id,
+            grab_offset_secs: (view.t(rect, pos.x) - clip_start).max(0.0),
+        });
+    }
+
+    fn update_clip_drag(
+        &mut self,
+        pos: egui::Pos2,
+        rect: egui::Rect,
+        track_y_start: f32,
+        track_height: f32,
+        view: TimelineView,
+    ) {
+        let Some(mut drag) = self.drag.take() else {
+            return;
+        };
+        let Some(clip) = self.project.audio_clips.get(drag.clip_id) else {
+            self.drag = Some(drag);
+            return;
+        };
+
+        let project_sr = self.project.sample_rate.max(1) as f64;
+        let src_sr = clip.source.sample_rate.max(1) as f64;
+        let source_frames = clip.source.duration_samples;
+        let bpm = self.project.tempo_map.default_bpm();
+        let pointer_t = view.t(rect, pos.x);
+        let mut shape = drag.from_shape;
+
+        match drag.mode {
+            DragMode::Move => {
+                let start = self.snap_secs(pointer_t - drag.grab_offset_secs);
+                shape.position = TimelinePos::from_sample(
+                    (start * project_sr).round() as u64,
+                    project_sr,
+                    bpm,
+                );
+                if let Some(track_id) = self.track_at_y(pos.y, track_y_start, track_height) {
+                    if track_id != drag.last_track {
+                        self.detach_clip(drag.last_track, drag.clip_id);
+                        self.attach_clip(track_id, drag.clip_id);
+                        drag.last_track = track_id;
+                    }
+                }
+            }
+            DragMode::TrimStart => {
+                let clip_start = drag.from_shape.position.sample as f64 / project_sr;
+                let clip_end = clip_start + drag.from_shape.length as f64 / src_sr;
+                // Trimming left reveals hidden source material before the clip;
+                // it can never extend past the file or the clip's end.
+                let earliest =
+                    (clip_start - drag.from_shape.source_offset as f64 / src_sr).max(0.0);
+                let latest = (clip_end - MIN_CLIP_SECS).max(earliest);
+                let new_start = self.snap_secs(pointer_t).clamp(earliest, latest);
+                let delta_frames = ((new_start - clip_start) * src_sr).round() as i64;
+                let new_offset = drag.from_shape.source_offset as i64 + delta_frames;
+                let new_length = drag.from_shape.length as i64 - delta_frames;
+                if new_offset >= 0 && new_length > 0 {
+                    shape.source_offset = new_offset as u64;
+                    shape.length = new_length as u64;
+                    shape.position = TimelinePos::from_sample(
+                        (new_start * project_sr).round() as u64,
+                        project_sr,
+                        bpm,
+                    );
+                }
+            }
+            DragMode::TrimEnd => {
+                let clip_start = drag.from_shape.position.sample as f64 / project_sr;
+                let available = source_frames.saturating_sub(drag.from_shape.source_offset);
+                let max_end = clip_start + available as f64 / src_sr;
+                let min_end = clip_start + MIN_CLIP_SECS;
+                let new_end = self.snap_secs(pointer_t).clamp(min_end, max_end.max(min_end));
+                shape.length = (((new_end - clip_start) * src_sr).round() as u64).max(1);
+            }
+            DragMode::FadeIn => {
+                let clip_start = drag.from_shape.position.sample as f64 / project_sr;
+                let frames = ((pointer_t - clip_start).max(0.0) * src_sr).round() as u64;
+                shape.fade_in =
+                    make_fade(frames, drag.from_shape.fade_in, drag.from_shape.length);
+            }
+            DragMode::FadeOut => {
+                let clip_start = drag.from_shape.position.sample as f64 / project_sr;
+                let clip_end = clip_start + drag.from_shape.length as f64 / src_sr;
+                let frames = ((clip_end - pointer_t).max(0.0) * src_sr).round() as u64;
+                shape.fade_out =
+                    make_fade(frames, drag.from_shape.fade_out, drag.from_shape.length);
+            }
+        }
+
+        if let Some(clip) = self.project.audio_clips.get_mut(drag.clip_id) {
+            shape.apply(clip);
+        }
+        self.drag = Some(drag);
+    }
+
+    fn finish_clip_drag(&mut self) {
+        let Some(drag) = self.drag.take() else {
+            return;
+        };
+        let Some(clip) = self.project.audio_clips.get(drag.clip_id) else {
+            return;
+        };
+        let current = ClipShape::of(clip);
+
+        match drag.mode {
+            DragMode::Move => {
+                if drag.last_track != drag.from_track
+                    || current.position != drag.from_shape.position
+                {
+                    self.push_undo(
+                        EditAction::Move {
+                            clip_id: drag.clip_id,
+                            from_track: drag.from_track,
+                            from_pos: drag.from_shape.position,
+                            to_track: drag.last_track,
+                            to_pos: current.position,
+                        },
+                        false,
+                    );
+                    self.after_edit();
+                    self.refresh_playback_if_playing();
+                }
+            }
+            _ => {
+                if current != drag.from_shape {
+                    self.push_undo(
+                        EditAction::Shape {
+                            clip_id: drag.clip_id,
+                            from: drag.from_shape,
+                            to: current,
+                        },
+                        false,
+                    );
+                    self.after_edit();
+                    self.refresh_playback_if_playing();
+                }
+            }
+        }
+    }
+
+    /// Split the selected clip at the playhead.
+    fn split_selected_clip(&mut self) {
+        let Some(clip_id) = self.selected_clip else {
+            return;
+        };
+        self.split_clip_at(clip_id, self.playhead_secs);
+    }
+
+    /// Split `clip_id` at `split_secs` into two clips referencing the same
+    /// source file. The audio file itself is never modified.
+    fn split_clip_at(&mut self, clip_id: ClipId, split_secs: f64) {
+        let Some(track_id) = self.clip_track(clip_id) else {
+            return;
+        };
+
+        let project_sr = self.project.sample_rate.max(1) as f64;
+        let bpm = self.project.tempo_map.default_bpm();
+        let Some(clip) = self.project.audio_clips.get(clip_id) else {
+            return;
+        };
+        if clip.locked {
+            return;
+        }
+        let src_sr = clip.source.sample_rate.max(1) as f64;
+        let clip_start = clip.timeline_position.sample as f64 / project_sr;
+        let clip_end = clip_start + clip.length as f64 / src_sr;
+
+        if split_secs <= clip_start + MIN_CLIP_SECS || split_secs >= clip_end - MIN_CLIP_SECS {
+            self.error_message =
+                Some("The split point must be inside the clip.".to_string());
+            return;
+        }
+
+        let from_shape = ClipShape::of(clip);
+        let offset_frames = ((split_secs - clip_start) * src_sr).round().max(1.0) as u64;
+        if clip.length <= offset_frames + 1 {
+            return;
+        }
+
+        let mut right = clip.clone();
+        right.id = ClipId::default();
+        right.source_offset = clip.source_offset + offset_frames;
+        right.timeline_position = TimelinePos::from_sample(
+            (split_secs * project_sr).round() as u64,
+            project_sr,
+            bpm,
+        );
+        right.length = clip.length - offset_frames;
+        right.fade_in = None;
+        right.fade_out = from_shape
+            .fade_out
+            .map(|fade| Fade::new(fade.length.min(right.length), fade.curve));
+
+        let mut to_shape = from_shape;
+        to_shape.length = offset_frames;
+        to_shape.fade_out = None;
+        to_shape.fade_in = from_shape
+            .fade_in
+            .map(|fade| Fade::new(fade.length.min(offset_frames), fade.curve));
+
+        let new_id = self.project.audio_clips.insert(right);
+        let action = EditAction::Group(vec![
+            EditAction::Shape {
+                clip_id,
+                from: from_shape,
+                to: to_shape,
+            },
+            EditAction::Attach {
+                track: track_id,
+                clip_id: new_id,
+            },
+        ]);
+        self.apply_action(&action, true);
+        self.push_undo(action, false);
+        self.after_edit();
+        self.refresh_playback_if_playing();
+    }
+
+    /// Delete the selected clip from its track. The clip data stays in the
+    /// project pool, so the delete is recoverable (trash + undo).
+    fn delete_selected_clip(&mut self) {
+        let Some(clip_id) = self.selected_clip else {
+            return;
+        };
+        let Some(track_id) = self.clip_track(clip_id) else {
+            return;
+        };
+        if self
+            .project
+            .audio_clips
+            .get(clip_id)
+            .map(|clip| clip.locked)
+            .unwrap_or(false)
+        {
+            return;
+        }
+        let action = EditAction::Detach { track: track_id, clip_id };
+        self.apply_action(&action, true);
+        self.push_undo(action, false);
+        self.selected_clip = None;
+        self.after_edit();
+        self.refresh_playback_if_playing();
+    }
+
+    fn copy_selected_clip(&mut self) {
+        if let Some(clip) = self
+            .selected_clip
+            .and_then(|id| self.project.audio_clips.get(id))
+        {
+            self.clipboard = Some(clip.clone());
+        }
+    }
+
+    fn paste_clip(&mut self) {
+        let Some(template) = self.clipboard.clone() else {
+            return;
+        };
+        let track_id = self
+            .selected_clip
+            .and_then(|id| self.clip_track(id))
+            .or_else(|| self.project.track_order.first().copied());
+        let Some(track_id) = track_id else {
+            self.error_message = Some("No track to paste into.".to_string());
+            return;
+        };
+
+        let project_sr = self.project.sample_rate.max(1) as f64;
+        let bpm = self.project.tempo_map.default_bpm();
+        let mut clip = template;
+        clip.id = ClipId::default();
+        clip.timeline_position = TimelinePos::from_sample(
+            (self.playhead_secs.max(0.0) * project_sr).round() as u64,
+            project_sr,
+            bpm,
+        );
+
+        let new_id = self.project.audio_clips.insert(clip);
+        let action = EditAction::Attach {
+            track: track_id,
+            clip_id: new_id,
+        };
+        self.apply_action(&action, true);
+        self.push_undo(action, false);
+        self.selected_clip = Some(new_id);
+        self.after_edit();
+        self.refresh_playback_if_playing();
+    }
+
+    fn duplicate_selected_clip(&mut self) {
+        let Some(clip_id) = self.selected_clip else {
+            return;
+        };
+        let Some(track_id) = self.clip_track(clip_id) else {
+            return;
+        };
+        let Some(clip) = self.project.audio_clips.get(clip_id) else {
+            return;
+        };
+        if clip.locked {
+            return;
+        }
+
+        let project_sr = self.project.sample_rate.max(1) as f64;
+        let src_sr = clip.source.sample_rate.max(1) as f64;
+        let bpm = self.project.tempo_map.default_bpm();
+        let end_secs =
+            clip.timeline_position.sample as f64 / project_sr + clip.length as f64 / src_sr;
+
+        let mut copy = clip.clone();
+        copy.id = ClipId::default();
+        copy.timeline_position = TimelinePos::from_sample(
+            (end_secs * project_sr).round() as u64,
+            project_sr,
+            bpm,
+        );
+
+        let new_id = self.project.audio_clips.insert(copy);
+        let action = EditAction::Attach {
+            track: track_id,
+            clip_id: new_id,
+        };
+        self.apply_action(&action, true);
+        self.push_undo(action, false);
+        self.selected_clip = Some(new_id);
+        self.after_edit();
+        self.refresh_playback_if_playing();
+    }
+
+    /// Clip inspector in the arrange toolbar: gain, fades, color. Every change
+    /// is recorded for undo.
+    fn clip_properties_ui(&mut self, ui: &mut egui::Ui) {
+        let Some(clip_id) = self.selected_clip else {
+            return;
+        };
+        let Some(clip) = self.project.audio_clips.get(clip_id) else {
+            return;
+        };
+
+        let before = ClipShape::of(clip);
+        let mut after = before;
+        let name = clip
+            .source
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("clip")
+            .to_string();
+        let src_sr = clip.source.sample_rate.max(1) as f64;
+
+        ui.label("Clip:");
+        ui.label(name);
+        ui.separator();
+
+        // Gain (stored linearly, edited in dB).
+        ui.label("Gain:");
+        let mut gain_db = 20.0 * before.gain.max(1e-6).log10();
+        let gain_response = ui.add(
+            egui::Slider::new(&mut gain_db, -48.0..=12.0)
+                .suffix(" dB")
+                .max_decimals(1),
+        );
+        if gain_response.changed() {
+            after.gain = 10.0f32.powf(gain_db / 20.0);
+        }
+        ui.separator();
+
+        // Fades: curve + length, editable numerically as well as by dragging
+        // the handles in the timeline.
+        let (fade_in, in_changed) =
+            fade_editor_ui(ui, "Fade in", before.fade_in, before.length, src_sr);
+        let (fade_out, out_changed) =
+            fade_editor_ui(ui, "Fade out", before.fade_out, before.length, src_sr);
+        after.fade_in = fade_in;
+        after.fade_out = fade_out;
+
+        ui.separator();
+
+        // Per-clip color override.
+        ui.label("Color:");
+        let mut tint = before
+            .color
+            .map(|color| {
+                egui::Color32::from_rgba_unmultiplied(color.0, color.1, color.2, color.3)
+            })
+            .unwrap_or(egui::Color32::from_gray(140));
+        if ui.color_edit_button_srgba(&mut tint).changed() {
+            after.color = Some(Color::from_rgba(tint.r(), tint.g(), tint.b(), tint.a()));
+        }
+        if before.color.is_some() && ui.small_button("×").clicked() {
+            after.color = None;
+        }
+
+        if after != before {
+            if let Some(clip) = self.project.audio_clips.get_mut(clip_id) {
+                after.apply(clip);
+            }
+            self.push_undo(
+                EditAction::Shape {
+                    clip_id,
+                    from: before,
+                    to: after,
+                },
+                true,
+            );
+            self.after_edit();
+            // Discrete changes (curve/color) should be heard immediately; while
+            // a slider is being dragged we wait for release to avoid glitching.
+            let using_pointer = ui.ctx().is_using_pointer();
+            if !using_pointer || in_changed || out_changed {
+                self.refresh_playback_if_playing();
+            } else {
+                self.needs_audio_refresh = true;
+            }
+        }
+
+        if gain_response.drag_stopped() {
+            self.refresh_playback_if_playing();
         }
     }
 }
 
+/// Build a fade from a dragged length, keeping the existing curve. Very short
+/// lengths remove the fade entirely.
+fn make_fade(length: u64, existing: Option<Fade>, clip_length: u64) -> Option<Fade> {
+    const MIN_FADE_SAMPLES: u64 = 16;
+    if length < MIN_FADE_SAMPLES {
+        return None;
+    }
+    let curve = existing.map(|fade| fade.curve).unwrap_or(FadeCurve::Linear);
+    Some(Fade::new(length.min(clip_length), curve))
+}
+
+fn fade_curve_name(curve: FadeCurve) -> &'static str {
+    match curve {
+        FadeCurve::Linear => "Linear",
+        FadeCurve::Exponential => "Exponential",
+        FadeCurve::Logarithmic => "Logarithmic",
+        FadeCurve::SCurve => "S-Curve",
+        FadeCurve::EqualPower => "Equal power",
+    }
+}
+
+/// Compact fade editor: curve selector, length in seconds, and an "off" entry.
+/// Returns the new fade and whether a discrete (non-drag) change happened.
+fn fade_editor_ui(
+    ui: &mut egui::Ui,
+    label: &str,
+    fade: Option<Fade>,
+    clip_length: u64,
+    source_sr: f64,
+) -> (Option<Fade>, bool) {
+    let mut result = fade;
+    let mut discrete = false;
+
+    ui.label(label);
+    let selected_text = fade
+        .map(|fade| fade_curve_name(fade.curve))
+        .unwrap_or("off");
+    egui::ComboBox::from_id_salt(("fade_curve", label))
+        .selected_text(selected_text)
+        .width(92.0)
+        .show_ui(ui, |ui| {
+            for curve in [
+                FadeCurve::Linear,
+                FadeCurve::Exponential,
+                FadeCurve::Logarithmic,
+                FadeCurve::SCurve,
+                FadeCurve::EqualPower,
+            ] {
+                if ui
+                    .selectable_label(fade.map(|f| f.curve) == Some(curve), fade_curve_name(curve))
+                    .clicked()
+                {
+                    let length = fade
+                        .map(|f| f.length)
+                        .unwrap_or_else(|| ((clip_length as f64 * 0.1) as u64).max(1));
+                    result = Some(Fade::new(length.min(clip_length), curve));
+                    discrete = true;
+                }
+            }
+            if ui.selectable_label(fade.is_none(), "off").clicked() {
+                result = None;
+                discrete = true;
+            }
+        });
+
+    if let Some(current) = fade {
+        let max_secs = clip_length as f64 / source_sr.max(1.0);
+        let mut secs = current.length as f64 / source_sr.max(1.0);
+        if ui
+            .add(
+                egui::DragValue::new(&mut secs)
+                    .speed(0.005)
+                    .range(0.0..=max_secs)
+                    .suffix(" s"),
+            )
+            .changed()
+        {
+            let length = (secs * source_sr).round() as u64;
+            result = make_fade(length, Some(current), clip_length);
+        }
+    }
+
+    (result, discrete)
+}
+
 impl eframe::App for AppUI {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Hold Alt to bypass snapping while dragging clips.
+        self.snap_suspended = ctx.input(|i| i.modifiers.alt);
+        // A released pointer ends the current undo-merge gesture.
+        if !ctx.input(|i| i.pointer.any_down()) {
+            self.merge_chain = false;
+            if self.needs_audio_refresh {
+                self.needs_audio_refresh = false;
+                self.refresh_playback_if_playing();
+            }
+        }
+
         // Handle keyboard shortcuts
         self.handle_keyboard(ctx);
 
-        // Update playhead position during playback
+        // Pick up finished waveform overviews
+        self.poll_waveforms();
+
+        // Advance the playhead during playback. Prefer the audio engine's
+        // sample clock so the playhead matches what is actually being heard,
+        // and fall back to wall time when no audio is loaded. Playback is not
+        // clamped to the last clip: the playhead may run past the project end.
         if self.playing {
-            let elapsed = self.last_playhead_update.elapsed().as_secs_f32();
-            self.playhead_position = (self.playhead_position + elapsed * 0.1) % 1.0;
+            if let Some(frames) = self.engine.playback_position_frames() {
+                let rate = self.engine.output_sample_rate().max(1) as f64;
+                self.playhead_secs = frames as f64 / rate;
+            } else {
+                let elapsed = self.last_playhead_update.elapsed().as_secs_f64();
+                self.playhead_secs += elapsed;
+            }
             self.last_playhead_update = std::time::Instant::now();
         }
-        // When paused, playhead stays at current position
+
+        // Error banner (shown when an operation, e.g. recording, fails)
+        if let Some(message) = self.error_message.clone() {
+            egui::TopBottomPanel::top("error_banner").show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(255, 90, 90),
+                        format!("Error: {}", message),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Dismiss").clicked() {
+                            self.error_message = None;
+                        }
+                    });
+                });
+            });
+        }
 
         // Top transport bar
         egui::TopBottomPanel::top("transport_bar").show(ctx, |ui| {
@@ -92,47 +1391,93 @@ impl eframe::App for AppUI {
                     self.toggle_playback();
                 }
                 ui.separator();
-                
-                // Record button
+
+                // Record button (red while a take is recording or armed)
+                let record_active = self.recording || self.pending_record_track.is_some();
                 let record_text = if self.recording { "⏹" } else { "●" };
-                let record_color = if self.recording { egui::Color32::RED } else { egui::Color32::WHITE };
-                if ui.add(egui::Button::new(egui::RichText::new(record_text).color(record_color)).min_size([32.0, 24.0].into())).clicked() {
+                let record_color = if record_active {
+                    egui::Color32::RED
+                } else {
+                    egui::Color32::WHITE
+                };
+                if ui
+                    .add(
+                        egui::Button::new(egui::RichText::new(record_text).color(record_color))
+                            .min_size([32.0, 24.0].into()),
+                    )
+                    .clicked()
+                {
                     self.toggle_recording();
                 }
-                
+
                 ui.separator();
                 ui.label(format!("Project: {}", self.project.name));
-ui.separator();
-            ui.label(format!("Sample Rate: {} Hz", self.project.sample_rate));
-            ui.separator();
-            
-            // Input device selector
-            if !self.input_devices.is_empty() {
                 ui.separator();
-                ui.label("Input:");
-                let mut selected_changed = false;
-                let mut new_selection = self.selected_input_device.clone();
-                egui::ComboBox::from_label("")
-                    .selected_text(self.selected_input_device.as_deref().unwrap_or("Default"))
+                ui.label(format!("Sample Rate: {} Hz", self.project.sample_rate));
+                ui.separator();
+
+                // Time signature picker. This drives the bars/beats ruler, the
+                // snap grid and the musical length of a bar.
+                ui.label("Time Sig:");
+                let (current_num, current_den) = self.time_signature();
+                let mut chosen = (current_num, current_den);
+                egui::ComboBox::from_id_salt("time_signature")
+                    .selected_text(format!("{}/{}", current_num, current_den))
+                    .width(58.0)
                     .show_ui(ui, |ui| {
-                        for device in &self.input_devices {
-                            let is_default = if device.is_default_input { " (default)" } else { "" };
-                            if ui.selectable_value(
-                                &mut new_selection,
-                                Some(device.id.clone()),
-                                format!("{}{}", device.name, is_default)
-                            ).changed() {
-                                selected_changed = true;
-                            }
+                        for (num, den) in TIME_SIGNATURES {
+                            ui.selectable_value(
+                                &mut chosen,
+                                (num, den),
+                                format!("{}/{}", num, den),
+                            );
                         }
                     });
-                if selected_changed {
-                    let _ = self.engine.set_selected_input_device(new_selection.clone());
-                    self.selected_input_device = new_selection;
+                if chosen != (current_num, current_den) {
+                    self.project
+                        .time_signature_map
+                        .set_change(0, chosen.0, chosen.1);
+                    self.push_undo(
+                        EditAction::TimeSignature {
+                            from: (current_num, current_den),
+                            to: chosen,
+                        },
+                        false,
+                    );
+                    self.after_edit();
                 }
-            }
-            ui.separator();
-            ui.label(format!("Tracks: {}", self.project.track_order.len()));
+                ui.separator();
+
+                // Input device selector
+                if !self.input_devices.is_empty() {
+                    ui.separator();
+                    ui.label("Input:");
+                    let mut selected_changed = false;
+                    let mut new_selection = self.selected_input_device.clone();
+                    egui::ComboBox::from_label("")
+                        .selected_text(self.selected_input_device.as_deref().unwrap_or("Default"))
+                        .show_ui(ui, |ui| {
+                            for device in &self.input_devices {
+                                let is_default = if device.is_default_input { " (default)" } else { "" };
+                                if ui
+                                    .selectable_value(
+                                        &mut new_selection,
+                                        Some(device.id.clone()),
+                                        format!("{}{}", device.name, is_default),
+                                    )
+                                    .changed()
+                                {
+                                    selected_changed = true;
+                                }
+                            }
+                        });
+                    if selected_changed {
+                        let _ = self.engine.set_selected_input_device(new_selection.clone());
+                        self.selected_input_device = new_selection;
+                    }
+                }
+                ui.separator();
+                ui.label(format!("Tracks: {}", self.project.track_order.len()));
             });
         });
 
@@ -147,26 +1492,56 @@ ui.separator();
                         ui.colored_label(color, "■");
                         ui.label(&track.name);
                         ui.separator();
-                        
+
                         // Mute/Solo/Record Arm buttons
-                        let mute_text = if track.mute { "M" } else { "M" };
-                        let solo_text = if track.solo { "S" } else { "S" };
+                        let mute_text = "M";
+                        let solo_text = "S";
                         let arm_text = if track.record_arm { "●" } else { "○" };
-                        
-                        let mute_color = if track.mute { egui::Color32::YELLOW } else { egui::Color32::GRAY };
-                        let solo_color = if track.solo { egui::Color32::GREEN } else { egui::Color32::GRAY };
-                        let arm_color = if track.record_arm { egui::Color32::RED } else { egui::Color32::GRAY };
-                        
-                        if ui.add(egui::Button::new(egui::RichText::new(mute_text).color(mute_color)).min_size([20.0, 20.0].into())).clicked() {
+
+                        let mute_color = if track.mute {
+                            egui::Color32::YELLOW
+                        } else {
+                            egui::Color32::GRAY
+                        };
+                        let solo_color = if track.solo {
+                            egui::Color32::GREEN
+                        } else {
+                            egui::Color32::GRAY
+                        };
+                        let arm_color = if track.record_arm {
+                            egui::Color32::RED
+                        } else {
+                            egui::Color32::GRAY
+                        };
+
+                        if ui
+                            .add(
+                                egui::Button::new(egui::RichText::new(mute_text).color(mute_color))
+                                    .min_size([20.0, 20.0].into()),
+                            )
+                            .clicked()
+                        {
                             track.mute = !track.mute;
                         }
-                        if ui.add(egui::Button::new(egui::RichText::new(solo_text).color(solo_color)).min_size([20.0, 20.0].into())).clicked() {
+                        if ui
+                            .add(
+                                egui::Button::new(egui::RichText::new(solo_text).color(solo_color))
+                                    .min_size([20.0, 20.0].into()),
+                            )
+                            .clicked()
+                        {
                             track.solo = !track.solo;
                         }
-                        if ui.add(egui::Button::new(egui::RichText::new(arm_text).color(arm_color)).min_size([20.0, 20.0].into())).clicked() {
+                        if ui
+                            .add(
+                                egui::Button::new(egui::RichText::new(arm_text).color(arm_color))
+                                    .min_size([20.0, 20.0].into()),
+                            )
+                            .clicked()
+                        {
                             track.record_arm = !track.record_arm;
                         }
-                        
+
                         ui.label(format!("Vol: {:.0}%", track.volume * 100.0));
                     });
                 }
@@ -175,97 +1550,361 @@ ui.separator();
 
         // Central timeline/arrange area
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Arrange");
+            ui.horizontal(|ui| {
+                ui.heading("Arrange");
+                ui.separator();
+                if ui.small_button("Fit").clicked() {
+                    self.needs_fit = true;
+                }
+                if ui.small_button("−").clicked() {
+                    self.zoom_center(1.0 / 1.5);
+                }
+                if ui.small_button("+").clicked() {
+                    self.zoom_center(1.5);
+                }
+                ui.label(format!("{:.1} px/s", self.pixels_per_sec));
+                ui.separator();
+
+                // Undo / redo
+                let can_undo = !self.undo_stack.is_empty();
+                let can_redo = !self.redo_stack.is_empty();
+                if ui
+                    .add_enabled(can_undo, egui::Button::new("↶"))
+                    .on_hover_text("Undo (Ctrl+Z)")
+                    .clicked()
+                {
+                    self.undo();
+                }
+                if ui
+                    .add_enabled(can_redo, egui::Button::new("↷"))
+                    .on_hover_text("Redo (Ctrl+Shift+Z)")
+                    .clicked()
+                {
+                    self.redo();
+                }
+                ui.separator();
+
+                // Snap grid for moving/trimming clips (hold Alt to bypass).
+                ui.label("Snap:");
+                egui::ComboBox::from_id_salt("snap_mode")
+                    .selected_text(self.snap_mode.label())
+                    .width(70.0)
+                    .show_ui(ui, |ui| {
+                        for mode in [
+                            SnapMode::Off,
+                            SnapMode::Bar,
+                            SnapMode::Beat,
+                            SnapMode::Eighth,
+                            SnapMode::Sixteenth,
+                        ] {
+                            ui.selectable_value(&mut self.snap_mode, mode, mode.label());
+                        }
+                    });
+                ui.separator();
+
+                // Ruler display: musical bars/beats (default) or clock time.
+                ui.label("Ruler:");
+                egui::ComboBox::from_id_salt("ruler_mode")
+                    .selected_text(self.ruler_mode.label())
+                    .width(100.0)
+                    .show_ui(ui, |ui| {
+                        for mode in [RulerMode::BarsBeats, RulerMode::Time] {
+                            ui.selectable_value(&mut self.ruler_mode, mode, mode.label());
+                        }
+                    });
+                ui.separator();
+                ui.label(format!(
+                    "{} / {}",
+                    format_clock(self.playhead_secs),
+                    format_clock(self.timeline_duration())
+                ));
+            });
+            if self.selected_clip.is_some() {
+                ui.horizontal(|ui| {
+                    self.clip_properties_ui(ui);
+                });
+            }
             ui.separator();
-            
+
             let rect = ui.available_rect_before_wrap();
+            if rect.width() <= 1.0 || rect.height() <= 1.0 {
+                return;
+            }
+            self.last_timeline_width = rect.width();
+
+            if self.needs_fit {
+                self.fit_view(rect.width());
+            }
+
+            // ---- Zoom / scroll input ----
+            let hovered = ui.rect_contains_pointer(rect);
+            let (zoom_delta, scroll, pointer_pos, middle_delta) = ui.input(|i| {
+                (
+                    i.zoom_delta(),
+                    i.smooth_scroll_delta,
+                    i.pointer.hover_pos(),
+                    if i.pointer.button_down(egui::PointerButton::Middle) {
+                        i.pointer.delta()
+                    } else {
+                        egui::Vec2::ZERO
+                    },
+                )
+            });
+            if hovered {
+                if (zoom_delta - 1.0).abs() > 0.001 {
+                    let px = pointer_pos.map(|p| p.x).unwrap_or(rect.center().x);
+                    self.zoom_at(rect, px, zoom_delta);
+                } else if scroll.x != 0.0 || scroll.y != 0.0 {
+                    let pps = self.pixels_per_sec.max(MIN_PPS);
+                    self.view_start_secs -= (scroll.x + scroll.y) as f64 / pps as f64;
+                }
+            }
+            if hovered && middle_delta != egui::Vec2::ZERO {
+                self.view_start_secs -= middle_delta.x as f64 / self.pixels_per_sec.max(MIN_PPS) as f64;
+            }
+            self.clamp_view(rect.width());
+
+            // Follow the playhead while playing: page the view forward when the
+            // playhead reaches the right edge (it may run past the last clip).
+            if self.playing {
+                let ph_x = rect.left()
+                    + ((self.playhead_secs - self.view_start_secs) * self.pixels_per_sec as f64)
+                        as f32;
+                if ph_x > rect.right() - 80.0 {
+                    let view_len = rect.width() as f64 / self.pixels_per_sec.max(MIN_PPS) as f64;
+                    self.view_start_secs = self.playhead_secs - view_len * 0.25;
+                    self.clamp_view(rect.width());
+                }
+            }
+
+            let view = TimelineView {
+                start_secs: self.view_start_secs,
+                pps: self.pixels_per_sec,
+            };
             let painter = ui.painter();
-            
-            // Track height
+            let project_sr = self.project.sample_rate.max(1) as f64;
             let track_height = 80.0;
             let ruler_height = 30.0;
-            
-            // Draw ruler background
+
+            // ---- Ruler ----
             let ruler_rect = egui::Rect::from_min_max(
                 egui::pos2(rect.left(), rect.top()),
                 egui::pos2(rect.right(), rect.top() + ruler_height),
             );
             painter.rect_filled(ruler_rect, 0.0, egui::Color32::from_gray(25));
-            
-            // Draw beat markers on ruler
-            for i in 0..=16 {
-                let x = rect.left() + (rect.width() / 16.0) * i as f32;
-                painter.line_segment([
-                    egui::pos2(x, rect.top()),
-                    egui::pos2(x, rect.top() + ruler_height),
-                ], egui::Stroke::new(1.0, egui::Color32::from_gray(80)));
-                
-                // Beat numbers
-                if i > 0 {
+
+            let view_end = self.view_start_secs + view.visible_secs(rect);
+            let ruler_ticks = self.build_ruler_ticks(self.view_start_secs, view_end);
+
+            // Minor ticks
+            for tick in ruler_ticks.iter().filter(|tick| !tick.major) {
+                let x = view.x(rect, tick.secs);
+                painter.line_segment(
+                    [
+                        egui::pos2(x, rect.top() + ruler_height * 0.7),
+                        egui::pos2(x, rect.top() + ruler_height),
+                    ],
+                    egui::Stroke::new(1.0_f32, egui::Color32::from_gray(60)),
+                );
+            }
+
+            // Major ticks with labels
+            for tick in ruler_ticks.iter().filter(|tick| tick.major) {
+                let x = view.x(rect, tick.secs);
+                painter.line_segment(
+                    [
+                        egui::pos2(x, rect.top()),
+                        egui::pos2(x, rect.top() + ruler_height),
+                    ],
+                    egui::Stroke::new(1.0_f32, egui::Color32::from_gray(90)),
+                );
+                if let Some(label) = &tick.label {
                     painter.text(
-                        egui::pos2(x - 10.0, rect.top() + 4.0),
-                        egui::Align2::CENTER_CENTER,
-                        format!("{}", i),
+                        egui::pos2(x + 3.0, rect.top() + 4.0),
+                        egui::Align2::LEFT_TOP,
+                        label,
                         egui::FontId::proportional(10.0),
                         egui::Color32::from_gray(180),
                     );
                 }
             }
-            
-            // Draw track lanes
+
+            // ---- Ruler seek: click or drag the ruler to place the playhead ----
+            // Applies the current snap grid, so with Snap set to Bar/Beat a
+            // click lands exactly on a bar/beat (Alt bypasses snapping).
+            let ruler_response = ui.interact(
+                ruler_rect,
+                ui.id().with("ruler_seek"),
+                egui::Sense::click_and_drag(),
+            );
+            let playhead_x_before = view.x(rect, self.playhead_secs);
+            let pointer_on_playhead = pointer_pos
+                .map(|p| (p.x - playhead_x_before).abs() <= 8.0)
+                .unwrap_or(false);
+            let pressed = ui.input(|i| i.pointer.primary_pressed());
+            let seek_pos = if ruler_response.dragged() {
+                ruler_response.interact_pointer_pos()
+            } else if ruler_response.clicked() && !pointer_on_playhead {
+                ruler_response.interact_pointer_pos()
+            } else if pressed && ruler_response.hovered() && !pointer_on_playhead {
+                pointer_pos
+            } else {
+                None
+            };
+            if let Some(pos) = seek_pos {
+                // Seeking stops the transport (and ends an active take).
+                if self.playing || self.recording {
+                    self.pause_transport();
+                }
+                // Allow placing the playhead anywhere on screen, including
+                // past the last clip.
+                let max_t = self.timeline_duration().max(view.t(rect, rect.right()));
+                let t = view.t(rect, pos.x).clamp(0.0, max_t);
+                self.playhead_secs = self.snap_secs(t);
+            }
+            if ruler_response.hovered() {
+                ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
+            }
+
+            // ---- Track lanes and clips ----
+            let track_layout: Vec<(egui::Color32, Vec<ClipId>)> = self
+                .project
+                .track_order
+                .iter()
+                .filter_map(|id| {
+                    self.project.tracks.get(id).map(|track| {
+                        (
+                            egui::Color32::from_rgb(track.color.0, track.color.1, track.color.2),
+                            track.clips.clone(),
+                        )
+                    })
+                })
+                .collect();
+
             let track_y_start = rect.top() + ruler_height;
-            for (track_idx, track_id) in self.project.track_order.iter().enumerate() {
-                if let Some(track) = self.project.tracks.get(track_id) {
-                    let track_rect = egui::Rect::from_min_max(
-                        egui::pos2(rect.left(), track_y_start + track_idx as f32 * track_height),
-                        egui::pos2(rect.right(), track_y_start + (track_idx + 1) as f32 * track_height),
-                    );
-                    
-                    // Track background
-                    let bg_color = if track_idx % 2 == 0 { 
-                        egui::Color32::from_gray(35) 
-                    } else { 
-                        egui::Color32::from_gray(30) 
-                    };
-                    painter.rect_filled(track_rect, 0.0, bg_color);
-                    
-                    // Track separator
-                    painter.line_segment([
+            let mut clip_rects: Vec<(ClipId, egui::Rect)> = Vec::new();
+
+            for (track_idx, (color, clips)) in track_layout.iter().enumerate() {
+                let track_rect = egui::Rect::from_min_max(
+                    egui::pos2(rect.left(), track_y_start + track_idx as f32 * track_height),
+                    egui::pos2(rect.right(), track_y_start + (track_idx + 1) as f32 * track_height),
+                );
+
+                let bg_color = if track_idx % 2 == 0 {
+                    egui::Color32::from_gray(35)
+                } else {
+                    egui::Color32::from_gray(30)
+                };
+                painter.rect_filled(track_rect, 0.0, bg_color);
+
+                painter.line_segment(
+                    [
                         egui::pos2(rect.left(), track_rect.top()),
                         egui::pos2(rect.right(), track_rect.top()),
-                    ], egui::Stroke::new(1.0, egui::Color32::from_gray(50)));
-                    
-                    // Track name label
-                    painter.text(
-                        egui::pos2(track_rect.left() + 8.0, track_rect.top() + 4.0),
-                        egui::Align2::LEFT_TOP,
-                        &track.name,
-                        egui::FontId::proportional(11.0),
-                        egui::Color32::from_gray(200),
+                    ],
+                    egui::Stroke::new(1.0_f32, egui::Color32::from_gray(50)),
+                );
+
+                // Vertical grid lines over the lane (at the ruler's major ticks)
+                for tick in ruler_ticks.iter().filter(|tick| tick.major) {
+                    let x = view.x(rect, tick.secs);
+                    painter.line_segment(
+                        [egui::pos2(x, track_rect.top()), egui::pos2(x, track_rect.bottom())],
+                        egui::Stroke::new(1.0_f32, egui::Color32::from_gray(42)),
                     );
-                    
-                    // Render audio clips on this track
-                    for clip_id in &track.clips {
-                        // Find the clip in the project's clip storage
-                        // For now, we need to access clips through a different mechanism
-                        // Since clips are stored on tracks, we iterate through track.clips
-                        // and the clip data is the AudioClip itself
-                        // Note: In the current architecture, clips are stored on tracks
-                        // and we need to get the actual clip data
-                        // For now, we'll skip waveform rendering until clip storage is properly accessible
-                        // This is a placeholder for the waveform rendering logic
+                }
+
+                for clip_id in clips {
+                    if let Some(clip) = self.project.audio_clips.get(*clip_id) {
+                        let clip_rect = draw_audio_clip(
+                            &painter,
+                            &mut self.detail_cache,
+                            clip,
+                            track_rect,
+                            *color,
+                            view,
+                            project_sr,
+                            self.selected_clip == Some(*clip_id),
+                        );
+                        if clip_rect != egui::Rect::NOTHING {
+                            clip_rects.push((*clip_id, clip_rect));
+                        }
                     }
                 }
             }
-            
-            // Draw playhead
-            let playhead_x = rect.left() + rect.width() * self.playhead_position.clamp(0.0, 1.0);
-            painter.line_segment([
-                egui::pos2(playhead_x, rect.top()),
-                egui::pos2(playhead_x, rect.bottom()),
-            ], egui::Stroke::new(2.0, egui::Color32::RED));
-            
-            // Playhead triangle
+
+            // ---- Clip selection (click) ----
+            let (primary_clicked, pointer_pos, press_origin) = ui.input(|i| {
+                (
+                    i.pointer.primary_clicked(),
+                    i.pointer.hover_pos(),
+                    i.pointer.press_origin(),
+                )
+            });
+            if primary_clicked && hovered {
+                if let Some(pos) = pointer_pos {
+                    let clicked = clip_rects
+                        .iter()
+                        .rev()
+                        .find(|(_, r)| r.contains(pos))
+                        .map(|(id, _)| *id);
+                    if clicked.is_some() {
+                        self.selected_clip = clicked;
+                    } else if pos.y > rect.top() + ruler_height {
+                        self.selected_clip = None;
+                    }
+                }
+            }
+
+            // ---- Clip editing: drag body to move, edges to trim, corners to fade ----
+            let edit_area = egui::Rect::from_min_max(
+                egui::pos2(rect.left(), rect.top() + ruler_height),
+                rect.max,
+            );
+            let edit_response = ui.interact(
+                edit_area,
+                ui.id().with("clip_edit"),
+                egui::Sense::click_and_drag(),
+            );
+            if edit_response.drag_started() {
+                // Classify the gesture from where the pointer went down, not
+                // from where it is after egui's drag threshold: otherwise edge
+                // grabs would already be inside the body and become moves.
+                if let Some(pos) = press_origin.or(pointer_pos) {
+                    self.begin_clip_drag(pos, &clip_rects, rect, view);
+                }
+            }
+            if edit_response.dragged() {
+                if let Some(pos) = pointer_pos {
+                    self.update_clip_drag(pos, rect, track_y_start, track_height, view);
+                }
+            }
+            if edit_response.drag_stopped() {
+                self.finish_clip_drag();
+            }
+
+            // Hover feedback: resize cursor over trim/fade zones, grab over bodies.
+            if self.drag.is_none() && !self.dragging_playhead && hovered {
+                if let Some(pos) = pointer_pos {
+                    if let Some((_, mode)) = Self::clip_hit(&clip_rects, pos) {
+                        let icon = match mode {
+                            DragMode::Move => egui::CursorIcon::Grab,
+                            _ => egui::CursorIcon::ResizeHorizontal,
+                        };
+                        ui.output_mut(|o| o.cursor_icon = icon);
+                    }
+                }
+            }
+
+            // ---- Playhead ----
+            let duration = self.timeline_duration();
+            let playhead_x = view.x(rect, self.playhead_secs);
+
+            painter.line_segment(
+                [egui::pos2(playhead_x, rect.top()), egui::pos2(playhead_x, rect.bottom())],
+                egui::Stroke::new(2.0_f32, egui::Color32::RED),
+            );
+
             let triangle_size = 8.0;
             painter.add(egui::Shape::convex_polygon(
                 vec![
@@ -282,27 +1921,30 @@ ui.separator();
                 egui::pos2(playhead_x - 6.0, rect.top()),
                 egui::pos2(playhead_x + 6.0, rect.bottom()),
             );
-            let response = ui.interact(playhead_rect, ui.id().with("playhead"), egui::Sense::drag());
+            let response = ui.interact(
+                playhead_rect,
+                ui.id().with("playhead"),
+                egui::Sense::drag(),
+            );
             if response.dragged() {
                 if !self.dragging_playhead {
                     self.dragging_playhead = true;
-                    if self.playing {
-                        self.playing = false;
-                        let _ = self.engine.stop();
+                    // Seeking stops the transport (and ends an active take).
+                    if self.playing || self.recording {
+                        self.pause_transport();
                     }
                 }
-                let new_x = (response.drag_delta().x + playhead_x).clamp(rect.left(), rect.right());
-                self.playhead_position = ((new_x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+                if let Some(pos) = pointer_pos {
+                    // Allow placing the playhead anywhere on screen, including
+                    // past the last clip.
+                    let max_t = duration.max(view.t(rect, rect.right()));
+                    self.playhead_secs = view.t(rect, pos.x).clamp(0.0, max_t);
+                }
             } else if response.drag_stopped() {
                 self.dragging_playhead = false;
             }
-            
-            // Visual feedback for draggable playhead
-            let playhead_interact_rect = egui::Rect::from_min_max(
-                egui::pos2(playhead_x - 6.0, rect.top()),
-                egui::pos2(playhead_x + 6.0, rect.bottom()),
-            );
-            if ui.rect_contains_pointer(playhead_interact_rect) || self.dragging_playhead {
+
+            if ui.rect_contains_pointer(playhead_rect) || self.dragging_playhead {
                 ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::ResizeHorizontal);
             }
         });
@@ -312,6 +1954,8 @@ ui.separator();
             ui.horizontal(|ui| {
                 let status = if self.recording {
                     "● RECORDING"
+                } else if self.pending_record_track.is_some() {
+                    "● REC (waiting for play)"
                 } else if self.playing {
                     "Playing"
                 } else {
@@ -319,13 +1963,24 @@ ui.separator();
                 };
                 ui.label(status);
                 ui.separator();
-                ui.label(format!("CPU: {:.1}%", 0.0));
+                let sel = self
+                    .selected_clip
+                    .and_then(|id| self.project.audio_clips.get(id))
+                    .and_then(|clip| clip.source.path.file_name())
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("none");
+                ui.label(format!("Selected: {}", sel));
+                ui.separator();
+                ui.label(format!(
+                    "Zoom: {:.2} px/s",
+                    self.pixels_per_sec
+                ));
                 ui.separator();
                 ui.label("Zoft DAW v0.1.0");
             });
         });
 
-        // Request repaint for smooth playback
+        // Request repaint for smooth playback and async waveform polling
         ctx.request_repaint();
     }
 }
@@ -333,64 +1988,780 @@ ui.separator();
 impl AppUI {
     fn handle_keyboard(&mut self, ctx: &egui::Context) {
         use egui::Key;
-        
+
         // Only handle keyboard if no text input is focused
-        if ctx.memory(|m| m.focused().is_none()) {
-            // Space: Play/Pause (toggle) - resumes from current position
-            if ctx.input(|i| i.key_pressed(Key::Space)) {
-                self.toggle_playback();
+        if ctx.memory(|m| m.focused().is_some()) {
+            return;
+        }
+
+        let modifiers = ctx.input(|i| i.modifiers);
+        let command = modifiers.command || modifiers.ctrl;
+
+        if command {
+            // Undo / redo
+            if ctx.input(|i| i.key_pressed(Key::Z)) {
+                if modifiers.shift {
+                    self.redo();
+                } else {
+                    self.undo();
+                }
             }
-            
-            // Enter: Return to start (reset playhead to 0, stop)
-            if ctx.input(|i| i.key_pressed(Key::Enter)) {
-                self.playhead_position = 0.0;
-                self.playing = false;
-                let _ = self.engine.stop();
+            if ctx.input(|i| i.key_pressed(Key::Y)) {
+                self.redo();
             }
-            
-            // R: Record (toggle recording)
-            if ctx.input(|i| i.key_pressed(Key::R)) {
-                self.toggle_recording();
+            // Clipboard and duplicate
+            if ctx.input(|i| i.key_pressed(Key::C)) {
+                self.copy_selected_clip();
             }
+            if ctx.input(|i| i.key_pressed(Key::V)) {
+                self.paste_clip();
+            }
+            if ctx.input(|i| i.key_pressed(Key::D)) {
+                self.duplicate_selected_clip();
+            }
+            return;
+        }
+
+        // Space: Play/Pause (toggle) - resumes from current position
+        if ctx.input(|i| i.key_pressed(Key::Space)) {
+            self.toggle_playback();
+        }
+
+        // Enter: Return to start (stops the transport and any take)
+        if ctx.input(|i| i.key_pressed(Key::Enter)) {
+            self.pause_transport();
+            self.playhead_secs = 0.0;
+        }
+
+        // R: Record (toggle recording)
+        if ctx.input(|i| i.key_pressed(Key::R)) {
+            self.toggle_recording();
+        }
+
+        // S: split the selected clip at the playhead
+        if ctx.input(|i| i.key_pressed(Key::S)) {
+            self.split_selected_clip();
+        }
+
+        // Delete/Backspace: remove the selected clip (recoverable via undo)
+        if ctx.input(|i| i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace)) {
+            self.delete_selected_clip();
+        }
+
+        // +/-: zoom, F: fit
+        if ctx.input(|i| i.key_pressed(Key::Plus) || i.key_pressed(Key::Equals)) {
+            self.zoom_center(1.5);
+        }
+        if ctx.input(|i| i.key_pressed(Key::Minus)) {
+            self.zoom_center(1.0 / 1.5);
+        }
+        if ctx.input(|i| i.key_pressed(Key::F)) {
+            self.needs_fit = true;
         }
     }
-    
+
     fn toggle_playback(&mut self) {
-        self.playing = !self.playing;
         if self.playing {
-            let _ = self.engine.start();
-            self.last_playhead_update = std::time::Instant::now();
+            self.pause_transport();
         } else {
-            let _ = self.engine.stop();
-            // Playhead stays at current position when paused
+            self.playing = true;
+            self.start_playback();
+            self.last_playhead_update = std::time::Instant::now();
+
+            // An armed take starts capturing the moment the transport rolls.
+            if let Some(track_id) = self.pending_record_track.take() {
+                self.begin_recording(track_id);
+            }
         }
     }
-    
+
+    /// Stop the transport. If a take is in progress it is ended here, so the
+    /// recorded waveform appears as soon as the transport is paused instead of
+    /// only when the record button is toggled off.
+    fn pause_transport(&mut self) {
+        self.playing = false;
+        self.engine.clear_playback();
+        if self.recording {
+            self.stop_recording_and_create_clip();
+        }
+        let _ = self.engine.stop();
+    }
+
+    /// Load the project's audio clips into the engine and start sound output
+    /// from the current playhead position.
+    fn start_playback(&mut self) {
+        let out_rate = self.engine.output_sample_rate().max(1);
+        let clips = self.collect_playable_clips(out_rate);
+        let start_frame = (self.playhead_secs.max(0.0) * out_rate as f64) as u64;
+        self.engine.set_playback_clips(clips, start_frame);
+        if let Err(e) = self.engine.start() {
+            self.engine.clear_playback();
+            self.playing = false;
+            self.error_message = Some(format!("Failed to start playback: {}", e));
+        }
+    }
+
+    /// Read the audio clips that are placed on tracks into playable buffers.
+    /// Timeline positions are converted from project samples to output-device
+    /// frames, and each buffer is sliced to the clip's trimmed source range.
+    fn collect_playable_clips(&self, out_rate: u32) -> Vec<PlayableClip> {
+        let project_sr = self.project.sample_rate.max(1) as f64;
+        let mut playable = Vec::new();
+
+        for track_id in &self.project.track_order {
+            let Some(track) = self.project.tracks.get(track_id) else {
+                continue;
+            };
+            for clip_id in &track.clips {
+                let Some(clip) = self.project.audio_clips.get(*clip_id) else {
+                    continue;
+                };
+                if clip.muted || clip.length == 0 {
+                    continue;
+                }
+                match load_wav_interleaved(&clip.source.path) {
+                    Ok((samples, channels, sample_rate)) => {
+                        let channel_count = channels.max(1) as usize;
+                        let start = (clip.source_offset as usize)
+                            .saturating_mul(channel_count)
+                            .min(samples.len());
+                        let end = start
+                            .saturating_add(
+                                (clip.length as usize).saturating_mul(channel_count),
+                            )
+                            .min(samples.len());
+                        if end <= start {
+                            continue;
+                        }
+
+                        let start_frame = (clip.timeline_position.sample as f64
+                            * out_rate as f64
+                            / project_sr)
+                            .round() as u64;
+                        playable.push(PlayableClip {
+                            samples: samples[start..end].to_vec(),
+                            channels,
+                            sample_rate,
+                            start_frame,
+                            gain: clip.gain,
+                            fade_in: clip.fade_in,
+                            fade_out: clip.fade_out,
+                        });
+                    }
+                    Err(e) => eprintln!(
+                        "Playback: skipping {}: {}",
+                        clip.source.path.display(),
+                        e
+                    ),
+                }
+            }
+        }
+
+        playable
+    }
+
     fn toggle_recording(&mut self) {
         if self.recording {
-            // Stop recording
-            self.recording = false;
-            let _ = self.engine.stop_recording();
+            self.stop_recording_and_create_clip();
+        } else if self.pending_record_track.is_some() {
+            // Cancel an armed take that never rolled.
+            self.pending_record_track = None;
         } else {
-            // Start recording - find all armed tracks
-            let armed_tracks: Vec<TrackId> = self.project.track_order.iter()
-                .filter(|id| self.project.tracks.get(*id).map(|t| t.record_arm).unwrap_or(false))
+            // Find all armed tracks
+            let armed_tracks: Vec<TrackId> = self
+                .project
+                .track_order
+                .iter()
+                .filter(|id| {
+                    self.project
+                        .tracks
+                        .get(*id)
+                        .map(|t| t.record_arm)
+                        .unwrap_or(false)
+                })
                 .cloned()
                 .collect();
-            
+
             if armed_tracks.is_empty() {
-                eprintln!("No tracks armed for recording");
+                self.error_message =
+                    Some("No tracks are armed for recording. Click the ● button first.".to_string());
                 return;
             }
-            
-            // Start recording on all armed tracks (for now, just first one)
+
+            // Record on the first armed track.
             let track_id = armed_tracks[0];
-            let file_path = std::path::PathBuf::from(format!("recording_{}.wav", track_id.0));
-            if let Err(e) = self.engine.start_recording(track_id, file_path) {
-                eprintln!("Failed to start recording: {}", e);
+            if self.playing {
+                // Transport already rolling: punch in immediately.
+                self.begin_recording(track_id);
             } else {
-                self.recording = true;
+                // Wait for the transport to roll before capturing audio, so the
+                // take starts exactly where the playhead starts moving.
+                self.pending_record_track = Some(track_id);
+                self.error_message = None;
             }
         }
     }
+
+    /// Open the input device and start capturing a take at the current playhead.
+    fn begin_recording(&mut self, track_id: TrackId) {
+        // Unique file per take so new recordings never overwrite older ones.
+        let file_path = std::path::PathBuf::from(format!(
+            "recording_{}.wav",
+            uuid::Uuid::new_v4()
+        ));
+        if let Err(e) = self.engine.start_recording(track_id, file_path) {
+            self.recording = false;
+            self.pending_record_track = None;
+            self.error_message = Some(format!("Recording failed: {}", e));
+        } else {
+            self.recording = true;
+            self.record_start_secs = Some(self.playhead_secs);
+            self.error_message = None;
+        }
+    }
+
+    /// Stop an active recording and add the finished file to the timeline as an
+    /// audio clip (which also queues waveform generation).
+    fn stop_recording_and_create_clip(&mut self) {
+        self.recording = false;
+        match self.engine.stop_recording() {
+            Ok(Some((track_id, file_path))) => {
+                let start_secs = self.record_start_secs.take().unwrap_or(0.0);
+                let start_sample =
+                    (start_secs.max(0.0) * self.project.sample_rate as f64) as u64;
+                self.create_audio_clip(track_id, file_path, start_sample);
+            }
+            Ok(None) => {}
+            Err(e) => self.error_message = Some(format!("Failed to stop recording: {}", e)),
+        }
+    }
+
+    fn create_audio_clip(&mut self, track_id: TrackId, file_path: PathBuf, start_sample: u64) {
+        let reader = match hound::WavReader::open(&file_path) {
+            Ok(reader) => reader,
+            Err(e) => {
+                self.error_message = Some(format!("Failed to open recorded file: {}", e));
+                return;
+            }
+        };
+        let spec = reader.spec();
+        let duration_samples = reader.duration() as u64;
+        drop(reader);
+
+        if duration_samples == 0 {
+            self.error_message = Some(format!(
+                "Recorded file {} contains no audio data",
+                file_path.display()
+            ));
+            return;
+        }
+
+        let bit_depth = match spec.bits_per_sample {
+            16 => BitDepth::Int16,
+            24 => BitDepth::Int24,
+            32 if spec.sample_format == hound::SampleFormat::Float => BitDepth::Float32,
+            32 => BitDepth::Int32,
+            _ => BitDepth::Float32,
+        };
+
+        // Overview is generated in the background so the UI never blocks on I/O.
+        let file_ref = AudioFileRef::new(
+            file_path.clone(),
+            duration_samples,
+            spec.sample_rate,
+            spec.channels,
+            bit_depth,
+        );
+
+        let file_ref_id = self.project.audio_pool.add(file_ref);
+        let source = match self.project.audio_pool.get(file_ref_id) {
+            Some(source) => source.clone(),
+            None => return,
+        };
+
+        let bpm = self.project.tempo_map.default_bpm();
+        let clip = AudioClip::new(
+            source,
+            TimelinePos::from_sample(start_sample, self.project.sample_rate as f64, bpm),
+            duration_samples,
+        );
+
+        let clip_id = self.project.audio_clips.insert(clip);
+        if let Some(track) = self.project.tracks.get_mut(&track_id) {
+            track.add_clip(clip_id);
+        }
+
+        self.selected_clip = Some(clip_id);
+
+        self.spawn_overview(clip_id, file_path);
+    }
+}
+
+/// Draw a single audio clip: background, waveform (overview or sample-level),
+/// fades, gain label and selection highlight. Returns the full clip rect in
+/// screen space (or `Rect::NOTHING` when the clip is invalid).
+#[allow(clippy::too_many_arguments)]
+fn draw_audio_clip(
+    painter: &egui::Painter,
+    detail_cache: &mut DetailCache,
+    clip: &AudioClip,
+    lane: egui::Rect,
+    track_color: egui::Color32,
+    view: TimelineView,
+    project_sr: f64,
+    selected: bool,
+) -> egui::Rect {
+    if clip.length == 0 {
+        return egui::Rect::NOTHING;
+    }
+
+    let clip_start = clip.timeline_position.sample as f64 / project_sr;
+    // Clip duration is exact in source frames; convert with the source sample
+    // rate so the drawn length matches the audio that plays.
+    let source_sr = clip.source.sample_rate.max(1) as f64;
+    let clip_end = clip_start + clip.length as f64 / source_sr;
+
+    let x_start = view.x(lane, clip_start);
+    let x_end = view.x(lane, clip_end);
+    let width = (x_end - x_start).max(1.0);
+
+    let full_rect = egui::Rect::from_min_max(
+        egui::pos2(x_start, lane.top() + 18.0),
+        egui::pos2(x_start + width, lane.bottom() - 6.0),
+    );
+
+    // Cull clips that are completely outside the lane.
+    if full_rect.right() < lane.left() || full_rect.left() > lane.right() {
+        return full_rect;
+    }
+
+    let visible_rect = egui::Rect::from_min_max(
+        egui::pos2(full_rect.left().max(lane.left()), full_rect.top()),
+        egui::pos2(full_rect.right().min(lane.right()), full_rect.bottom()),
+    );
+
+    let base_color = clip
+        .color
+        .map(|c| egui::Color32::from_rgb(c.0, c.1, c.2))
+        .unwrap_or(track_color);
+
+    // Background + border
+    let bg_alpha = if selected { 90 } else { 55 };
+    painter.rect_filled(
+        visible_rect,
+        2.0,
+        egui::Color32::from_rgba_unmultiplied(
+            base_color.r(),
+            base_color.g(),
+            base_color.b(),
+            bg_alpha,
+        ),
+    );
+    let border = if selected {
+        egui::Stroke::new(2.0_f32, egui::Color32::WHITE)
+    } else {
+        egui::Stroke::new(1.0_f32, base_color)
+    };
+    painter.rect_stroke(visible_rect, 2.0, border);
+
+    // Waveform
+    let samples_per_px = source_sr / view.pps.max(f32::EPSILON) as f64;
+    let mid_y = visible_rect.center().y;
+    let half_height = visible_rect.height() * 0.48;
+    let wave_color = if selected {
+        base_color
+    } else {
+        base_color.gamma_multiply(0.85)
+    };
+
+    let vis_t_start = view.t(lane, visible_rect.left()).max(clip_start);
+    let vis_t_end = view.t(lane, visible_rect.right()).min(clip_end);
+
+    if samples_per_px < DETAIL_TRIGGER_SAMPLES_PER_PX {
+        // ---- Sample-accurate detail view ----
+        let start_offset = ((vis_t_start - clip_start).max(0.0) * source_sr) as u64;
+        let frame_count = (((vis_t_end - vis_t_start).max(0.0) * source_sr).ceil() as usize + 2)
+            .min(DETAIL_MAX_FRAMES);
+        let start_frame = clip.source_offset.saturating_add(start_offset);
+
+        if let Some(samples) = detail_cache.get(
+            &clip.source.path,
+            start_frame,
+            frame_count,
+            clip.source.channels,
+            clip.source.sample_rate,
+        ) {
+            let mut points: Vec<egui::Pos2> = Vec::with_capacity(samples.len());
+            for (i, sample) in samples.iter().enumerate() {
+                let offset = start_frame.saturating_sub(clip.source_offset) + i as u64;
+                let t = clip_start + offset as f64 / source_sr;
+                let x = view.x(lane, t);
+                if x < lane.left() - 1.0 || x > lane.right() + 1.0 {
+                    continue;
+                }
+                let gain = fade_gain_at(clip, offset as f64) * clip.gain;
+                let y = mid_y - (sample * gain).clamp(-1.0, 1.0) * half_height;
+                points.push(egui::pos2(x, y));
+            }
+            if points.len() >= 2 {
+                painter.add(egui::Shape::line(
+                    points,
+                    egui::Stroke::new(1.0_f32, wave_color),
+                ));
+            }
+        }
+    } else if let Some(overview) = &clip.source.overview {
+        // ---- Min/max overview ----
+        let frames_per_entry = overview.frames_per_pixel.max(1) as f64;
+        let entries = overview.min_max.len();
+        if entries > 0 {
+            let px_start = visible_rect.left().floor();
+            let px_end = visible_rect.right().ceil();
+            let mut x = px_start;
+
+            while x < px_end {
+                let t0 = view.t(lane, x);
+                let t1 = view.t(lane, x + 1.0);
+
+                let s0 = ((t0 - clip_start).max(0.0) * source_sr)
+                    + clip.source_offset as f64;
+                let s1 = ((t1 - clip_start).max(0.0) * source_sr)
+                    + clip.source_offset as f64;
+
+                let e0 = (s0 / frames_per_entry).floor() as usize;
+                let mut e1 = (s1 / frames_per_entry).ceil() as usize;
+                if e1 <= e0 {
+                    e1 = e0 + 1;
+                }
+                if e0 >= entries {
+                    break;
+                }
+                let e1 = e1.min(entries);
+
+                let mut min_v = f32::INFINITY;
+                let mut max_v = f32::NEG_INFINITY;
+                let mut rms_peak = 0.0f32;
+                for e in e0..e1 {
+                    let (mn, mx) = overview.min_max[e];
+                    min_v = min_v.min(mn);
+                    max_v = max_v.max(mx);
+                    if let Some(rms) = &overview.rms {
+                        rms_peak = rms_peak.max(rms[e]);
+                    }
+                }
+
+                let offset = ((t0 - clip_start).max(0.0) * source_sr) as f64;
+                let gain = fade_gain_at(clip, offset) * clip.gain;
+                let min_v = (min_v * gain).clamp(-1.0, 1.0);
+                let max_v = (max_v * gain).clamp(-1.0, 1.0);
+
+                let peak = max_v.abs().max(min_v.abs());
+                let silent = peak < 0.0005;
+
+                if silent {
+                    // Silent region detection: dim the column.
+                    painter.rect_filled(
+                        egui::Rect::from_min_size(
+                            egui::pos2(x, visible_rect.top()),
+                            egui::vec2(1.0, visible_rect.height()),
+                        ),
+                        0.0,
+                        egui::Color32::from_black_alpha(28),
+                    );
+                } else {
+                    painter.line_segment(
+                        [
+                            egui::pos2(x, mid_y - max_v * half_height),
+                            egui::pos2(x, mid_y - min_v * half_height),
+                        ],
+                        egui::Stroke::new(1.0_f32, wave_color),
+                    );
+
+                    // RMS envelope overlay
+                    if rms_peak > 0.0005 {
+                        let r = (rms_peak * gain).clamp(0.0, 1.0) * half_height;
+                        painter.line_segment(
+                            [egui::pos2(x, mid_y - r), egui::pos2(x, mid_y + r)],
+                            egui::Stroke::new(1.0_f32, wave_color.gamma_multiply(0.55)),
+                        );
+                    }
+                }
+
+                x += 1.0;
+            }
+        }
+    } else {
+        // No overview yet (background generation in progress)
+        painter.text(
+            visible_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "Generating waveform…",
+            egui::FontId::proportional(10.0),
+            egui::Color32::from_gray(170),
+        );
+    }
+
+    // ---- Fade curves ----
+    draw_fade_curve(painter, clip, true, lane, view, source_sr, clip_start, visible_rect);
+    draw_fade_curve(painter, clip, false, lane, view, source_sr, clip_start, visible_rect);
+
+    // Fade handles in the top corners of the clip. Drag them inward to lengthen
+    // the fade, outward past the clip edge to remove it. Always visible so the
+    // small hit targets are discoverable; brighter when selected.
+    if visible_rect.width() > 26.0 {
+        let handle = 11.0;
+        let handle_color = egui::Color32::from_white_alpha(if selected { 220 } else { 110 });
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                egui::pos2(visible_rect.left(), visible_rect.top()),
+                egui::pos2(visible_rect.left() + handle, visible_rect.top()),
+                egui::pos2(visible_rect.left(), visible_rect.top() + handle),
+            ],
+            handle_color,
+            egui::Stroke::NONE,
+        ));
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                egui::pos2(visible_rect.right() - handle, visible_rect.top()),
+                egui::pos2(visible_rect.right(), visible_rect.top()),
+                egui::pos2(visible_rect.right(), visible_rect.top() + handle),
+            ],
+            handle_color,
+            egui::Stroke::NONE,
+        ));
+    }
+
+    // ---- Labels ----
+    let name = clip
+        .source
+        .path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("clip");
+    painter.text(
+        egui::pos2(visible_rect.left() + 4.0, visible_rect.top() + 2.0),
+        egui::Align2::LEFT_TOP,
+        name,
+        egui::FontId::proportional(9.0),
+        egui::Color32::from_gray(220),
+    );
+    if (clip.gain - 1.0).abs() > 0.001 {
+        painter.text(
+            egui::pos2(visible_rect.left() + 4.0, visible_rect.top() + 12.0),
+            egui::Align2::LEFT_TOP,
+            format!("{:+.1} dB", 20.0 * clip.gain.max(1e-6).log10()),
+            egui::FontId::proportional(8.0),
+            egui::Color32::from_gray(200),
+        );
+    }
+
+    full_rect
+}
+
+/// Draw the fade in or fade out curve for a clip.
+#[allow(clippy::too_many_arguments)]
+fn draw_fade_curve(
+    painter: &egui::Painter,
+    clip: &AudioClip,
+    fade_in: bool,
+    lane: egui::Rect,
+    view: TimelineView,
+    source_sr: f64,
+    clip_start: f64,
+    clip_rect: egui::Rect,
+) {
+    let fade = if fade_in {
+        &clip.fade_in
+    } else {
+        &clip.fade_out
+    };
+    let Some(fade) = fade else { return };
+    if fade.length == 0 {
+        return;
+    }
+
+    let fade_secs = fade.length as f64 / source_sr;
+    let start_secs = if fade_in {
+        clip_start
+    } else {
+        clip_start + clip.length as f64 / source_sr - fade_secs
+    };
+
+    let start_x = view.x(lane, start_secs);
+    let end_x = view.x(lane, start_secs + fade_secs);
+    if end_x < lane.left() - 2.0 || start_x > lane.right() + 2.0 {
+        return;
+    }
+
+    let steps = ((end_x - start_x).abs().clamp(2.0, 256.0)) as usize;
+    let mut points = Vec::with_capacity(steps + 1);
+    for i in 0..=steps {
+        let t = i as f32 / steps as f32;
+        let gain = if fade_in {
+            fade.curve.apply(t)
+        } else {
+            1.0 - fade.curve.apply(t)
+        };
+        let x = start_x + (end_x - start_x) * t;
+        let y = clip_rect.top() + (1.0 - gain) * clip_rect.height();
+        points.push(egui::pos2(x, y));
+    }
+
+    painter.add(egui::Shape::line(
+        points,
+        egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(110)),
+    ));
+}
+
+/// Combined fade gain at a sample offset within the clip.
+fn fade_gain_at(clip: &AudioClip, offset_samples: f64) -> f32 {
+    let offset = offset_samples.max(0.0) as u64;
+    let mut gain = 1.0f32;
+
+    if let Some(fade) = &clip.fade_in {
+        if offset < fade.length {
+            gain *= fade.gain_at(offset);
+        }
+    }
+
+    if let Some(fade) = &clip.fade_out {
+        if fade.length > 0 {
+            let start = clip.length.saturating_sub(fade.length);
+            if offset >= start {
+                let t = ((offset - start) as f32 / fade.length as f32).clamp(0.0, 1.0);
+                gain *= 1.0 - fade.curve.apply(t);
+            }
+        }
+    }
+
+    gain.clamp(0.0, 4.0)
+}
+
+/// Read a mono mix of `frames` frames starting at `start_frame`.
+fn read_mono_window(
+    path: &Path,
+    start_frame: u64,
+    frames: usize,
+    _channels: u16,
+    _sample_rate: u32,
+) -> Result<Vec<f32>> {
+    let mut reader = hound::WavReader::open(path)?;
+    let spec = reader.spec();
+    let channels = spec.channels.max(1) as usize;
+
+    if start_frame > 0 {
+        let seek_to = start_frame.min(u32::MAX as u64) as u32;
+        reader.seek(seek_to)?;
+    }
+
+    let mut out = Vec::with_capacity(frames);
+
+    match spec.sample_format {
+        hound::SampleFormat::Float => {
+            let mut samples = reader.samples::<f32>();
+            'frames: for _ in 0..frames {
+                let mut sum = 0.0f32;
+                let mut count = 0usize;
+                for _ in 0..channels {
+                    match samples.next() {
+                        Some(Ok(v)) => {
+                            sum += v;
+                            count += 1;
+                        }
+                        _ => break 'frames,
+                    }
+                }
+                out.push(sum / count.max(1) as f32);
+            }
+        }
+        hound::SampleFormat::Int => {
+            let scale = match spec.bits_per_sample {
+                8 => 1.0 / 128.0,
+                16 => 1.0 / 32_768.0,
+                24 => 1.0 / 8_388_608.0,
+                32 => 1.0 / 2_147_483_648.0,
+                _ => 1.0 / 32_768.0,
+            };
+            let mut samples = reader.samples::<i32>();
+            'frames: for _ in 0..frames {
+                let mut sum = 0.0f32;
+                let mut count = 0usize;
+                for _ in 0..channels {
+                    match samples.next() {
+                        Some(Ok(v)) => {
+                            sum += v as f32 * scale;
+                            count += 1;
+                        }
+                        _ => break 'frames,
+                    }
+                }
+                out.push(sum / count.max(1) as f32);
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+/// Pick a "nice" ruler interval (seconds) that is at least ~70 px wide.
+fn nice_interval(pps: f32) -> f64 {
+    const CANDIDATES: [f64; 21] = [
+        0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0,
+        30.0, 60.0, 120.0, 300.0, 600.0, 1200.0, 3600.0,
+    ];
+    for interval in CANDIDATES {
+        if interval * pps as f64 >= 70.0 {
+            return interval;
+        }
+    }
+    *CANDIDATES.last().unwrap()
+}
+
+fn format_ruler_time(secs: f64, interval: f64) -> String {
+    let minutes = (secs / 60.0).floor().max(0.0) as u64;
+    let rem = secs - minutes as f64 * 60.0;
+    if interval >= 1.0 {
+        format!("{}:{:02}", minutes, rem.round() as u64 % 60)
+    } else if interval >= 0.1 {
+        format!("{}:{:04.1}", minutes, rem)
+    } else if interval >= 0.01 {
+        format!("{}:{:05.2}", minutes, rem)
+    } else {
+        format!("{}:{:06.3}", minutes, rem)
+    }
+}
+
+fn format_clock(secs: f64) -> String {
+    let secs = secs.max(0.0);
+    let minutes = (secs / 60.0).floor() as u64;
+    let rem = secs - minutes as f64 * 60.0;
+    format!("{:02}:{:06.3}", minutes, rem)
+}
+
+/// Read an entire WAV file into interleaved f32 samples.
+fn load_wav_interleaved(path: &Path) -> Result<(Vec<f32>, u16, u32)> {
+    let mut reader = hound::WavReader::open(path)?;
+    let spec = reader.spec();
+
+    let samples: Vec<f32> = match spec.sample_format {
+        hound::SampleFormat::Float => reader
+            .samples::<f32>()
+            .collect::<std::result::Result<Vec<_>, _>>()?,
+        hound::SampleFormat::Int => {
+            let scale = match spec.bits_per_sample {
+                8 => 1.0 / 128.0,
+                16 => 1.0 / 32_768.0,
+                24 => 1.0 / 8_388_608.0,
+                32 => 1.0 / 2_147_483_648.0,
+                _ => 1.0 / 32_768.0,
+            };
+            reader
+                .samples::<i32>()
+                .filter_map(std::result::Result::ok)
+                .map(|s| s as f32 * scale)
+                .collect()
+        }
+    };
+
+    Ok((samples, spec.channels, spec.sample_rate))
 }

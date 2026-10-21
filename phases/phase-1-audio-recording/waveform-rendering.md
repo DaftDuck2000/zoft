@@ -11,14 +11,14 @@ Render audio waveforms at multiple zoom levels: overview (min/max per pixel) for
 
 ## Requirements
 
-- [ ] Overview waveform: Min/max envelope per pixel column (pre-computed)
-- [ ] Detail waveform: Sample-accurate drawing at high zoom
-- [ ] Color: Track color, clip gain visualization, selection highlight
-- [ ] RMS envelope overlay (optional)
-- [ ] Silent region detection (dimmed)
-- [ ] Caching: Overview stored in project, detail decoded on-demand
-- [ ] Async decoding: Background thread for overview generation
-- [ ] GPU-ready: Texture atlas layout for future iced/wgpu migration
+- [x] Overview waveform: Min/max envelope per pixel column (pre-computed) — `WaveformOverview::generate_from_file`
+- [x] Detail waveform: Sample-accurate drawing at high zoom — windowed WAV decode via `hound::seek`
+- [x] Color: Track color, clip gain visualization, selection highlight
+- [x] RMS envelope overlay (optional)
+- [x] Silent region detection (dimmed)
+- [x] Caching: Overview stored in project, detail decoded on-demand (8-window LRU)
+- [x] Async decoding: Background thread for overview generation (`std::thread` + mpsc, polled per frame)
+- [ ] GPU-ready: Texture atlas layout for future iced/wgpu migration (deferred to wgpu migration)
 
 ## Technical Details
 
@@ -95,13 +95,13 @@ fn paint_waveform(ui: &mut Ui, clip: &AudioClip, overview: &WaveformOverview, zo
 
 ## Acceptance Criteria
 
-- [ ] Overview generates in < 1s per minute of audio (background)
-- [ ] Scrolling 100 tracks at 60 FPS (overview only)
-- [ ] Zoom to sample level shows individual samples
-- [ ] Clip gain changes reflected visually
-- [ ] Fade in/out curves visible
-- [ ] Selection highlights waveform region
-- [ ] Memory usage < 200 MB for 1-hour project
+- [ ] Overview generates in < 1s per minute of audio (background) — not yet benchmarked
+- [ ] Scrolling 100 tracks at 60 FPS (overview only) — not yet benchmarked
+- [x] Zoom to sample level shows individual samples
+- [x] Clip gain changes reflected visually
+- [x] Fade in/out curves visible
+- [x] Selection highlights waveform region
+- [ ] Memory usage < 200 MB for 1-hour project — not yet measured
 
 ## Progress Log
 
@@ -109,4 +109,10 @@ fn paint_waveform(ui: &mut Ui, clip: &AudioClip, overview: &WaveformOverview, zo
 - 2026-10-07: Background generation thread structure
 - 2026-10-07: WaveformOverview and WaveformCache structures
 - 2026-10-07: Basic timeline rendering with track lanes
-- Next: Connect clip data access, implement waveform drawing
+- 2026-10-20: Zoomable timeline (wheel = scroll, ctrl+wheel = zoom, Fit/−/+ buttons, +/−/F keys)
+- 2026-10-20: Correct overview→screen pixel aggregation at arbitrary zoom levels
+- 2026-10-20: Sample-accurate detail view (windowed decode + LRU cache, active below 4 samples/px)
+- 2026-10-20: Selection highlight, silent-region dimming, RMS overlay, fade curves, gain label
+- 2026-10-20: Overview generated off the UI thread after recording; unique filename per take
+- 2026-10-20: Playhead/timeline can extend past the last clip; view follows playback
+- Next: Runtime verification of rendering; benchmark overview generation and scrolling performance

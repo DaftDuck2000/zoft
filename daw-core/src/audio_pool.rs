@@ -122,6 +122,30 @@ impl WaveformOverview {
             duration_pixels,
         }
     }
+
+    pub fn generate_from_file(path: &std::path::Path, frames_per_pixel: u32) -> anyhow::Result<Self> {
+        let mut reader = hound::WavReader::open(path)?;
+        let spec = reader.spec();
+        let channels = spec.channels as usize;
+
+        let samples: Vec<f32> = if spec.sample_format == hound::SampleFormat::Float {
+            reader.samples::<f32>().filter_map(Result::ok).collect()
+        } else {
+            reader.samples::<i32>().filter_map(Result::ok)
+                .map(|s| s as f32 / i32::MAX as f32)
+                .collect()
+        };
+
+        let mono_samples: Vec<f32> = if channels == 2 {
+            samples.chunks(2).map(|c| (c[0] + c[1]) * 0.5).collect()
+        } else if channels > 2 {
+            samples.chunks(channels).map(|c| c.iter().sum::<f32>() / channels as f32).collect()
+        } else {
+            samples
+        };
+
+        Ok(Self::generate(&mono_samples, frames_per_pixel))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

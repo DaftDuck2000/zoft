@@ -1,10 +1,11 @@
 use crate::track::{Track, TrackId, TrackType};
 use crate::clip::{ClipId, AudioClip, MidiClip};
 use crate::automation::{AutomationLane, AutomationEvent, AutomationLaneId};
-use crate::audio_pool::{AudioFileRef, AudioPool};
+use crate::audio_pool::{AudioFileRef, AudioPool, AudioFileRefId};
 use crate::serialization::ProjectSerialization;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use slotmap::SlotMap;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -21,6 +22,8 @@ pub struct Project {
     pub track_order: Vec<TrackId>,
     pub marker_regions: Vec<MarkerRegion>,
     pub audio_pool: AudioPool,
+    pub audio_clips: SlotMap<ClipId, AudioClip>,
+    pub midi_clips: SlotMap<ClipId, MidiClip>,
     pub automation_lanes: HashMap<AutomationLaneId, AutomationLane>,
     pub preferences: Preferences,
     pub project_path: Option<PathBuf>,
@@ -41,6 +44,8 @@ impl Project {
             track_order: Vec::new(),
             marker_regions: Vec::new(),
             audio_pool: AudioPool::new(),
+            audio_clips: SlotMap::with_key(),
+            midi_clips: SlotMap::with_key(),
             automation_lanes: HashMap::new(),
             preferences: Preferences::default(),
             project_path: None,
@@ -108,7 +113,33 @@ impl Project {
     }
 
     pub fn duration_samples(&self) -> u64 {
-        self.tempo_map.duration_samples(self.sample_rate as f64)
+        // The project lasts at least as long as its tempo map, but content
+        // (audio/MIDI clips) can extend it beyond that. Only clips that are
+        // actually placed on a track count: deleted clips stay in the pool so
+        // undo can restore them, and must not stretch the timeline.
+        let tempo_duration = self.tempo_map.duration_samples(self.sample_rate as f64);
+        let audio_duration = self
+            .track_order
+            .iter()
+            .filter_map(|id| self.tracks.get(id))
+            .flat_map(|track| track.clips.iter())
+            .filter_map(|id| self.audio_clips.get(*id))
+            .map(|clip| {
+                // `clip.length` counts source frames; convert to project samples
+                // so the timeline length matches the audible duration.
+                let source_rate = clip.source.sample_rate.max(1) as f64;
+                let length_project =
+                    (clip.length as f64 * self.sample_rate as f64 / source_rate).ceil() as u64;
+                clip.timeline_position.sample.saturating_add(length_project)
+            })
+            .chain(
+                self.midi_clips
+                    .values()
+                    .map(|clip| clip.timeline_position.sample.saturating_add(clip.length)),
+            )
+            .max()
+            .unwrap_or(0);
+        tempo_duration.max(audio_duration)
     }
 
     pub fn duration_ticks(&self) -> u64 {
@@ -294,6 +325,16 @@ impl TimeSignatureMap {
     pub fn add_change(&mut self, tick: u64, numerator: u8, denominator: u8) {
         let idx = self.events.partition_point(|e| e.tick < tick);
         self.events.insert(idx, TimeSignatureEvent { tick, numerator, denominator });
+    }
+
+    /// Set (or replace) the signature starting at `tick`.
+    pub fn set_change(&mut self, tick: u64, numerator: u8, denominator: u8) {
+        if let Some(event) = self.events.iter_mut().find(|event| event.tick == tick) {
+            event.numerator = numerator;
+            event.denominator = denominator;
+        } else {
+            self.add_change(tick, numerator, denominator);
+        }
     }
 
     pub fn time_sig_at_tick(&self, tick: u64) -> (u8, u8) {

@@ -20,6 +20,7 @@ crossbeam = { workspace = true }
 parking_lot = { workspace = true }
 tokio = { workspace = true }
 notify = { workspace = true }
+hound = "3.5"
 
 # Current: egui
 egui = { workspace = true }

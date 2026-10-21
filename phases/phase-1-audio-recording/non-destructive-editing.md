@@ -4,7 +4,7 @@
 ## ID: 1.3
 ## Priority: Critical
 ## Estimated: 3 weeks
-## Status: `[ ]` Not Started
+## Status: `[~]` In Progress
 ## Depends On: 1.2
 
 ## Description
@@ -12,16 +12,16 @@ Implement non-destructive audio clip editing: split, trim, move, copy, delete, f
 
 ## Requirements
 
-- [ ] Split clip at playhead / mouse position
-- [ ] Trim clip edges (drag clip boundaries)
-- [ ] Move clips: drag between tracks, snap to grid
-- [ ] Copy/paste/duplicate clips
-- [ ] Delete clips (move to trash, not permanent)
-- [ ] Fade in/out: drag fade handles, curve types (linear, exp, log, S)
+- [x] Split clip at playhead (S key)
+- [x] Trim clip edges (drag clip boundaries)
+- [x] Move clips: drag between tracks, snap to grid
+- [x] Copy/paste/duplicate clips (Ctrl+C / Ctrl+V / Ctrl+D)
+- [x] Delete clips (removed from track but kept in the project pool; undo restores)
+- [x] Fade in/out: drag fade handles, curve types (linear, exp, log, S, equal power)
 - [ ] Crossfade: Overlap two clips → automatic crossfade
-- [ ] Snap modes: Grid, Relative, Off
-- [ ] Clip gain: Drag gain handle, numeric input
-- [ ] Clip coloring: Per-clip color override
+- [x] Snap modes: Grid (bar/beat/1/8/1/16), Off (hold Alt to bypass)
+- [x] Clip gain: inspector slider (numeric dB)
+- [x] Clip coloring: per-clip color override
 
 ## Technical Details
 
@@ -92,22 +92,24 @@ fn snap_position(pos: TimelinePos, grid: SnapGrid, relative: bool) -> TimelinePo
 
 ## Acceptance Criteria
 
-- [ ] Split creates two clips referencing same source
-- [ ] Trim adjusts source_offset/length, not source file
-- [ ] Move between tracks preserves timing
-- [ ] Snap works at all zoom levels
-- [ ] Fades visually editable with handles
+- [x] Split creates two clips referencing same source
+- [x] Trim adjusts source_offset/length, not source file
+- [x] Move between tracks preserves timing
+- [x] Snap works at all zoom levels
+- [x] Fades visually editable with handles
 - [ ] Crossfade created automatically on overlap
-- [ ] All operations generate undo commands
-- [ ] Original audio file never modified
+- [x] All operations generate undo commands
+- [x] Original audio file never modified
 
 ## Progress Log
 
-- YYYY-MM-DD: Split command implemented
-- YYYY-MM-DD: Trim (drag edges)
-- YYYY-MM-DD: Move + snap
-- YYYY-MM-DD: Copy/paste/duplicate
-- YYYY-MM-DD: Fade in/out handles
-- YYYY-MM-DD: Crossfade on overlap
-- YYYY-MM-DD: Clip gain + color
-- YYYY-MM-DD: All commands undoable
+- 2026-10-21: Drag-move with snapping (bar/beat/1/8/1/16/off, Alt bypass) and cross-track drops
+- 2026-10-21: Edge trimming (source_offset/length), live preview while dragging
+- 2026-10-21: Split at the playhead (S) — both halves reference the same audio file; fades redistributed
+- 2026-10-21: Copy/paste/duplicate (Ctrl+C/V/D), delete (Delete) with recoverable clip data
+- 2026-10-21: Fade handles on clip corners + inspector curve/length editors (5 curve types)
+- 2026-10-21: Clip gain slider and per-clip color override in the clip inspector
+- 2026-10-21: Undo/redo (Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y) with merged continuous property edits
+- 2026-10-21: Playback mixer slices clips by source_offset/length so edits are audible
+- 2026-10-21: Musical ruler (bars/beats default, time switchable) and time-signature picker; snapping follows the chosen signature
+- Remaining: automatic crossfades on overlap, "relative" snap mode, trash browser
