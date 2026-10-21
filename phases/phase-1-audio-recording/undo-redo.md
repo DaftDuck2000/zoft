@@ -43,15 +43,15 @@ Comprehensive undo/redo system using Command pattern with history compression, s
 
 The arrange view uses `History<EditAction>` directly. `EditAction` describes
 clip moves, shape edits (trim/fade/gain/color), source replacements, track
-attach/detach, track mute/solo/record-arm toggles, time-signature changes and
-grouped edits. Every action produces a label for the History panel, for
+attach/detach, track mute/solo/record-arm/volume changes, time-signature changes
+and grouped edits. Every action produces a label for the History panel, for
 example:
 
 - Move clip
 - Clip gain / Fade in / Fade out / Clip color / Trim clip
 - Process clip / Edit clip source
 - Add clip / Delete clip
-- Mute track / Solo track / Arm track
+- Mute track / Solo track / Arm track / Track volume
 - Split clip / Consolidate clips
 
 Continuous edits (gain slider, fade length) merge into the previous entry while
@@ -173,6 +173,6 @@ impl MacroRecorder {
 
 - 2026-10-21: Added generic `History<T>` with capacity, descriptions and take/complete undo/redo; rewrote `UndoHistory` and `UndoManager` to execute, undo and redo `dyn Command`s correctly
 - 2026-10-21: Arrange-view edits now use `History<EditAction>` with readable labels; split/consolidate are labelled groups and slider drags merge into one entry
-- 2026-10-21: Track mute, solo and record-arm toggles are recorded as undoable track-state edits
+- 2026-10-21: Track mute, solo, record-arm and volume controls are recorded as undoable track-state edits; mute/solo/volume feed the playback mixer
 - 2026-10-21: Added the floating **History** panel with jump-to-any-point
 - Remaining: snapshots, automation integration, optional per-track scope

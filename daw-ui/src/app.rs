@@ -207,6 +207,7 @@ struct TrackShape {
     mute: bool,
     solo: bool,
     record_arm: bool,
+    volume: f32,
 }
 
 impl TrackShape {
@@ -215,6 +216,7 @@ impl TrackShape {
             mute: track.mute,
             solo: track.solo,
             record_arm: track.record_arm,
+            volume: track.volume,
         }
     }
 
@@ -222,6 +224,17 @@ impl TrackShape {
         track.mute = self.mute;
         track.solo = self.solo;
         track.record_arm = self.record_arm;
+        track.set_volume(self.volume);
+    }
+}
+
+/// Mixer gain for a track, or `None` when it should be silent because it is
+/// muted or another track is soloed.
+fn audible_track_gain(track: &daw_core::track::Track, any_solo: bool) -> Option<f32> {
+    if track.mute || (any_solo && !track.solo) {
+        None
+    } else {
+        Some(track.volume.clamp(0.0, 4.0))
     }
 }
 
@@ -393,6 +406,8 @@ impl EditAction {
                         "Disarm track"
                     }
                     .to_string()
+                } else if from.volume != to.volume {
+                    "Track volume".to_string()
                 } else {
                     "Track change".to_string()
                 }
@@ -3551,7 +3566,7 @@ impl eframe::App for AppUI {
         egui::SidePanel::left("track_list").show(ctx, |ui| {
             ui.heading("Tracks");
             ui.separator();
-            let mut track_changes: Vec<(TrackId, TrackShape, TrackShape)> = Vec::new();
+            let mut track_changes: Vec<(TrackId, TrackShape, TrackShape, bool)> = Vec::new();
             for track_id in &self.project.track_order {
                 if let Some(track) = self.project.tracks.get(track_id) {
                     let before = TrackShape::of(track);
@@ -3611,19 +3626,33 @@ impl eframe::App for AppUI {
                             after.record_arm = !after.record_arm;
                         }
 
-                        ui.label(format!("Vol: {:.0}%", track.volume * 100.0));
+                        ui.add_sized(
+                            [80.0, 18.0],
+                            egui::Slider::new(&mut after.volume, 0.0..=1.5).show_value(false),
+                        )
+                        .on_hover_text(format!("Track volume {:.0}%", after.volume * 100.0));
+                        ui.label(format!("{:.0}%", after.volume * 100.0));
                     });
                     if after != before {
-                        track_changes.push((*track_id, before, after));
+                        let volume_only = after.mute == before.mute
+                            && after.solo == before.solo
+                            && after.record_arm == before.record_arm;
+                        track_changes.push((*track_id, before, after, volume_only));
                     }
                 }
             }
-            for (track_id, from, to) in track_changes {
+            for (track_id, from, to, merge) in track_changes {
                 if let Some(track) = self.project.tracks.get_mut(&track_id) {
                     to.apply(track);
                 }
-                self.push_undo(EditAction::TrackState { track_id, from, to }, false);
+                self.push_undo(EditAction::TrackState { track_id, from, to }, merge);
                 self.after_edit();
+                if merge {
+                    // Defer the mixer reload until the pointer is released.
+                    self.needs_audio_refresh = true;
+                } else {
+                    self.refresh_playback_if_playing();
+                }
             }
 
             // ---- Trash browser ----
@@ -4312,10 +4341,14 @@ impl AppUI {
     /// frames, and each buffer is sliced to the clip's trimmed source range.
     fn collect_playable_clips(&self, out_rate: u32) -> Vec<PlayableClip> {
         let project_sr = self.project.sample_rate.max(1) as f64;
+        let any_solo = self.project.tracks.values().any(|track| track.solo);
         let mut playable = Vec::new();
 
         for (track_index, track_id) in self.project.track_order.iter().enumerate() {
             let Some(track) = self.project.tracks.get(track_id) else {
+                continue;
+            };
+            let Some(track_gain) = audible_track_gain(track, any_solo) else {
                 continue;
             };
             for clip_id in &track.clips {
@@ -4350,7 +4383,7 @@ impl AppUI {
                             sample_rate,
                             start_frame,
                             track: track_index as u32,
-                            gain: clip.gain,
+                            gain: clip.gain * track_gain,
                             fade_in: clip.fade_in,
                             fade_out: clip.fade_out,
                         });
@@ -5369,12 +5402,13 @@ fn load_wav_interleaved(path: &Path) -> Result<(Vec<f32>, u16, u32)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        bit_crush, clip_gain_at, contiguous_clip_span, filter_audio, knob_from_normalized,
-        knob_to_normalized, load_wav_interleaved, load_wav_range_interleaved,
-        measure_integrated_loudness, merge_continuous_edit, processed_file_stem,
-        render_pitch_stretch, reverse_interleaved, saturate, tape_stretch_interleaved, tremolo,
-        wav_file_info, wav_peak, write_wav_f32, write_wav_range, write_wav_range_with_envelope,
-        ClipShape, ClipSourceState, EditAction, FilterKind, TrackShape,
+        audible_track_gain, bit_crush, clip_gain_at, contiguous_clip_span, filter_audio,
+        knob_from_normalized, knob_to_normalized, load_wav_interleaved,
+        load_wav_range_interleaved, measure_integrated_loudness, merge_continuous_edit,
+        processed_file_stem, render_pitch_stretch, reverse_interleaved, saturate,
+        tape_stretch_interleaved, tremolo, wav_file_info, wav_peak, write_wav_f32,
+        write_wav_range, write_wav_range_with_envelope, ClipShape, ClipSourceState, EditAction,
+        FilterKind, TrackShape,
     };
     use daw_core::audio_pool::AudioFileRef;
     use daw_core::clip::{AudioClip, ClipId, Fade, FadeCurve, TimeStretchMode, TimelinePos};
@@ -5446,6 +5480,7 @@ mod tests {
             mute: false,
             solo: false,
             record_arm: false,
+            volume: 1.0,
         };
 
         let mut muted = base;
@@ -5481,6 +5516,37 @@ mod tests {
             to: base,
         };
         assert_eq!(action.description(), "Track change");
+
+        let mut louder = base;
+        louder.volume = 0.5;
+        let action = EditAction::TrackState {
+            track_id,
+            from: base,
+            to: louder,
+        };
+        assert_eq!(action.description(), "Track volume");
+    }
+
+    #[test]
+    fn track_mute_solo_and_volume_feed_the_mixer_gain() {
+        let mut track = daw_core::track::Track::new_audio("test");
+        assert_eq!(audible_track_gain(&track, false), Some(1.0));
+
+        track.mute = true;
+        assert_eq!(audible_track_gain(&track, false), None);
+
+        track.mute = false;
+        track.solo = true;
+        assert_eq!(audible_track_gain(&track, true), Some(1.0));
+
+        track.solo = false;
+        assert_eq!(audible_track_gain(&track, true), None);
+
+        track.volume = 0.5;
+        assert_eq!(audible_track_gain(&track, false), Some(0.5));
+
+        track.volume = 10.0;
+        assert_eq!(audible_track_gain(&track, false), Some(4.0));
     }
 
     #[test]

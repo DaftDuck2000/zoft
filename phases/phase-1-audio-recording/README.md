@@ -23,7 +23,7 @@
 
 - [✓] Arm track → record → see waveform → edit → play back
 - [✓] Non-destructive: original file untouched
-- [ ] Undo/redo works for all edit operations (clip edits and track mute/solo/record-arm have history, a History panel and labelled undo steps; automation edits are not wired up yet)
+- [ ] Undo/redo works for all edit operations (clip edits and track mute/solo/record-arm/volume have history, a History panel and labelled undo steps; automation edits are not wired up yet)
 
 ## Progress Summary
 
@@ -45,14 +45,15 @@
 - Remaining: GPU texture atlas layout, perf benchmarks (overview <1s/min, 100 tracks @60 FPS), runtime verification
 
 **Playback (sound output)** - Pulled forward from M1 milestone
-- `daw-engine/src/playback.rs`: real-time mixer (clip gain, fades, sample-rate conversion) feeding the CPAL output callback
+- `daw-engine/src/playback.rs`: real-time mixer (clip gain, track mute/solo/volume, fades, sample-rate conversion) feeding the CPAL output callback
 - Engine API: `set_playback_clips`, `clear_playback`, `playback_position_frames`
+- Track list has per-track volume sliders and M/S buttons; mute, solo and volume are applied by the mixer and recorded in undo history
 - UI loads the project's clips on play; the playhead follows the engine's sample clock
 - Playhead and timeline may extend past the last clip; the view auto-follows during playback
 - Click or drag anywhere in the ruler to seek; the playhead follows the current snap grid (hold Alt to bypass), and seeking during playback/recording pauses the transport
 - Timeline ruler defaults to musical bars/beats (labels like `3.2`), switchable to clock time with the Ruler dropdown; the time-signature picker in the transport bar (4/4, 3/4, 6/8, …) drives bar length, ruler labels and the snap grid
 - Recording arms on ● and only captures from the moment the transport (Space/▶) rolls, so a take's length matches the playhead travel; pausing ends the take and shows the waveform right away
-- Not yet: input monitoring while recording, mute/solo/per-track volume in the mix, loop playback, transport scrub
+- Not yet: input monitoring while recording, loop playback, transport scrub
 
 **1.3 Non-Destructive Clip Editing** - `[~]` In Progress
 - Drag clips to move them (horizontal + between tracks) with snapping: Off / Bar / Beat (default) / 1/8 / 1/16 (hold Alt to bypass)
@@ -83,7 +84,7 @@
 
 **1.5 Undo/Redo** - `[~]` In Progress
 - `daw-core/src/undo.rs` provides a generic `History<T>` (capacity 1000, drops oldest, clears the redo branch on new edits) and a corrected command-backed `UndoHistory`/`UndoManager` for `dyn Command`
-- Arrange-view edits use `History<EditAction>`: moves, trims, fades, gain, colour, source replacements, attach/detach, track mute/solo/record-arm, time signature and labelled groups (Split, Consolidate)
+- Arrange-view edits use `History<EditAction>`: moves, trims, fades, gain, colour, source replacements, attach/detach, track mute/solo/record-arm/volume, time signature and labelled groups (Split, Consolidate)
 - Every entry has a readable description; the **History** button in the arrange toolbar opens a floating panel that lists past edits, shows redoable edits and jumps to any point
 - Continuous slider/drag edits merge into one undo step; undo/redo reload the mixer when playback is running
 - Not yet: serialized snapshots for very large jumps, automation edit integration, optional per-track scope
