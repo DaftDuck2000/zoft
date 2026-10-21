@@ -264,6 +264,8 @@ pub trait AudioBackend: Send + Sync {
     fn set_playback_mixer(&self, mixer: Option<crate::playback::PlaybackMixer>);
     /// Update the loop range on the current playback mixer, if any.
     fn set_playback_loop(&self, _range: Option<(u64, u64)>) {}
+    /// Update the metronome on the current playback mixer, if any.
+    fn set_playback_metronome(&self, _config: Option<crate::playback::MetronomeConfig>) {}
     /// Peak and RMS of the most recent input block, if the input stream is
     /// running.
     fn input_level(&self) -> Option<(f32, f32)> {
@@ -614,6 +616,17 @@ fn stop_input_stream(&self) -> Result<()> {
             .as_mut()
         {
             mixer.set_loop_range(range);
+        }
+    }
+
+    fn set_playback_metronome(&self, config: Option<crate::playback::MetronomeConfig>) {
+        if let Some(mixer) = self
+            .playback
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
+            mixer.set_metronome(config);
         }
     }
 

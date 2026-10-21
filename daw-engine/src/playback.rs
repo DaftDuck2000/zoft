@@ -29,6 +29,17 @@ struct AutoFade {
     fade_out_frames: u64,
 }
 
+/// Metronome click settings for the playback mixer.
+#[derive(Debug, Clone, Copy)]
+pub struct MetronomeConfig {
+    /// Output frames per beat.
+    pub frames_per_beat: f64,
+    /// Beats per bar; the first beat of each bar is accented.
+    pub beats_per_bar: u32,
+    /// Click level, `0.0..=1.0`.
+    pub gain: f32,
+}
+
 /// Real-time mixer: sums all clips into the output buffer and tracks the
 /// playback position. Lives behind a mutex shared with the audio callback.
 pub struct PlaybackMixer {
@@ -42,6 +53,7 @@ pub struct PlaybackMixer {
     scratch: Vec<f32>,
     /// Optional repeating range in output-device frames.
     loop_range: Option<(u64, u64)>,
+    metronome: Option<MetronomeConfig>,
 }
 
 impl PlaybackMixer {
@@ -116,6 +128,7 @@ impl PlaybackMixer {
             auto_fades,
             scratch: Vec::new(),
             loop_range: None,
+            metronome: None,
         }
     }
 
@@ -140,6 +153,17 @@ impl PlaybackMixer {
 
     pub fn loop_range(&self) -> Option<(u64, u64)> {
         self.loop_range
+    }
+
+    /// Set (or clear) the metronome click generator.
+    pub fn set_metronome(&mut self, config: Option<MetronomeConfig>) {
+        self.metronome = config.filter(|config| {
+            config.gain > 0.0 && config.frames_per_beat > 0.0 && config.beats_per_bar > 0
+        });
+    }
+
+    pub fn metronome(&self) -> Option<MetronomeConfig> {
+        self.metronome
     }
 
     /// Fill `data` with the mixed output, advancing the playback position.
@@ -231,6 +255,7 @@ impl PlaybackMixer {
     fn mix_segment(&mut self, out: &mut [f32]) {
         let out_ch = self.out_channels as usize;
         let frames = out.len() / out_ch;
+        let metronome = self.metronome;
         out.fill(0.0);
 
         for frame in 0..frames {
@@ -264,8 +289,40 @@ impl PlaybackMixer {
                         sample_at(clip, src_pos, channel) * gain;
                 }
             }
+
+            if let Some(config) = metronome {
+                let click = metronome_sample(config, pos, self.out_sample_rate);
+                if click != 0.0 {
+                    for channel in 0..out_ch {
+                        out[frame * out_ch + channel] += click;
+                    }
+                }
+            }
         }
     }
+}
+
+/// One metronome click sample at output frame `pos`. The first beat of each
+/// bar uses a higher pitch.
+fn metronome_sample(config: MetronomeConfig, pos: u64, sample_rate: u32) -> f32 {
+    let frames_per_beat = config.frames_per_beat;
+    if frames_per_beat <= 0.0 {
+        return 0.0;
+    }
+    let sample_rate = sample_rate.max(1) as f64;
+    let click_secs = 0.03;
+    let click_frames = (click_secs * sample_rate).max(1.0);
+    let phase = (pos as f64) % frames_per_beat;
+    if phase >= click_frames {
+        return 0.0;
+    }
+
+    let beat_index = ((pos as f64) / frames_per_beat).floor() as u64;
+    let accented = beat_index % config.beats_per_bar.max(1) as u64 == 0;
+    let frequency = if accented { 1_760.0 } else { 880.0 };
+    let t = phase / sample_rate;
+    let envelope = (-t / 0.012).exp() as f32;
+    (std::f32::consts::TAU * frequency as f32 * t as f32).sin() * envelope * config.gain
 }
 
 /// Linearly interpolated sample lookup for `channel` at `src_pos` (frames).
@@ -395,6 +452,29 @@ mod tests {
 
         mixer.set_loop_range(Some((4, 8)));
         assert_eq!(mixer.position(), 4);
+    }
+
+    #[test]
+    fn metronome_clicks_on_beat_and_silences_between() {
+        let mut mixer = PlaybackMixer::new(1000, 1, Vec::new(), 0);
+        mixer.set_metronome(Some(MetronomeConfig {
+            frames_per_beat: 100.0,
+            beats_per_bar: 4,
+            gain: 1.0,
+        }));
+
+        let mut out = [0.0f32; 200];
+        mixer.fill_unclamped(&mut out);
+        // The click is 30 frames long; the gap before the next beat is silent.
+        assert!(out[1..30].iter().any(|sample| sample.abs() > 1e-4));
+        assert!(out[40..90].iter().all(|sample| sample.abs() < 1e-6));
+        // The next beat starts at frame 100.
+        assert!(out[101..130].iter().any(|sample| sample.abs() > 1e-4));
+
+        mixer.set_metronome(None);
+        let mut silent = [1.0f32; 50];
+        mixer.fill_unclamped(&mut silent);
+        assert!(silent.iter().all(|sample| sample.abs() < 1e-6));
     }
 
     #[test]

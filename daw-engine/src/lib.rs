@@ -25,7 +25,7 @@ pub use waveform::*;
 pub use playback::*;
 
 use crate::audio_backend::AudioBackend;
-use crate::playback::{PlayableClip, PlaybackMixer};
+use crate::playback::{MetronomeConfig, PlayableClip, PlaybackMixer};
 use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -42,6 +42,8 @@ pub struct AudioEngine {
     /// Loop range in output-device frames, applied whenever a new mixer is
     /// created and to the live mixer when it changes.
     playback_loop: Arc<Mutex<Option<(u64, u64)>>>,
+    /// Metronome settings, applied to every new mixer and live updates.
+    playback_metronome: Arc<Mutex<Option<MetronomeConfig>>>,
 }
 
 struct RecordingState {
@@ -66,6 +68,7 @@ impl AudioEngine {
             project_channels: channels,
             selected_input_device: Arc::new(Mutex::new(None)),
             playback_loop: Arc::new(Mutex::new(None)),
+            playback_metronome: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -114,6 +117,9 @@ impl AudioEngine {
         if let Some(range) = *self.playback_loop.lock().unwrap() {
             mixer.set_loop_range(Some(range));
         }
+        if let Some(metronome) = *self.playback_metronome.lock().unwrap() {
+            mixer.set_metronome(Some(metronome));
+        }
         self.backend.set_playback_mixer(Some(mixer));
     }
 
@@ -123,6 +129,13 @@ impl AudioEngine {
     pub fn set_playback_loop(&self, range: Option<(u64, u64)>) {
         *self.playback_loop.lock().unwrap() = range;
         self.backend.set_playback_loop(range);
+    }
+
+    /// Set (or clear) the metronome click. Applied to the live mixer
+    /// immediately and to any mixer created later.
+    pub fn set_playback_metronome(&self, config: Option<MetronomeConfig>) {
+        *self.playback_metronome.lock().unwrap() = config;
+        self.backend.set_playback_metronome(config);
     }
 
     /// Remove the playback content (output falls silent).

@@ -8,7 +8,7 @@ use daw_core::track::TrackId;
 use daw_core::undo::History;
 use daw_core::Project;
 use daw_core::WaveformOverview;
-use daw_engine::playback::{PlayableClip, PlaybackMixer};
+use daw_engine::playback::{MetronomeConfig, PlayableClip, PlaybackMixer};
 use daw_engine::AudioEngine;
 use eframe::egui;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -257,6 +257,26 @@ fn loop_range_frames(
     } else {
         None
     }
+}
+
+/// Build metronome settings from the project tempo and time signature.
+fn metronome_config(
+    enabled: bool,
+    bpm: f32,
+    numerator: u8,
+    denominator: u8,
+    out_rate: u32,
+) -> Option<MetronomeConfig> {
+    if !enabled {
+        return None;
+    }
+    let bpm = bpm.max(1.0) as f64;
+    let beat_secs = 60.0 / bpm * (4.0 / denominator.max(1) as f64);
+    Some(MetronomeConfig {
+        frames_per_beat: beat_secs * out_rate.max(1) as f64,
+        beats_per_bar: numerator.max(1) as u32,
+        gain: 0.5,
+    })
 }
 
 /// Small pre-fader recording meter: a green RMS bar with a peak tick.
@@ -669,6 +689,8 @@ struct AppUI {
     loop_enabled: bool,
     loop_start_secs: f64,
     loop_end_secs: f64,
+    /// Metronome click during playback.
+    metronome_enabled: bool,
     /// Where recording started, so the clip lands at the right spot.
     record_start_secs: Option<f64>,
     /// Armed take waiting for the transport to roll (see `begin_recording`).
@@ -730,6 +752,7 @@ impl AppUI {
             loop_enabled: false,
             loop_start_secs: 0.0,
             loop_end_secs: 0.0,
+            metronome_enabled: false,
             record_start_secs: None,
             pending_record_track: None,
             last_playhead_update: std::time::Instant::now(),
@@ -1095,6 +1118,7 @@ impl AppUI {
             let clips = self.collect_playable_clips(out_rate);
             let start_frame = (self.playhead_secs.max(0.0) * out_rate as f64) as u64;
             self.sync_playback_loop();
+            self.sync_playback_metronome();
             self.engine.set_playback_clips(clips, start_frame);
         }
     }
@@ -3603,6 +3627,14 @@ impl eframe::App for AppUI {
                     format_clock(self.loop_start_secs),
                     format_clock(self.loop_end_secs)
                 ));
+                if ui
+                    .selectable_label(self.metronome_enabled, "Click")
+                    .on_hover_text("Metronome click during playback")
+                    .clicked()
+                {
+                    self.metronome_enabled = !self.metronome_enabled;
+                    self.sync_playback_metronome();
+                }
 
                 ui.separator();
                 ui.label(format!("Project: {}", self.project.name));
@@ -3639,6 +3671,7 @@ impl eframe::App for AppUI {
                         false,
                     );
                     self.after_edit();
+                    self.sync_playback_metronome();
                 }
                 ui.separator();
 
@@ -4469,6 +4502,20 @@ impl AppUI {
         ));
     }
 
+    /// Push the current metronome settings into the engine.
+    fn sync_playback_metronome(&self) {
+        let out_rate = self.engine.output_sample_rate().max(1);
+        let (numerator, denominator) = self.time_signature();
+        let bpm = self.project.tempo_map.default_bpm();
+        self.engine.set_playback_metronome(metronome_config(
+            self.metronome_enabled,
+            bpm,
+            numerator,
+            denominator,
+            out_rate,
+        ));
+    }
+
     /// Handle an edit to the loop controls: keep the range valid, move the
     /// playhead inside it, and restart the mixer if the transport is running.
     fn loop_changed(&mut self) {
@@ -4499,6 +4546,7 @@ impl AppUI {
         let clips = self.collect_playable_clips(out_rate);
         let start_frame = (self.playhead_secs.max(0.0) * out_rate as f64) as u64;
         self.sync_playback_loop();
+        self.sync_playback_metronome();
         self.engine.set_playback_clips(clips, start_frame);
         if let Err(e) = self.engine.start() {
             self.engine.clear_playback();
@@ -5576,10 +5624,10 @@ mod tests {
         audible_track_gain, bit_crush, clip_gain_at, contiguous_clip_span, filter_audio,
         knob_from_normalized, knob_to_normalized, load_wav_interleaved,
         load_wav_range_interleaved, loop_range_frames, measure_integrated_loudness,
-        merge_continuous_edit, processed_file_stem, render_pitch_stretch, reverse_interleaved,
-        saturate, tape_stretch_interleaved, tremolo, wav_file_info, wav_peak, write_wav_f32,
-        write_wav_range, write_wav_range_with_envelope, ClipShape, ClipSourceState, EditAction,
-        FilterKind, TrackShape,
+        merge_continuous_edit, metronome_config, processed_file_stem, render_pitch_stretch,
+        reverse_interleaved, saturate, tape_stretch_interleaved, tremolo, wav_file_info,
+        wav_peak, write_wav_f32, write_wav_range, write_wav_range_with_envelope, ClipShape,
+        ClipSourceState, EditAction, FilterKind, TrackShape,
     };
     use daw_core::audio_pool::AudioFileRef;
     use daw_core::clip::{AudioClip, ClipId, Fade, FadeCurve, TimeStretchMode, TimelinePos};
@@ -5696,6 +5744,20 @@ mod tests {
             to: louder,
         };
         assert_eq!(action.description(), "Track volume");
+    }
+
+    #[test]
+    fn metronome_config_follows_tempo_and_time_signature() {
+        assert!(metronome_config(false, 120.0, 4, 4, 48_000).is_none());
+
+        let config = metronome_config(true, 120.0, 4, 4, 48_000).unwrap();
+        assert!((config.frames_per_beat - 24_000.0).abs() < 1e-6);
+        assert_eq!(config.beats_per_bar, 4);
+        assert!(config.gain > 0.0);
+
+        let config = metronome_config(true, 120.0, 6, 8, 48_000).unwrap();
+        assert!((config.frames_per_beat - 12_000.0).abs() < 1e-6);
+        assert_eq!(config.beats_per_bar, 6);
     }
 
     #[test]

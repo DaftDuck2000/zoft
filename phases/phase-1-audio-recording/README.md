@@ -55,6 +55,7 @@
 - Timeline ruler defaults to musical bars/beats (labels like `3.2`), switchable to clock time with the Ruler dropdown; the time-signature picker in the transport bar (4/4, 3/4, 6/8, …) drives bar length, ruler labels and the snap grid
 - Recording arms on ● and only captures from the moment the transport (Space/▶) rolls, so a take's length matches the playhead travel; pausing ends the take and shows the waveform right away
 - Transport loop: **In**/**Out** set the range at the playhead, **Loop** repeats it; the engine wraps sample-accurately at the loop end and the ruler highlights the range
+- Metronome **Click** toggle with accented downbeats, following the project tempo and time signature
 - Not yet: input monitoring while recording, transport scrub
 
 **1.3 Non-Destructive Clip Editing** - `[~]` In Progress
