@@ -201,6 +201,30 @@ impl ClipShape {
     }
 }
 
+/// Undoable track properties toggled from the track list.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TrackShape {
+    mute: bool,
+    solo: bool,
+    record_arm: bool,
+}
+
+impl TrackShape {
+    fn of(track: &daw_core::track::Track) -> Self {
+        Self {
+            mute: track.mute,
+            solo: track.solo,
+            record_arm: track.record_arm,
+        }
+    }
+
+    fn apply(self, track: &mut daw_core::track::Track) {
+        track.mute = self.mute;
+        track.solo = self.solo;
+        track.record_arm = self.record_arm;
+    }
+}
+
 /// Source reference and trimmed range, used by processing operations that
 /// render a new file (the original file is never modified).
 #[derive(Debug, Clone)]
@@ -309,6 +333,12 @@ enum EditAction {
     Detach { track: TrackId, clip_id: ClipId },
     /// Change the project time signature.
     TimeSignature { from: (u8, u8), to: (u8, u8) },
+    /// Toggle track mute, solo or record-arm.
+    TrackState {
+        track_id: TrackId,
+        from: TrackShape,
+        to: TrackShape,
+    },
     /// Several edits applied and undone as one history step.
     Group {
         actions: Vec<EditAction>,
@@ -350,6 +380,22 @@ impl EditAction {
             EditAction::Detach { .. } => "Delete clip".to_string(),
             EditAction::TimeSignature { to, .. } => {
                 format!("Time signature {}/{}", to.0, to.1)
+            }
+            EditAction::TrackState { from, to, .. } => {
+                if from.mute != to.mute {
+                    if to.mute { "Mute track" } else { "Unmute track" }.to_string()
+                } else if from.solo != to.solo {
+                    if to.solo { "Solo track" } else { "Unsolo track" }.to_string()
+                } else if from.record_arm != to.record_arm {
+                    if to.record_arm {
+                        "Arm track"
+                    } else {
+                        "Disarm track"
+                    }
+                    .to_string()
+                } else {
+                    "Track change".to_string()
+                }
             }
             EditAction::Group { label, .. } => label.clone(),
         }
@@ -1044,6 +1090,11 @@ impl AppUI {
                 self.project
                     .time_signature_map
                     .set_change(0, numerator, denominator);
+            }
+            EditAction::TrackState { track_id, from, to } => {
+                if let Some(track) = self.project.tracks.get_mut(track_id) {
+                    (if forward { *to } else { *from }).apply(track);
+                }
             }
             EditAction::Group { actions, .. } => {
                 if forward {
@@ -3500,8 +3551,11 @@ impl eframe::App for AppUI {
         egui::SidePanel::left("track_list").show(ctx, |ui| {
             ui.heading("Tracks");
             ui.separator();
+            let mut track_changes: Vec<(TrackId, TrackShape, TrackShape)> = Vec::new();
             for track_id in &self.project.track_order {
-                if let Some(track) = self.project.tracks.get_mut(track_id) {
+                if let Some(track) = self.project.tracks.get(track_id) {
+                    let before = TrackShape::of(track);
+                    let mut after = before;
                     ui.horizontal(|ui| {
                         let color = egui::Color32::from_rgb(track.color.0, track.color.1, track.color.2);
                         ui.colored_label(color, "■");
@@ -3511,19 +3565,19 @@ impl eframe::App for AppUI {
                         // Mute/Solo/Record Arm buttons
                         let mute_text = "M";
                         let solo_text = "S";
-                        let arm_text = if track.record_arm { "●" } else { "○" };
+                        let arm_text = if after.record_arm { "●" } else { "○" };
 
-                        let mute_color = if track.mute {
+                        let mute_color = if after.mute {
                             egui::Color32::YELLOW
                         } else {
                             egui::Color32::GRAY
                         };
-                        let solo_color = if track.solo {
+                        let solo_color = if after.solo {
                             egui::Color32::GREEN
                         } else {
                             egui::Color32::GRAY
                         };
-                        let arm_color = if track.record_arm {
+                        let arm_color = if after.record_arm {
                             egui::Color32::RED
                         } else {
                             egui::Color32::GRAY
@@ -3536,7 +3590,7 @@ impl eframe::App for AppUI {
                             )
                             .clicked()
                         {
-                            track.mute = !track.mute;
+                            after.mute = !after.mute;
                         }
                         if ui
                             .add(
@@ -3545,7 +3599,7 @@ impl eframe::App for AppUI {
                             )
                             .clicked()
                         {
-                            track.solo = !track.solo;
+                            after.solo = !after.solo;
                         }
                         if ui
                             .add(
@@ -3554,12 +3608,22 @@ impl eframe::App for AppUI {
                             )
                             .clicked()
                         {
-                            track.record_arm = !track.record_arm;
+                            after.record_arm = !after.record_arm;
                         }
 
                         ui.label(format!("Vol: {:.0}%", track.volume * 100.0));
                     });
+                    if after != before {
+                        track_changes.push((*track_id, before, after));
+                    }
                 }
+            }
+            for (track_id, from, to) in track_changes {
+                if let Some(track) = self.project.tracks.get_mut(&track_id) {
+                    to.apply(track);
+                }
+                self.push_undo(EditAction::TrackState { track_id, from, to }, false);
+                self.after_edit();
             }
 
             // ---- Trash browser ----
@@ -5310,7 +5374,7 @@ mod tests {
         measure_integrated_loudness, merge_continuous_edit, processed_file_stem,
         render_pitch_stretch, reverse_interleaved, saturate, tape_stretch_interleaved, tremolo,
         wav_file_info, wav_peak, write_wav_f32, write_wav_range, write_wav_range_with_envelope,
-        ClipShape, ClipSourceState, EditAction, FilterKind,
+        ClipShape, ClipSourceState, EditAction, FilterKind, TrackShape,
     };
     use daw_core::audio_pool::AudioFileRef;
     use daw_core::clip::{AudioClip, ClipId, Fade, FadeCurve, TimeStretchMode, TimelinePos};
@@ -5373,6 +5437,50 @@ mod tests {
             to_pos: TimelinePos::default(),
         };
         assert_eq!(moved.description(), "Move clip");
+    }
+
+    #[test]
+    fn track_state_descriptions_name_the_toggle() {
+        let track_id = daw_core::track::TrackId::default();
+        let base = TrackShape {
+            mute: false,
+            solo: false,
+            record_arm: false,
+        };
+
+        let mut muted = base;
+        muted.mute = true;
+        let action = EditAction::TrackState {
+            track_id,
+            from: base,
+            to: muted,
+        };
+        assert_eq!(action.description(), "Mute track");
+
+        let mut soloed = base;
+        soloed.solo = true;
+        let action = EditAction::TrackState {
+            track_id,
+            from: base,
+            to: soloed,
+        };
+        assert_eq!(action.description(), "Solo track");
+
+        let mut armed = base;
+        armed.record_arm = true;
+        let action = EditAction::TrackState {
+            track_id,
+            from: base,
+            to: armed,
+        };
+        assert_eq!(action.description(), "Arm track");
+
+        let action = EditAction::TrackState {
+            track_id,
+            from: base,
+            to: base,
+        };
+        assert_eq!(action.description(), "Track change");
     }
 
     #[test]

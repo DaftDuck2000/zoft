@@ -23,7 +23,7 @@
 
 - [✓] Arm track → record → see waveform → edit → play back
 - [✓] Non-destructive: original file untouched
-- [ ] Undo/redo works for all edit operations (clip edits have full history, a History panel and labelled undo steps; track/automation edits are not wired up yet)
+- [ ] Undo/redo works for all edit operations (clip edits and track mute/solo/record-arm have history, a History panel and labelled undo steps; automation edits are not wired up yet)
 
 ## Progress Summary
 
@@ -83,7 +83,7 @@
 
 **1.5 Undo/Redo** - `[~]` In Progress
 - `daw-core/src/undo.rs` provides a generic `History<T>` (capacity 1000, drops oldest, clears the redo branch on new edits) and a corrected command-backed `UndoHistory`/`UndoManager` for `dyn Command`
-- Arrange-view edits use `History<EditAction>`: moves, trims, fades, gain, colour, source replacements, attach/detach, time signature and labelled groups (Split, Consolidate)
+- Arrange-view edits use `History<EditAction>`: moves, trims, fades, gain, colour, source replacements, attach/detach, track mute/solo/record-arm, time signature and labelled groups (Split, Consolidate)
 - Every entry has a readable description; the **History** button in the arrange toolbar opens a floating panel that lists past edits, shows redoable edits and jumps to any point
 - Continuous slider/drag edits merge into one undo step; undo/redo reload the mixer when playback is running
-- Not yet: serialized snapshots for very large jumps, track/automation edit integration, optional per-track scope
+- Not yet: serialized snapshots for very large jumps, automation edit integration, optional per-track scope
