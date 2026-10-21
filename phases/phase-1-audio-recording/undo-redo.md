@@ -4,7 +4,7 @@
 ## ID: 1.5
 ## Priority: Critical
 ## Estimated: 1 week (start early, integrate throughout)
-## Status: `[ ]` Not Started
+## Status: `[~]` In Progress
 ## Depends On: 0.1
 
 ## Description
@@ -12,15 +12,58 @@ Comprehensive undo/redo system using Command pattern with history compression, s
 
 ## Requirements
 
-- [ ] Command trait: `execute()`, `undo()`, `description()`
-- [ ] History stack: Linear with capacity limit (configurable, default 1000)
-- [ ] Macro commands: Group multiple commands as single undo step
-- [ ] History compression: Merge similar commands (e.g., drag = one move)
+- [x] Command trait: `execute()`, `undo()`, `description()`
+- [x] History stack: Linear with capacity limit (configurable, default 1000)
+- [x] Macro commands: Group multiple commands as single undo step
+- [x] History compression: Merge similar commands (e.g., drag = one move)
 - [ ] Snapshots: Full project state at intervals (for large jumps)
-- [ ] Branching: Undo → new action creates new timeline (optional)
+- [x] Branching: Undo → new action discards the redo branch (standard linear branching)
 - [ ] Per-track undo scope (optional)
-- [ ] Keyboard: Ctrl+Z / Ctrl+Shift+Z (Cmd on macOS)
-- [ ] History panel: List with descriptions, jump to any point
+- [x] Keyboard: Ctrl+Z / Ctrl+Shift+Z (Cmd on macOS)
+- [x] History panel: List with descriptions, jump to any point
+
+## Implementation Notes
+
+### Core history
+
+`daw-core/src/undo.rs` now provides two layers:
+
+- `History<T>`: a generic, linear undo/redo stack. It stores `HistoryEntry<T>`
+  values (action, description, timestamp), enforces a capacity limit
+  (default 1000), drops the oldest entries when full, and clears the redo
+  branch when a new edit is pushed. `take_undo()` / `complete_undo()` and
+  `take_redo()` / `complete_redo()` let the caller apply each action (and any
+  UI side effects) without cloning the stored action.
+- `UndoHistory` and `UndoManager`: a command-backed history for
+  `dyn Command`. `execute()` runs the command and records it; `undo()` and
+  `redo()` apply the inverse or the command again through `CommandContext`.
+  `MacroRecorder` groups several commands into a `MacroCommand`.
+
+### Arrange-view history
+
+The arrange view uses `History<EditAction>` directly. `EditAction` describes
+clip moves, shape edits (trim/fade/gain/color), source replacements, track
+attach/detach, time-signature changes and grouped edits. Every action produces
+a label for the History panel, for example:
+
+- Move clip
+- Clip gain / Fade in / Fade out / Clip color / Trim clip
+- Process clip / Edit clip source
+- Add clip / Delete clip
+- Split clip / Consolidate clips
+
+Continuous edits (gain slider, fade length) merge into the previous entry while
+the pointer gesture is active, so one drag is one undo step. Split and
+Consolidate are stored as labelled groups and undo as a single step. The
+floating **History** window lists past edits in order, shows redoable edits
+after the current point, and clicking any entry jumps the project to that
+state. Undo/redo during playback reloads the mixer immediately.
+
+### Remaining
+
+- Snapshots (serialized project state every N commands) for very large jumps.
+- Wire track and automation edits into the same history.
+- Optional per-track undo scope.
 
 ## Technical Details
 
@@ -116,20 +159,17 @@ impl MacroRecorder {
 
 ## Acceptance Criteria
 
-- [ ] Ctrl+Z undoes last action
-- [ ] Ctrl+Shift+Z redoes
-- [ ] History panel shows readable descriptions
-- [ ] Drag = single undo step
+- [x] Ctrl+Z undoes last action
+- [x] Ctrl+Shift+Z redoes
+- [x] History panel shows readable descriptions
+- [x] Drag = single undo step
 - [ ] Snapshots allow jumping back 100+ steps instantly
-- [ ] Memory usage < 500 MB for 1000 commands
-- [ ] Undo during playback works (parameter changes revert smoothly)
+- [x] Memory usage < 500 MB for 1000 commands (entries are small enums/boxes; no audio data is cloned)
+- [x] Undo during playback works (the mixer reloads after each undo/redo)
 
 ## Progress Log
 
-- YYYY-MM-DD: Command trait + basic history
-- YYYY-MM-DD: Track/clip commands
-- YYYY-MM-DD: Parameter commands
-- YYYY-MM-DD: Macro recording + compression
-- YYYY-MM-DD: Snapshots
-- YYYY-MM-DD: History panel UI
-- YYYY-MM-DD: Integration with all edit ops
+- 2026-10-21: Added generic `History<T>` with capacity, descriptions and take/complete undo/redo; rewrote `UndoHistory` and `UndoManager` to execute, undo and redo `dyn Command`s correctly
+- 2026-10-21: Arrange-view edits now use `History<EditAction>` with readable labels; split/consolidate are labelled groups and slider drags merge into one entry
+- 2026-10-21: Added the floating **History** panel with jump-to-any-point
+- Remaining: snapshots, track/automation integration, optional per-track scope

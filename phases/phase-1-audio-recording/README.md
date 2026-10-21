@@ -11,7 +11,7 @@
 | 1.2 | Waveform Rendering | `[~]` | `waveform-rendering.md` |
 | 1.3 | Non-Destructive Clip Editing | `[~]` | `non-destructive-editing.md` |
 | 1.4 | Clip Processing | `[~]` | `clip-processing.md` |
-| 1.5 | Undo/Redo System | `[ ]` | `undo-redo.md` |
+| 1.5 | Undo/Redo System | `[~]` | `undo-redo.md` |
 
 ## Dependencies
 
@@ -23,7 +23,7 @@
 
 - [✓] Arm track → record → see waveform → edit → play back
 - [✓] Non-destructive: original file untouched
-- [ ] Undo/redo works for all edit operations (clip edits are undoable; track/automation edits are not wired up yet)
+- [ ] Undo/redo works for all edit operations (clip edits have full history, a History panel and labelled undo steps; track/automation edits are not wired up yet)
 
 ## Progress Summary
 
@@ -63,7 +63,7 @@
 - Automatic equal-power crossfade where clips overlap on the same track, with an X overlay in the overlap region; contained clips are layered instead
 - Snap: Off / Bar / Beat (default) / 1/8 / 1/16, optional Relative mode, Alt bypass; the grid follows the chosen time signature
 - Trash browser in the track panel: deleted clips stay in the project and can be restored
-- Undo/redo (Ctrl+Z, Ctrl+Shift+Z, Ctrl+Y) with merge for continuous slider edits — Phase 1.5 groundwork
+- Undo/redo (Ctrl+Z, Ctrl+Shift+Z, Ctrl+Y) with merge for continuous slider edits and a floating **History** panel
 - Playback mixer now slices clips by `source_offset`/`length`
 - Next: bounce in place (remaining 1.4 processing operation)
 
@@ -81,4 +81,9 @@
 - Note: pitch/time rendering requires the `rubberband` binary in `PATH` (except Tape mode)
 - Not yet: bounce in place
 
-**1.5 Undo/Redo** - Not started (basic undo/redo already available in the arrange view)
+**1.5 Undo/Redo** - `[~]` In Progress
+- `daw-core/src/undo.rs` provides a generic `History<T>` (capacity 1000, drops oldest, clears the redo branch on new edits) and a corrected command-backed `UndoHistory`/`UndoManager` for `dyn Command`
+- Arrange-view edits use `History<EditAction>`: moves, trims, fades, gain, colour, source replacements, attach/detach, time signature and labelled groups (Split, Consolidate)
+- Every entry has a readable description; the **History** button in the arrange toolbar opens a floating panel that lists past edits, shows redoable edits and jumps to any point
+- Continuous slider/drag edits merge into one undo step; undo/redo reload the mixer when playback is running
+- Not yet: serialized snapshots for very large jumps, track/automation edit integration, optional per-track scope

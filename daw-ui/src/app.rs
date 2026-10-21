@@ -5,6 +5,7 @@ use daw_core::audio_pool::AudioFileRef;
 use daw_core::clip::{AudioClip, ClipId, Fade, FadeCurve, TimeStretchMode, TimelinePos};
 use daw_core::project::{BitDepth, Color};
 use daw_core::track::TrackId;
+use daw_core::undo::History;
 use daw_core::Project;
 use daw_core::WaveformOverview;
 use daw_engine::playback::{PlayableClip, PlaybackMixer};
@@ -308,7 +309,81 @@ enum EditAction {
     Detach { track: TrackId, clip_id: ClipId },
     /// Change the project time signature.
     TimeSignature { from: (u8, u8), to: (u8, u8) },
-    Group(Vec<EditAction>),
+    /// Several edits applied and undone as one history step.
+    Group {
+        actions: Vec<EditAction>,
+        label: String,
+    },
+}
+
+impl EditAction {
+    /// Human-readable label shown in the History panel.
+    fn description(&self) -> String {
+        match self {
+            EditAction::Move { .. } => "Move clip".to_string(),
+            EditAction::Shape { from, to, .. } => {
+                if from.gain != to.gain {
+                    "Clip gain".to_string()
+                } else if from.fade_in != to.fade_in {
+                    "Fade in".to_string()
+                } else if from.fade_out != to.fade_out {
+                    "Fade out".to_string()
+                } else if from.color != to.color {
+                    "Clip color".to_string()
+                } else if from.position != to.position
+                    || from.source_offset != to.source_offset
+                    || from.length != to.length
+                {
+                    "Trim clip".to_string()
+                } else {
+                    "Edit clip".to_string()
+                }
+            }
+            EditAction::Source { from, to, .. } => {
+                if from.source.path != to.source.path {
+                    "Process clip".to_string()
+                } else {
+                    "Edit clip source".to_string()
+                }
+            }
+            EditAction::Attach { .. } => "Add clip".to_string(),
+            EditAction::Detach { .. } => "Delete clip".to_string(),
+            EditAction::TimeSignature { to, .. } => {
+                format!("Time signature {}/{}", to.0, to.1)
+            }
+            EditAction::Group { label, .. } => label.clone(),
+        }
+    }
+}
+
+/// Merge a continuous `Shape` edit into the most recent history entry when the
+/// new edit starts exactly where the previous one ended (same clip). Returns
+/// true when the edit was merged.
+fn merge_continuous_edit(history: &mut History<EditAction>, action: &EditAction) -> bool {
+    let EditAction::Shape { clip_id, from, to } = action else {
+        return false;
+    };
+    let (clip_id, from, to) = (*clip_id, *from, *to);
+
+    let Some(entry) = history.last_mut() else {
+        return false;
+    };
+    let mut merged = false;
+    if let EditAction::Shape {
+        clip_id: prev_id,
+        to: prev_to,
+        ..
+    } = &mut entry.action
+    {
+        if *prev_id == clip_id && *prev_to == from {
+            *prev_to = to;
+            merged = true;
+        }
+    }
+    if merged {
+        entry.description = entry.action.description();
+    }
+    merged
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -505,11 +580,12 @@ struct AppUI {
     effects_window: Option<EffectsWindow>,
     /// Where a trashed clip was last attached, so Restore can put it back.
     deleted_from: HashMap<ClipId, TrackId>,
-    undo_stack: Vec<EditAction>,
-    redo_stack: Vec<EditAction>,
+    history: History<EditAction>,
     /// True while consecutive edits (e.g. a slider drag) belong to one gesture
     /// and should share a single undo entry.
     merge_chain: bool,
+    /// Whether the floating History panel is visible.
+    history_open: bool,
     /// Deferred mixer refresh for edits made while a pointer gesture is active.
     needs_audio_refresh: bool,
 
@@ -550,9 +626,9 @@ impl AppUI {
             clipboard: None,
             effects_window: None,
             deleted_from: HashMap::new(),
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
+            history: History::new(1000),
             merge_chain: false,
+            history_open: false,
             needs_audio_refresh: false,
             waveform_tx,
             waveform_rx,
@@ -899,28 +975,14 @@ impl AppUI {
     }
 
     fn push_undo(&mut self, action: EditAction, merge: bool) {
-        self.redo_stack.clear();
-
         // Merge continuous edits of the same clip (e.g. dragging a gain slider)
         // into a single history entry while the pointer stays down.
-        if merge && self.merge_chain {
-            if let EditAction::Shape { clip_id, from, to } = &action {
-                let (clip_id, from, to) = (*clip_id, *from, *to);
-                if let Some(EditAction::Shape {
-                    clip_id: prev_id,
-                    to: prev_to,
-                    ..
-                }) = self.undo_stack.last_mut()
-                {
-                    if *prev_id == clip_id && *prev_to == from {
-                        *prev_to = to;
-                        return;
-                    }
-                }
-            }
+        if merge && self.merge_chain && merge_continuous_edit(&mut self.history, &action) {
+            return;
         }
 
-        self.undo_stack.push(action);
+        let description = action.description();
+        self.history.push(action, description);
         self.merge_chain = merge;
     }
 
@@ -983,7 +1045,7 @@ impl AppUI {
                     .time_signature_map
                     .set_change(0, numerator, denominator);
             }
-            EditAction::Group(actions) => {
+            EditAction::Group { actions, .. } => {
                 if forward {
                     for action in actions {
                         self.apply_action(action, true);
@@ -998,23 +1060,49 @@ impl AppUI {
     }
 
     fn undo(&mut self) {
-        self.merge_chain = false;
-        if let Some(action) = self.undo_stack.pop() {
-            self.apply_action(&action, false);
-            self.redo_stack.push(action);
+        if self.undo_step() {
             self.after_edit();
             self.refresh_playback_if_playing();
         }
     }
 
     fn redo(&mut self) {
-        self.merge_chain = false;
-        if let Some(action) = self.redo_stack.pop() {
-            self.apply_action(&action, true);
-            self.undo_stack.push(action);
+        if self.redo_step() {
             self.after_edit();
             self.refresh_playback_if_playing();
         }
+    }
+
+    /// Apply one undo step without refreshing playback. Returns whether an
+    /// action was undone.
+    fn undo_step(&mut self) -> bool {
+        self.merge_chain = false;
+        let Some(entry) = self.history.take_undo() else {
+            return false;
+        };
+        self.apply_action(&entry.action, false);
+        self.history.complete_undo(entry);
+        true
+    }
+
+    /// Apply one redo step without refreshing playback.
+    fn redo_step(&mut self) -> bool {
+        self.merge_chain = false;
+        let Some(entry) = self.history.take_redo() else {
+            return false;
+        };
+        self.apply_action(&entry.action, true);
+        self.history.complete_redo(entry);
+        true
+    }
+
+    /// Jump the project to any point in the edit history.
+    fn jump_history_to(&mut self, past_len: usize) {
+        self.merge_chain = false;
+        while self.history.past_len() > past_len && self.undo_step() {}
+        while self.history.past_len() < past_len && self.redo_step() {}
+        self.after_edit();
+        self.refresh_playback_if_playing();
     }
 
     /// Hit-test a pointer position against drawn clips and choose the gesture
@@ -1300,17 +1388,20 @@ impl AppUI {
             .map(|fade| Fade::new(fade.length.min(offset_frames), fade.curve));
 
         let new_id = self.project.audio_clips.insert(right);
-        let action = EditAction::Group(vec![
-            EditAction::Shape {
-                clip_id,
-                from: from_shape,
-                to: to_shape,
-            },
-            EditAction::Attach {
-                track: track_id,
-                clip_id: new_id,
-            },
-        ]);
+        let action = EditAction::Group {
+            actions: vec![
+                EditAction::Shape {
+                    clip_id,
+                    from: from_shape,
+                    to: to_shape,
+                },
+                EditAction::Attach {
+                    track: track_id,
+                    clip_id: new_id,
+                },
+            ],
+            label: "Split clip".to_string(),
+        };
         self.apply_action(&action, true);
         self.push_undo(action, false);
         self.after_edit();
@@ -1915,7 +2006,10 @@ impl AppUI {
             track: plan.track,
             clip_id: new_id,
         });
-        let action = EditAction::Group(actions);
+        let action = EditAction::Group {
+            actions,
+            label: "Consolidate clips".to_string(),
+        };
         self.apply_action(&action, true);
         self.push_undo(action, false);
         self.selected_clip = Some(new_id);
@@ -2182,6 +2276,75 @@ impl AppUI {
 
         if gain_response.drag_stopped() {
             self.refresh_playback_if_playing();
+        }
+    }
+
+    /// Floating edit-history panel. Every edit is listed in order; clicking an
+    /// entry jumps the project to that point in the timeline.
+    fn show_history_window(&mut self, ctx: &egui::Context) {
+        if !self.history_open {
+            return;
+        }
+
+        let past: Vec<(usize, String)> = self
+            .history
+            .past()
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| (index + 1, entry.description.clone()))
+            .collect();
+        let future: Vec<(usize, String)> = self
+            .history
+            .future()
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| (self.history.past_len() + index + 1, entry.description.clone()))
+            .collect();
+        let current = self.history.past_len();
+        let mut jump = None;
+        let mut open = self.history_open;
+
+        egui::Window::new("History")
+            .open(&mut open)
+            .default_width(260.0)
+            .max_width(420.0)
+            .show(ctx, |ui| {
+                ui.weak("Click an edit to jump the project to that point.");
+                ui.add_space(4.0);
+                if past.is_empty() && future.is_empty() {
+                    ui.label("No edits yet.");
+                    return;
+                }
+                egui::ScrollArea::vertical()
+                    .max_height(320.0)
+                    .show(ui, |ui| {
+                        for (index, description) in &past {
+                            if ui
+                                .selectable_label(*index == current, format!("{}. {}", index, description))
+                                .clicked()
+                            {
+                                jump = Some(*index);
+                            }
+                        }
+                        for (index, description) in &future {
+                            if ui
+                                .selectable_label(
+                                    false,
+                                    format!("{}. {} (redo)", index, description),
+                                )
+                                .clicked()
+                            {
+                                jump = Some(*index);
+                            }
+                        }
+                    });
+            });
+
+        self.history_open = open;
+        if let Some(target) = jump {
+            if target != self.history.past_len() {
+                self.jump_history_to(target);
+            }
         }
     }
 
@@ -3463,8 +3626,8 @@ impl eframe::App for AppUI {
                 ui.separator();
 
                 // Undo / redo
-                let can_undo = !self.undo_stack.is_empty();
-                let can_redo = !self.redo_stack.is_empty();
+                let can_undo = self.history.can_undo();
+                let can_redo = self.history.can_redo();
                 if ui
                     .add_enabled(can_undo, egui::Button::new("↶"))
                     .on_hover_text("Undo (Ctrl+Z)")
@@ -3478,6 +3641,13 @@ impl eframe::App for AppUI {
                     .clicked()
                 {
                     self.redo();
+                }
+                if ui
+                    .selectable_label(self.history_open, "History")
+                    .on_hover_text("Show every edit in this session and jump to any point")
+                    .clicked()
+                {
+                    self.history_open = !self.history_open;
                 }
                 ui.separator();
 
@@ -3950,6 +4120,7 @@ impl eframe::App for AppUI {
         });
 
         self.show_effects_window(ctx);
+        self.show_history_window(ctx);
 
         // Request repaint for smooth playback and async waveform polling
         ctx.request_repaint();
@@ -5136,15 +5307,100 @@ mod tests {
     use super::{
         bit_crush, clip_gain_at, contiguous_clip_span, filter_audio, knob_from_normalized,
         knob_to_normalized, load_wav_interleaved, load_wav_range_interleaved,
-        measure_integrated_loudness, processed_file_stem, render_pitch_stretch,
-        reverse_interleaved, saturate, tape_stretch_interleaved, tremolo, wav_file_info,
-        wav_peak, write_wav_f32, write_wav_range, write_wav_range_with_envelope,
-        ClipSourceState, FilterKind,
+        measure_integrated_loudness, merge_continuous_edit, processed_file_stem,
+        render_pitch_stretch, reverse_interleaved, saturate, tape_stretch_interleaved, tremolo,
+        wav_file_info, wav_peak, write_wav_f32, write_wav_range, write_wav_range_with_envelope,
+        ClipShape, ClipSourceState, EditAction, FilterKind,
     };
     use daw_core::audio_pool::AudioFileRef;
-    use daw_core::clip::{AudioClip, Fade, FadeCurve, TimeStretchMode, TimelinePos};
+    use daw_core::clip::{AudioClip, ClipId, Fade, FadeCurve, TimeStretchMode, TimelinePos};
     use daw_core::project::BitDepth;
+    use daw_core::undo::History;
     use daw_core::Project;
+
+    fn shape(gain: f32) -> ClipShape {
+        ClipShape {
+            source_offset: 0,
+            position: TimelinePos::default(),
+            length: 100,
+            gain,
+            fade_in: None,
+            fade_out: None,
+            color: None,
+        }
+    }
+
+    #[test]
+    fn edit_action_descriptions_name_the_change() {
+        let clip_id = ClipId::default();
+
+        let gain = EditAction::Shape {
+            clip_id,
+            from: shape(1.0),
+            to: shape(2.0),
+        };
+        assert_eq!(gain.description(), "Clip gain");
+
+        let mut fade_to = shape(1.0);
+        fade_to.fade_in = Some(Fade::new(10, FadeCurve::Linear));
+        let fade = EditAction::Shape {
+            clip_id,
+            from: shape(1.0),
+            to: fade_to,
+        };
+        assert_eq!(fade.description(), "Fade in");
+
+        let mut trim_to = shape(1.0);
+        trim_to.length = 50;
+        let trim = EditAction::Shape {
+            clip_id,
+            from: shape(1.0),
+            to: trim_to,
+        };
+        assert_eq!(trim.description(), "Trim clip");
+
+        let group = EditAction::Group {
+            actions: Vec::new(),
+            label: "Split clip".to_string(),
+        };
+        assert_eq!(group.description(), "Split clip");
+
+        let moved = EditAction::Move {
+            clip_id,
+            from_track: daw_core::track::TrackId::default(),
+            from_pos: TimelinePos::default(),
+            to_track: daw_core::track::TrackId::default(),
+            to_pos: TimelinePos::default(),
+        };
+        assert_eq!(moved.description(), "Move clip");
+    }
+
+    #[test]
+    fn continuous_shape_edits_merge_into_one_entry() {
+        let clip_id = ClipId::default();
+        let mut history: History<EditAction> = History::new(10);
+
+        let first = EditAction::Shape {
+            clip_id,
+            from: shape(1.0),
+            to: shape(1.5),
+        };
+        let second = EditAction::Shape {
+            clip_id,
+            from: shape(1.5),
+            to: shape(2.0),
+        };
+
+        history.push(first, "Clip gain".to_string());
+        assert!(merge_continuous_edit(&mut history, &second));
+        assert_eq!(history.past_len(), 1);
+
+        let EditAction::Shape { to, .. } = &history.past()[0].action else {
+            panic!("expected a shape edit");
+        };
+        assert_eq!(to.gain, 2.0);
+        assert_eq!(history.past()[0].description, "Clip gain");
+    }
 
     #[test]
     fn processed_stem_strips_generated_suffixes() {
