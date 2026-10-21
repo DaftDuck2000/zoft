@@ -110,7 +110,7 @@ fn snap_position(pos: TimelinePos, grid: SnapGrid, relative: bool) -> TimelinePo
 - 2026-10-21: Split at the playhead (S) — both halves reference the same audio file; fades redistributed
 - 2026-10-21: Copy/paste/duplicate (Ctrl+C/V/D), delete (Delete) with recoverable clip data
 - 2026-10-21: Fade handles on clip corners + inspector curve/length editors (5 curve types)
-- 2026-10-21: Clip gain slider and per-clip color override in the clip inspector
+- 2026-10-21: Clip gain, fades and per-clip colour moved into the **Clip** section of the Clip Audio window
 - 2026-10-21: Undo/redo (Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y) with merged continuous property edits
 - 2026-10-21: Playback mixer slices clips by source_offset/length so edits are audible
 - 2026-10-21: Musical ruler (bars/beats default, time switchable) and time-signature picker; snapping follows the chosen signature

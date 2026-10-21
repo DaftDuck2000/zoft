@@ -629,11 +629,13 @@ impl FilterKind {
     }
 }
 
-/// State of the floating per-clip audio-effects window.
+/// State of the floating per-clip audio window: gain/fades/colour plus the
+/// offline effects.
 #[derive(Debug, Clone)]
-struct EffectsWindow {
+struct ClipAudioWindow {
     clip_id: ClipId,
-    selected: EffectKind,
+    /// Selected effect; `None` shows the clip's gain, fades and colour.
+    selected: Option<EffectKind>,
     pitch: f32,
     stretch: f32,
     stretch_mode: TimeStretchMode,
@@ -649,11 +651,11 @@ struct EffectsWindow {
     tremolo_depth: f32,
 }
 
-impl EffectsWindow {
+impl ClipAudioWindow {
     fn new(clip_id: ClipId) -> Self {
         Self {
             clip_id,
-            selected: EffectKind::Normalize,
+            selected: None,
             pitch: 0.0,
             stretch: 1.0,
             stretch_mode: TimeStretchMode::Elastic,
@@ -768,7 +770,7 @@ struct AppUI {
     drag: Option<ClipDrag>,
     clipboard: Option<AudioClip>,
     /// Floating audio-effects editor for the right-clicked clip.
-    effects_window: Option<EffectsWindow>,
+    audio_window: Option<ClipAudioWindow>,
     /// Where a trashed clip was last attached, so Restore can put it back.
     deleted_from: HashMap<ClipId, TrackId>,
     history: History<EditAction>,
@@ -827,7 +829,7 @@ impl AppUI {
             snap_suspended: false,
             drag: None,
             clipboard: None,
-            effects_window: None,
+            audio_window: None,
             deleted_from: HashMap::new(),
             history: History::new(1000),
             merge_chain: false,
@@ -2417,9 +2419,9 @@ impl AppUI {
         self.refresh_playback_if_playing();
     }
 
-    /// Clip inspector in the arrange toolbar: gain, fades and color. Every
-    /// change is recorded for undo. Processing lives in the right-click
-    /// audio-effects window.
+    /// Clip gain, fade and colour controls shown in the Clip Audio window.
+    /// Every change is recorded for undo; processing lives in the same
+    /// window's effect list.
     fn clip_properties_ui(&mut self, ui: &mut egui::Ui) {
         let Some(clip_id) = self.selected_clip else {
             return;
@@ -2439,10 +2441,10 @@ impl AppUI {
             .to_string();
         let src_sr = clip.source.sample_rate.max(1) as f64;
 
-        ui.label("Clip:");
+        ui.label(egui::RichText::new("Clip").strong());
         ui.label(name);
-        ui.weak("(right-click for effects)");
-        ui.separator();
+        ui.weak("Gain, fades and colour apply immediately and are undoable.");
+        ui.add_space(4.0);
 
         // Gain (stored linearly, edited in dB).
         ui.label("Gain:");
@@ -2588,12 +2590,15 @@ impl AppUI {
         }
     }
 
-    /// Floating audio-effects editor, opened by right-clicking a clip.
-    fn show_effects_window(&mut self, ctx: &egui::Context) {
-        let Some(mut window) = self.effects_window.clone() else {
+    /// Floating clip-audio window: gain, fades and colour plus the offline
+    /// effects. Opened by right-clicking a clip or the arrange **Audio…**
+    /// button.
+    fn show_audio_window(&mut self, ctx: &egui::Context) {
+        let Some(mut window) = self.audio_window.clone() else {
             return;
         };
         let clip = self.project.audio_clips.get(window.clip_id);
+        let clip_present = clip.is_some();
         let clip_name = clip
             .map(|clip| {
                 clip.source
@@ -2647,8 +2652,8 @@ impl AppUI {
         let mut open = true;
         let mut apply = false;
 
-        egui::Window::new("Audio Effects")
-            .id(egui::Id::new("audio_effects_window"))
+        egui::Window::new("Clip Audio")
+            .id(egui::Id::new("clip_audio_window"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -2665,7 +2670,7 @@ impl AppUI {
                 }
                 ui.separator();
 
-                if clip.is_none() {
+                if !clip_present {
                     ui.label("This clip is no longer in the project.");
                     return;
                 }
@@ -2674,7 +2679,7 @@ impl AppUI {
                     ui.vertical(|ui| {
                         ui.set_min_width(120.0);
                         ui.label(
-                            egui::RichText::new("AVAILABLE EFFECTS")
+                            egui::RichText::new("CLIP AUDIO")
                                 .small()
                                 .strong(),
                         );
@@ -2691,12 +2696,19 @@ impl AppUI {
                             ui.visuals().widgets.noninteractive.bg_stroke,
                         );
                         ui.add_space(4.0);
+                        if ui
+                            .selectable_label(window.selected.is_none(), "Clip")
+                            .on_hover_text("Gain, fades and colour")
+                            .clicked()
+                        {
+                            window.selected = None;
+                        }
                         for effect in EffectKind::ALL {
                             if ui
-                                .selectable_label(window.selected == effect, effect.label())
+                                .selectable_label(window.selected == Some(effect), effect.label())
                                 .clicked()
                             {
-                                window.selected = effect;
+                                window.selected = Some(effect);
                             }
                         }
                     });
@@ -2706,7 +2718,11 @@ impl AppUI {
                     ui.vertical(|ui| {
                         ui.set_min_width(230.0);
                         match window.selected {
-                            EffectKind::Normalize => {
+                            None => {
+                                self.clip_properties_ui(ui);
+                            }
+                            Some(effect) => match effect {
+                                EffectKind::Normalize => {
                                 ui.label(egui::RichText::new("Normalize").strong());
                                 ui.weak(
                                     "Set the clip gain so its loudest sample peaks at −1 dBFS.",
@@ -2944,42 +2960,50 @@ impl AppUI {
                                      undo restores them.",
                                 );
                             }
+                            },
                         }
 
                         ui.add_space(10.0);
-                        let can_apply = match window.selected {
-                            EffectKind::Normalize
-                            | EffectKind::LufsNormalize
-                            | EffectKind::Reverse => true,
-                            EffectKind::BakeIntoClip => has_gain_fades,
-                            EffectKind::PitchShift => window.pitch.abs() >= 0.05,
-                            EffectKind::TimeStretch => {
-                                (window.stretch - 1.0).abs() >= 0.005
+                        if let Some(effect) = window.selected {
+                            let can_apply = match effect {
+                                EffectKind::Normalize
+                                | EffectKind::LufsNormalize
+                                | EffectKind::Reverse => true,
+                                EffectKind::BakeIntoClip => has_gain_fades,
+                                EffectKind::PitchShift => window.pitch.abs() >= 0.05,
+                                EffectKind::TimeStretch => {
+                                    (window.stretch - 1.0).abs() >= 0.005
+                                }
+                                EffectKind::BitCrusher | EffectKind::Filter => true,
+                                EffectKind::Saturation => window.saturation_mix > 0.0,
+                                EffectKind::Tremolo => window.tremolo_depth > 0.0,
+                                EffectKind::Consolidate => {
+                                    consolidation_count >= 2 && !consolidation_locked
+                                }
+                            };
+                            if ui
+                                .add_enabled(can_apply, egui::Button::new("Apply"))
+                                .clicked()
+                            {
+                                apply = true;
                             }
-                            EffectKind::BitCrusher | EffectKind::Filter => true,
-                            EffectKind::Saturation => window.saturation_mix > 0.0,
-                            EffectKind::Tremolo => window.tremolo_depth > 0.0,
-                            EffectKind::Consolidate => {
-                                consolidation_count >= 2 && !consolidation_locked
-                            }
-                        };
-                        if ui
-                            .add_enabled(can_apply, egui::Button::new("Apply"))
-                            .clicked()
-                        {
-                            apply = true;
+                        } else {
+                            ui.weak(
+                                "Gain, fades and colour apply immediately and are undoable.",
+                            );
                         }
                     });
                 });
             });
 
         if !open {
-            self.effects_window = None;
+            self.audio_window = None;
             return;
         }
 
         if apply {
-            match window.selected {
+            if let Some(effect) = window.selected {
+                match effect {
                 EffectKind::Normalize => self.normalize_clip(window.clip_id),
                 EffectKind::LufsNormalize => {
                     self.lufs_normalize_clip(window.clip_id, window.lufs_target);
@@ -3055,14 +3079,15 @@ impl AppUI {
                     self.consolidate_clip(previous);
                     if self.selected_clip != Some(previous) {
                         // The clip was replaced by the consolidated result.
-                        self.effects_window = None;
+                        self.audio_window = None;
                         return;
                     }
+                }
                 }
             }
         }
 
-        self.effects_window = Some(window);
+        self.audio_window = Some(window);
     }
 }
 
@@ -4112,6 +4137,18 @@ impl eframe::App for AppUI {
                 {
                     self.history_open = !self.history_open;
                 }
+                if ui
+                    .add_enabled(
+                        self.selected_clip.is_some(),
+                        egui::Button::new("Audio…"),
+                    )
+                    .on_hover_text("Clip gain, fades, colour and effects")
+                    .clicked()
+                {
+                    if let Some(clip_id) = self.selected_clip {
+                        self.audio_window = Some(ClipAudioWindow::new(clip_id));
+                    }
+                }
                 ui.separator();
 
                 // Snap grid for moving/trimming clips (hold Alt to bypass).
@@ -4152,11 +4189,6 @@ impl eframe::App for AppUI {
                     format_clock(self.timeline_duration())
                 ));
             });
-            if self.selected_clip.is_some() {
-                ui.horizontal_wrapped(|ui| {
-                    self.clip_properties_ui(ui);
-                });
-            }
             ui.separator();
 
             let rect = ui.available_rect_before_wrap();
@@ -4584,7 +4616,7 @@ impl eframe::App for AppUI {
                 if let Some(pos) = pointer_pos {
                     if let Some((clip_id, _)) = Self::clip_hit(&clip_rects, pos) {
                         self.selected_clip = Some(clip_id);
-                        self.effects_window = Some(EffectsWindow::new(clip_id));
+                        self.audio_window = Some(ClipAudioWindow::new(clip_id));
                     }
                 }
             }
@@ -4686,7 +4718,7 @@ impl eframe::App for AppUI {
             });
         });
 
-        self.show_effects_window(ctx);
+        self.show_audio_window(ctx);
         self.show_history_window(ctx);
 
         // Request repaint for smooth playback and async waveform polling

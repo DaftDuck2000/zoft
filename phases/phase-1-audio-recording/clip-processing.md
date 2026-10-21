@@ -26,7 +26,7 @@ Offline clip processing: gain, pitch shift, time stretch, reverse, normalize, bi
 - [x] Tremolo: rate and depth modulation
 - [x] Consolidate: Merge adjacent clips on same track into one file
 - [ ] Bounce in place: Render clip with inserts/sends to new file
-- [x] Audio Effects window: right-click a clip, choose an effect from the list, adjust parameters, then press Apply
+- [x] Clip Audio window: right-click a clip or use the arrange **Audio…** button; the **Clip** section has gain/fades/colour and the effect list has an Apply button
 
 ## Technical Details
 
@@ -48,7 +48,7 @@ Offline clip processing: gain, pitch shift, time stretch, reverse, normalize, bi
   previous `AudioFileRef`, offset and length via a `Source` undo entry. A fresh
   waveform overview is generated in the background; results for a replaced path
   are discarded.
-- **Pitch shift / time stretch**: the floating Audio Effects window exposes
+- **Pitch shift / time stretch**: the floating Clip Audio window exposes
   separate Pitch Shift and Time Stretch effects. Pitch is −12…+12 semitones
   (0.01 st = 1 cent) with an optional formant-preservation toggle; stretch is
   0.5×–2.0×. Time Stretch has three modes: **Tape** resamples for classic
@@ -63,13 +63,16 @@ Offline clip processing: gain, pitch shift, time stretch, reverse, normalize, bi
   and fades via a `Source` entry. Pitch/stretch controls reset after a successful
   apply. Rubber Band must be available in `PATH` for Pitch Shift, Elastic and
   Musical; Tape does not need it.
-- **Audio Effects window**: right-click a clip in the arrange view to open a
-  floating window with the effect list (Normalize, LUFS Normalize, Bake into
-  Clip, Reverse, Pitch Shift, Time Stretch, Bit Crusher, Saturation, Filter,
-  Tremolo). The selected effect shows its parameters as Logic-style rotary
+- **Clip Audio window**: right-click a clip in the arrange view (or use the
+  arrange **Audio…** button) to open a floating window. The **Clip** entry at the
+  top shows gain, fade in/out and colour, which apply immediately and are
+  undoable. The effect list (Normalize, LUFS Normalize, Bake into Clip, Reverse,
+  Pitch Shift, Time Stretch, Bit Crusher, Saturation, Filter, Tremolo,
+  Consolidate) shows the selected effect's parameters as Logic-style rotary
   knobs and a single **Apply** button. Drag a knob vertically to adjust it, hold
   Shift for fine control, or double-click to restore its default. The window
-  stays open, so several effects can be applied in sequence.
+  stays open, so several operations can be applied in sequence. New per-clip
+  controls live here instead of the arrange toolbar.
 - **Bake into Clip**: renders the visible source range with the clip gain and
   fade-in/fade-out envelopes applied, matching the playback mixer's envelope.
   The output is a new `<name>_process_<uuid>.wav`; the clip then points at it
@@ -88,7 +91,7 @@ Offline clip processing: gain, pitch shift, time stretch, reverse, normalize, bi
   clip spans the run, keeps the selected clip's colour, and has unity gain with
   no fades. The original clips remain in the project (undo restores them; the
   consolidated result is detached on undo). Headroom above full scale is
-  preserved in the float file. The Audio Effects window closes after a
+  preserved in the float file. The Clip Audio window closes after a
   successful consolidation because the selected clip was replaced.
 - The creative effects preserve the clip's gain, fades, timeline position and
   track; undo/redo uses the same `Source` state as the other file-rendering
@@ -160,10 +163,11 @@ enum NormalizeMode {
 - 2026-10-21: Reverse rendered to a new WAV per clip (channel-safe frame reversal, undo via source state); repeated reverses reuse a stable base filename
 - 2026-10-21: Pitch shift (±12 st) and time stretch (0.5×–2.0×) via Rubber Band R3, with optional formant preservation and undoable source replacement
 - 2026-10-21: Snap grid defaults to Beat
-- 2026-10-21: Right-click opens a floating Audio Effects window with an effect list and one Apply button (replaces the inline processing controls and context menu)
+- 2026-10-21: Right-click opens a floating window with an effect list and one Apply button (replaces the inline processing controls and context menu)
+- 2026-10-21: Renamed the window to **Clip Audio** and moved clip gain, fades and colour into its **Clip** section; the arrange toolbar now just has an **Audio…** button
 - 2026-10-21: Bake into Clip (formerly Gain & Fades) bakes clip gain and fade envelopes into a new WAV, resets the clip's gain/fades, and is undoable
 - 2026-10-21: Added Bit Crusher, Saturation, Filter and Tremolo effect processors; renamed the gain/fade bake action to Bake into Clip
-- 2026-10-21: Replaced the Audio Effects sliders with Logic-style rotary knobs (vertical drag, Shift fine adjustment, double-click reset)
+- 2026-10-21: Replaced the effect sliders with Logic-style rotary knobs (vertical drag, Shift fine adjustment, double-click reset)
 - 2026-10-21: Added LUFS Normalize with ITU-R BS.1770 integrated loudness measurement, −30…−6 LUFS target, and a −1 dBFS sample-peak safety cap
 - 2026-10-21: Added Time Stretch modes: Tape varispeed, Elastic (R3 fine), Musical (R3 fine with centre focus)
 - 2026-10-21: Added Consolidate: renders a touching/overlapping run of clips on a track through the playback mixer, preserving gain, fades and automatic crossfades; undo restores the originals

@@ -67,7 +67,7 @@
 - Edge drags trim non-destructively (adjusts `source_offset`/`length`; the WAV file is never touched)
 - Split at the playhead (S) creates a second clip referencing the same source
 - Copy/paste/cut/duplicate (Ctrl+C / Ctrl+V / Ctrl+X / Ctrl+D); Delete removes the clip from the track (data stays in the pool, undo restores it)
-- Fade handles in the clip's top corners; clip inspector with fade curve (linear/exp/log/S/equal-power), fade length, gain and color
+- Fade handles in the clip's top corners; the **Clip Audio** window has fade curve (linear/exp/log/S/equal-power), fade length, gain and colour controls
 - Automatic equal-power crossfade where clips overlap on the same track, with an X overlay in the overlap region; contained clips are layered instead
 - Snap: Off / Bar / Beat (default) / 1/8 / 1/16, optional Relative mode, Alt bypass; the grid follows the chosen time signature
 - Trash browser in the track panel: deleted clips stay in the project and can be restored
@@ -76,7 +76,7 @@
 - Next: bounce in place (remaining 1.4 processing operation)
 
 **1.4 Clip Processing** - `[~]` In Progress
-- Right-click a clip to open a floating **Audio Effects** window: choose an effect from the list (Normalize, LUFS Normalize, Bake into Clip, Reverse, Pitch Shift, Time Stretch, Bit Crusher, Saturation, Filter, Tremolo, Consolidate), adjust its Logic-style knobs (drag vertically, hold Shift for fine control, double-click to reset), then press **Apply**
+- Right-click a clip (or use the arrange **Audio…** button) to open the floating **Clip Audio** window. Its **Clip** section has gain, fade in/out and colour controls that apply immediately and are undoable; the effect list (Normalize, LUFS Normalize, Bake into Clip, Reverse, Pitch Shift, Time Stretch, Bit Crusher, Saturation, Filter, Tremolo, Consolidate) shows Logic-style knobs (drag vertically, hold Shift for fine control, double-click to reset) with a single **Apply** button
 - Peak Normalize (to −1 dBFS) is a gain edit and fully undoable
 - LUFS Normalize measures BS.1770 integrated loudness and sets gain to a −30…−6 LUFS target (default −14), capped so sample peaks stay at or below −1 dBFS
 - Consolidate merges the selected clip with touching/overlapping clips on its track into one file, baking in gain, fades and automatic crossfades; undo restores the original clips
@@ -84,7 +84,7 @@
 - Bit Crusher, Saturation, Filter and Tremolo render creative effects to a new file while preserving clip gain, fades, position and track; all are undoable
 - Reverse renders the clip's visible audio backwards to a new `*_reverse_<uuid>.wav` (original file untouched) and repoints the clip; undoable
 - Pitch shift (±12 semitones) and time stretch (0.5×–2.0×) rendered through Rubber Band R3, with optional formant preservation; Time Stretch offers Tape, Elastic and Musical modes. Clip length follows the rendered audio and undo restores the original source
-- The window stays open, so effects can be applied in sequence; the top bar keeps only clip gain, fades and color
+- The window stays open, so clip properties and effects can be adjusted in sequence; new clip controls live there instead of the arrange toolbar
 - Rendered files regenerate their waveform overview in the background; stale overviews from a replaced file are ignored
 - Note: pitch/time rendering requires the `rubberband` binary in `PATH` (except Tape mode)
 - Not yet: bounce in place
