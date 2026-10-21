@@ -281,6 +281,7 @@ enum DragMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EffectKind {
     Normalize,
+    LufsNormalize,
     BakeIntoClip,
     Reverse,
     PitchShift,
@@ -292,8 +293,9 @@ enum EffectKind {
 }
 
 impl EffectKind {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::Normalize,
+        Self::LufsNormalize,
         Self::BakeIntoClip,
         Self::Reverse,
         Self::PitchShift,
@@ -307,6 +309,7 @@ impl EffectKind {
     fn label(self) -> &'static str {
         match self {
             Self::Normalize => "Normalize",
+            Self::LufsNormalize => "LUFS Normalize",
             Self::BakeIntoClip => "Bake into Clip",
             Self::Reverse => "Reverse",
             Self::PitchShift => "Pitch Shift",
@@ -342,6 +345,7 @@ struct EffectsWindow {
     pitch: f32,
     stretch: f32,
     formants: bool,
+    lufs_target: f32,
     crush_bits: f32,
     crush_downsample: f32,
     drive_db: f32,
@@ -360,6 +364,7 @@ impl EffectsWindow {
             pitch: 0.0,
             stretch: 1.0,
             formants: true,
+            lufs_target: -14.0,
             crush_bits: 8.0,
             crush_downsample: 4.0,
             drive_db: 12.0,
@@ -1321,6 +1326,58 @@ impl AppUI {
         self.refresh_playback_if_playing();
     }
 
+    /// Set the clip gain from its integrated loudness, capped so the sample
+    /// peak stays at or below −1 dBFS.
+    fn lufs_normalize_clip(&mut self, clip_id: ClipId, target_lufs: f32) {
+        let Some(clip) = self.project.audio_clips.get(clip_id) else {
+            return;
+        };
+        if clip.locked {
+            return;
+        }
+
+        let (samples, channels, sample_rate) =
+            match load_wav_range_interleaved(&clip.source.path, clip.source_offset, clip.length) {
+                Ok(data) => data,
+                Err(e) => {
+                    self.error_message = Some(format!(
+                        "Could not read the clip's audio for loudness analysis: {}",
+                        e
+                    ));
+                    return;
+                }
+            };
+        let Some(measurement) = measure_integrated_loudness(&samples, channels, sample_rate) else {
+            self.error_message =
+                Some("The clip is too quiet or too short to measure loudness.".to_string());
+            return;
+        };
+
+        let mut gain_db = target_lufs - measurement.integrated_lufs;
+        if measurement.peak > 1e-6 {
+            let peak_db = 20.0 * measurement.peak.log10();
+            gain_db = gain_db.min(-1.0 - peak_db);
+        }
+
+        let before = ClipShape::of(clip);
+        let mut after = before;
+        after.gain = 10.0f32.powf(gain_db / 20.0).clamp(0.0, 10.0);
+        if let Some(clip) = self.project.audio_clips.get_mut(clip_id) {
+            after.apply(clip);
+        }
+        self.push_undo(
+            EditAction::Shape {
+                clip_id,
+                from: before,
+                to: after,
+            },
+            false,
+        );
+        self.error_message = None;
+        self.after_edit();
+        self.refresh_playback_if_playing();
+    }
+
     /// Render the clip's visible audio backwards into a new WAV file and point
     /// the clip at it. The original file is never modified.
     fn reverse_clip(&mut self, clip_id: ClipId) {
@@ -1976,6 +2033,23 @@ impl AppUI {
                                     "Set the clip gain so its loudest sample peaks at −1 dBFS.",
                                 );
                             }
+                            EffectKind::LufsNormalize => {
+                                ui.label(egui::RichText::new("LUFS Normalize").strong());
+                                knob(
+                                    ui,
+                                    &mut window.lufs_target,
+                                    -30.0..=-6.0,
+                                    -14.0,
+                                    "Target",
+                                    false,
+                                    |value| format!("{:.1} LUFS", value),
+                                );
+                                ui.weak(
+                                    "Measures integrated loudness over the clip and applies \
+                                     gain to hit the target. Gain is capped so sample peaks \
+                                     stay at or below −1 dBFS.",
+                                );
+                            }
                             EffectKind::BakeIntoClip => {
                                 ui.label(egui::RichText::new("Bake into Clip").strong());
                                 ui.label(format!("Gain: {:+.1} dB", clip_gain_db));
@@ -2140,7 +2214,9 @@ impl AppUI {
 
                         ui.add_space(10.0);
                         let can_apply = match window.selected {
-                            EffectKind::Normalize | EffectKind::Reverse => true,
+                            EffectKind::Normalize
+                            | EffectKind::LufsNormalize
+                            | EffectKind::Reverse => true,
                             EffectKind::BakeIntoClip => has_gain_fades,
                             EffectKind::PitchShift => window.pitch.abs() >= 0.05,
                             EffectKind::TimeStretch => {
@@ -2168,6 +2244,9 @@ impl AppUI {
         if apply {
             match window.selected {
                 EffectKind::Normalize => self.normalize_clip(window.clip_id),
+                EffectKind::LufsNormalize => {
+                    self.lufs_normalize_clip(window.clip_id, window.lufs_target);
+                }
                 EffectKind::BakeIntoClip => {
                     self.bake_into_clip(window.clip_id);
                 }
@@ -2469,6 +2548,182 @@ fn format_frequency(value: f32) -> String {
     } else {
         format!("{:.0} Hz", value)
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LoudnessMeasurement {
+    integrated_lufs: f32,
+    peak: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Biquad {
+    b0: f64,
+    b1: f64,
+    b2: f64,
+    a1: f64,
+    a2: f64,
+    z1: f64,
+    z2: f64,
+}
+
+impl Biquad {
+    fn process(&mut self, x: f64) -> f64 {
+        let y = self.b0 * x + self.z1;
+        self.z1 = self.b1 * x - self.a1 * y + self.z2;
+        self.z2 = self.b2 * x - self.a2 * y;
+        y
+    }
+}
+
+/// ITU-R BS.1770 K-weighting high shelf (stage 1). Uses the same prewarped
+/// analog prototype as libebur128 so the 48 kHz coefficients match the
+/// published values exactly.
+fn k_weighting_shelf(sample_rate: f64) -> Biquad {
+    const FREQ: f64 = 1_681.974_450_955_533;
+    const GAIN_DB: f64 = 3.999_843_853_973_347;
+    const Q: f64 = 0.707_175_236_955_419_6;
+
+    let sample_rate = sample_rate.max(1.0);
+    let freq = FREQ.min(sample_rate * 0.49);
+    let k = (std::f64::consts::PI * freq / sample_rate).tan();
+    let vh = 10.0_f64.powf(GAIN_DB / 20.0);
+    let vb = vh.powf(0.499_666_774_154_541_6);
+    let a0 = 1.0 + k / Q + k * k;
+
+    Biquad {
+        b0: (vh + vb * k / Q + k * k) / a0,
+        b1: 2.0 * (k * k - vh) / a0,
+        b2: (vh - vb * k / Q + k * k) / a0,
+        a1: 2.0 * (k * k - 1.0) / a0,
+        a2: (1.0 - k / Q + k * k) / a0,
+        z1: 0.0,
+        z2: 0.0,
+    }
+}
+
+/// ITU-R BS.1770 K-weighting high-pass (stage 2).
+fn k_weighting_high_pass(sample_rate: f64) -> Biquad {
+    const FREQ: f64 = 38.135_470_876_024_44;
+    const Q: f64 = 0.500_327_037_323_877_3;
+
+    let sample_rate = sample_rate.max(1.0);
+    let freq = FREQ.min(sample_rate * 0.49);
+    let k = (std::f64::consts::PI * freq / sample_rate).tan();
+    let a0 = 1.0 + k / Q + k * k;
+
+    Biquad {
+        b0: 1.0,
+        b1: -2.0,
+        b2: 1.0,
+        a1: 2.0 * (k * k - 1.0) / a0,
+        a2: (1.0 - k / Q + k * k) / a0,
+        z1: 0.0,
+        z2: 0.0,
+    }
+}
+
+fn loudness_from_energy(energy: f64) -> f64 {
+    if energy <= 0.0 {
+        f64::NEG_INFINITY
+    } else {
+        -0.691 + 10.0 * energy.log10()
+    }
+}
+
+/// Integrated loudness in LUFS using the BS.1770 K-weighting filter, 400 ms
+/// blocks with 100 ms hops, and the −70 LUFS absolute / −10 LU relative gates.
+/// Peak is the raw sample peak of the analysed range.
+fn measure_integrated_loudness(
+    samples: &[f32],
+    channels: u16,
+    sample_rate: u32,
+) -> Option<LoudnessMeasurement> {
+    let channel_count = channels.max(1) as usize;
+    let frames = samples.len() / channel_count;
+    if frames == 0 {
+        return None;
+    }
+
+    let sample_rate = sample_rate.max(1) as f64;
+    let block_frames = ((sample_rate * 0.4).round() as usize).clamp(1, frames);
+    let hop_frames = ((sample_rate * 0.1).round() as usize).clamp(1, block_frames);
+    let mut filters = vec![
+        (
+            k_weighting_shelf(sample_rate),
+            k_weighting_high_pass(sample_rate),
+        );
+        channel_count
+    ];
+
+    let mut ring = vec![0.0_f64; block_frames];
+    let mut ring_pos = 0usize;
+    let mut energy_sum = 0.0_f64;
+    let mut blocks = Vec::new();
+    let mut peak = 0.0f32;
+
+    for frame in 0..frames {
+        let base = frame * channel_count;
+        let mut frame_energy = 0.0_f64;
+        for (channel, (shelf, high_pass)) in filters.iter_mut().enumerate() {
+            let sample = samples[base + channel];
+            peak = peak.max(sample.abs());
+            let filtered = high_pass.process(shelf.process(sample as f64));
+            frame_energy += filtered * filtered;
+        }
+
+        if frame >= block_frames {
+            energy_sum -= ring[ring_pos];
+        }
+        ring[ring_pos] = frame_energy;
+        energy_sum += frame_energy;
+        ring_pos += 1;
+        if ring_pos == block_frames {
+            ring_pos = 0;
+        }
+
+        let frames_seen = frame + 1;
+        if frames_seen >= block_frames && (frames_seen - block_frames) % hop_frames == 0 {
+            blocks.push(energy_sum / block_frames as f64);
+        }
+    }
+
+    let mut absolute_sum = 0.0;
+    let mut absolute_count = 0usize;
+    for &energy in &blocks {
+        if loudness_from_energy(energy) > -70.0 {
+            absolute_sum += energy;
+            absolute_count += 1;
+        }
+    }
+    if absolute_count == 0 {
+        return None;
+    }
+
+    let ungated_loudness = loudness_from_energy(absolute_sum / absolute_count as f64);
+    let relative_gate = ungated_loudness - 10.0;
+    let mut relative_sum = 0.0;
+    let mut relative_count = 0usize;
+    for &energy in &blocks {
+        let loudness = loudness_from_energy(energy);
+        if loudness > -70.0 && loudness > relative_gate {
+            relative_sum += energy;
+            relative_count += 1;
+        }
+    }
+    if relative_count == 0 {
+        return None;
+    }
+
+    let integrated_lufs = loudness_from_energy(relative_sum / relative_count as f64);
+    if !integrated_lufs.is_finite() {
+        return None;
+    }
+
+    Some(LoudnessMeasurement {
+        integrated_lufs: integrated_lufs as f32,
+        peak,
+    })
 }
 
 /// Clip gain at a source-frame offset after applying the fade envelopes.
@@ -4490,10 +4745,10 @@ fn load_wav_interleaved(path: &Path) -> Result<(Vec<f32>, u16, u32)> {
 mod tests {
     use super::{
         bit_crush, clip_gain_at, filter_audio, knob_from_normalized, knob_to_normalized,
-        load_wav_interleaved, load_wav_range_interleaved, processed_file_stem,
-        render_pitch_stretch, reverse_interleaved, saturate, tremolo, wav_file_info,
-        wav_peak, write_wav_f32, write_wav_range, write_wav_range_with_envelope,
-        ClipSourceState, FilterKind,
+        load_wav_interleaved, load_wav_range_interleaved, measure_integrated_loudness,
+        processed_file_stem, render_pitch_stretch, reverse_interleaved, saturate, tremolo,
+        wav_file_info, wav_peak, write_wav_f32, write_wav_range,
+        write_wav_range_with_envelope, ClipSourceState, FilterKind,
     };
     use daw_core::audio_pool::AudioFileRef;
     use daw_core::clip::{AudioClip, Fade, FadeCurve, TimelinePos};
@@ -4645,6 +4900,36 @@ mod tests {
             let round_trip = knob_from_normalized(norm, 20.0, 20_000.0, true);
             assert!((round_trip - value).abs() < 0.1);
         }
+    }
+
+    #[test]
+    fn integrated_loudness_tracks_signal_level() {
+        let sine = |sample_rate: usize, amplitude: f32| {
+            let frames = sample_rate;
+            let mut samples = Vec::with_capacity(frames * 2);
+            for frame in 0..frames {
+                let t = frame as f32 / sample_rate as f32;
+                let sample = amplitude * (std::f32::consts::TAU * 1_000.0 * t).sin();
+                samples.push(sample);
+                samples.push(sample);
+            }
+            samples
+        };
+
+        let quiet = measure_integrated_loudness(&sine(48_000, 0.1), 2, 48_000)
+            .expect("sine should have measurable loudness");
+        let quiet_44k = measure_integrated_loudness(&sine(44_100, 0.1), 2, 44_100)
+            .expect("sine should have measurable loudness");
+        let loud = measure_integrated_loudness(&sine(48_000, 0.2), 2, 48_000)
+            .expect("sine should have measurable loudness");
+
+        // A −20 dBFS 1 kHz stereo sine measures ≈ −20 LUFS (also confirmed
+        // against ffmpeg's ebur128 filter).
+        assert!((quiet.integrated_lufs + 20.0).abs() < 0.1);
+        assert!((quiet_44k.integrated_lufs - quiet.integrated_lufs).abs() < 0.05);
+        assert!((quiet.peak - 0.1).abs() < 1e-3);
+        assert!((loud.integrated_lufs - quiet.integrated_lufs - 6.0206).abs() < 0.05);
+        assert!(measure_integrated_loudness(&vec![0.0; 48_000 * 2], 2, 48_000).is_none());
     }
 
     #[test]

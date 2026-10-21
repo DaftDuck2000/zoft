@@ -18,6 +18,7 @@ Offline clip processing: gain, pitch shift, time stretch, reverse, normalize, bi
 - [ ] Time-stretch modes: tape / elastic / musical presets
 - [x] Reverse: Render the clip backwards to a new file (original preserved)
 - [x] Normalize: Peak to −1 dBFS, per clip
+- [x] LUFS normalize: Integrated loudness target with a sample-peak safety cap
 - [x] Fade in/out render: Bake fades into new file (Bake into Clip effect)
 - [x] Bit Crusher: bit-depth reduction and sample-and-hold decimation
 - [x] Saturation: soft-clip drive with dry/wet mix
@@ -34,6 +35,11 @@ Offline clip processing: gain, pitch shift, time stretch, reverse, normalize, bi
 - **Normalize**: computes the exact peak of the clip's visible source range by
   seeking in the WAV and streaming only that range, then sets clip gain so the
   peak reaches −1 dBFS. This is a `Shape` undo entry.
+- **LUFS Normalize**: measures integrated loudness over the clip's visible
+  source range using the ITU-R BS.1770 K-weighting filter, 400 ms blocks with
+  100 ms hops, and the absolute/relative gates. It sets clip gain to the chosen
+  target (−30…−6 LUFS, default −14 LUFS), capped so the sample peak stays at or
+  below −1 dBFS rather than adding a limiter. Also a `Shape` undo entry.
 - **Reverse**: decodes the clip's visible source range, reverses frames while
   preserving channel order, writes a new 32-bit float WAV next to the source
   (`<name>_reverse_<uuid>.wav`), and points the clip at it with
@@ -53,12 +59,12 @@ Offline clip processing: gain, pitch shift, time stretch, reverse, normalize, bi
   controls reset after a successful apply. Rubber Band must be available in
   `PATH`.
 - **Audio Effects window**: right-click a clip in the arrange view to open a
-  floating window with the effect list (Normalize, Bake into Clip, Reverse,
-  Pitch Shift, Time Stretch, Bit Crusher, Saturation, Filter, Tremolo). The
-  selected effect shows its parameters as Logic-style rotary knobs and a single
-  **Apply** button. Drag a knob vertically to adjust it, hold Shift for fine
-  control, or double-click to restore its default. The window stays open, so
-  several effects can be applied in sequence.
+  floating window with the effect list (Normalize, LUFS Normalize, Bake into
+  Clip, Reverse, Pitch Shift, Time Stretch, Bit Crusher, Saturation, Filter,
+  Tremolo). The selected effect shows its parameters as Logic-style rotary
+  knobs and a single **Apply** button. Drag a knob vertically to adjust it, hold
+  Shift for fine control, or double-click to restore its default. The window
+  stays open, so several effects can be applied in sequence.
 - **Bake into Clip**: renders the visible source range with the clip gain and
   fade-in/fade-out envelopes applied, matching the playback mixer's envelope.
   The output is a new `<name>_process_<uuid>.wav`; the clip then points at it
@@ -128,6 +134,7 @@ enum NormalizeMode {
 - [ ] Time stretch 0.5x–2.0x without artifacts (elastic mode)
 - [x] Reverse plays correctly
 - [x] Normalize to -1 dB peak works
+- [x] LUFS normalize reaches the target without clipping sample peaks
 - [ ] Consolidate merges clips correctly
 - [ ] Bounce in place includes plugin processing
 - [x] All operations create undoable commands
@@ -143,4 +150,5 @@ enum NormalizeMode {
 - 2026-10-21: Bake into Clip (formerly Gain & Fades) bakes clip gain and fade envelopes into a new WAV, resets the clip's gain/fades, and is undoable
 - 2026-10-21: Added Bit Crusher, Saturation, Filter and Tremolo effect processors; renamed the gain/fade bake action to Bake into Clip
 - 2026-10-21: Replaced the Audio Effects sliders with Logic-style rotary knobs (vertical drag, Shift fine adjustment, double-click reset)
-- Remaining: listening tests for pitch/time and creative effects, stretch mode presets, consolidate, bounce in place, LUFS normalize
+- 2026-10-21: Added LUFS Normalize with ITU-R BS.1770 integrated loudness measurement, −30…−6 LUFS target, and a −1 dBFS sample-peak safety cap
+- Remaining: listening tests for pitch/time and creative effects, stretch mode presets, consolidate, bounce in place

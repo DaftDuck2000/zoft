@@ -65,11 +65,12 @@
 - Trash browser in the track panel: deleted clips stay in the project and can be restored
 - Undo/redo (Ctrl+Z, Ctrl+Shift+Z, Ctrl+Y) with merge for continuous slider edits — Phase 1.5 groundwork
 - Playback mixer now slices clips by `source_offset`/`length`
-- Next: the remaining 1.4 processing operations (consolidate, bounce, stretch modes, LUFS normalize)
+- Next: the remaining 1.4 processing operations (consolidate, bounce, stretch modes)
 
 **1.4 Clip Processing** - `[~]` In Progress
-- Right-click a clip to open a floating **Audio Effects** window: choose an effect from the list (Normalize, Bake into Clip, Reverse, Pitch Shift, Time Stretch, Bit Crusher, Saturation, Filter, Tremolo), adjust its Logic-style knobs (drag vertically, hold Shift for fine control, double-click to reset), then press **Apply**
+- Right-click a clip to open a floating **Audio Effects** window: choose an effect from the list (Normalize, LUFS Normalize, Bake into Clip, Reverse, Pitch Shift, Time Stretch, Bit Crusher, Saturation, Filter, Tremolo), adjust its Logic-style knobs (drag vertically, hold Shift for fine control, double-click to reset), then press **Apply**
 - Peak Normalize (to −1 dBFS) is a gain edit and fully undoable
+- LUFS Normalize measures BS.1770 integrated loudness and sets gain to a −30…−6 LUFS target (default −14), capped so sample peaks stay at or below −1 dBFS
 - Bake into Clip bakes the clip's gain and fade envelopes into a new `*_process_<uuid>.wav`, then resets the gain/fades; undo restores them
 - Bit Crusher, Saturation, Filter and Tremolo render creative effects to a new file while preserving clip gain, fades, position and track; all are undoable
 - Reverse renders the clip's visible audio backwards to a new `*_reverse_<uuid>.wav` (original file untouched) and repoints the clip; undoable
@@ -77,6 +78,6 @@
 - The window stays open, so effects can be applied in sequence; the top bar keeps only clip gain, fades and color
 - Rendered files regenerate their waveform overview in the background; stale overviews from a replaced file are ignored
 - Note: pitch/time rendering requires the `rubberband` binary in `PATH`
-- Not yet: stretch mode presets, consolidate, bounce in place, LUFS normalize
+- Not yet: stretch mode presets, consolidate, bounce in place
 
 **1.5 Undo/Redo** - Not started (basic undo/redo already available in the arrange view)
