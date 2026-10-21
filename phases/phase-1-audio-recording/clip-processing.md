@@ -12,13 +12,13 @@ Offline clip processing: gain, pitch shift, time stretch, reverse, normalize. No
 
 ## Requirements
 
-- [ ] Clip gain: Apply gain to create new rendered file
+- [x] Clip gain: Apply gain to create new rendered file (combined with fades in the Gain & Fades effect)
 - [x] Pitch shift: Semitone slider with optional formant preservation (Rubber Band R3)
 - [x] Time stretch: 0.5×–2.0× via Rubber Band R3
 - [ ] Time-stretch modes: tape / elastic / musical presets
 - [x] Reverse: Render the clip backwards to a new file (original preserved)
 - [x] Normalize: Peak to −1 dBFS, per clip
-- [ ] Fade in/out render: Bake fades into new file
+- [x] Fade in/out render: Bake fades into new file (Gain & Fades effect)
 - [ ] Consolidate: Merge adjacent clips on same track into one file
 - [ ] Bounce in place: Render clip with inserts/sends to new file
 - [x] Audio Effects window: right-click a clip, choose an effect from the list, adjust parameters, then press Apply
@@ -49,9 +49,15 @@ Offline clip processing: gain, pitch shift, time stretch, reverse, normalize. No
   controls reset after a successful apply. Rubber Band must be available in
   `PATH`.
 - **Audio Effects window**: right-click a clip in the arrange view to open a
-  floating window with the effect list (Normalize, Reverse, Pitch Shift, Time
-  Stretch). The selected effect shows its parameters and a single **Apply**
-  button. The window stays open, so several effects can be applied in sequence.
+  floating window with the effect list (Normalize, Gain & Fades, Reverse, Pitch
+  Shift, Time Stretch). The selected effect shows its parameters and a single
+  **Apply** button. The window stays open, so several effects can be applied in
+  sequence.
+- **Gain & Fades**: renders the visible source range with the clip gain and
+  fade-in/fade-out envelopes applied, matching the playback mixer's envelope.
+  The output is a new `<name>_process_<uuid>.wav`; the clip then points at it
+  with gain reset to 0 dB and fades removed. Undo restores the previous source,
+  offset, length, fades and gain via a `Source` entry.
 
 ### Processing Pipeline
 ```rust
@@ -119,4 +125,5 @@ enum NormalizeMode {
 - 2026-10-21: Pitch shift (±12 st) and time stretch (0.5×–2.0×) via Rubber Band R3, with optional formant preservation and undoable source replacement
 - 2026-10-21: Snap grid defaults to Beat
 - 2026-10-21: Right-click opens a floating Audio Effects window with an effect list and one Apply button (replaces the inline processing controls and context menu)
-- Remaining: listening tests for pitch/time, stretch mode presets, fade rendering, consolidate, bounce in place, LUFS normalize
+- 2026-10-21: Gain & Fades effect bakes clip gain and fade envelopes into a new WAV, resets the clip's gain/fades, and is undoable
+- Remaining: listening tests for pitch/time, stretch mode presets, consolidate, bounce in place, LUFS normalize

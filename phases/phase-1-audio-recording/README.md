@@ -65,16 +65,17 @@
 - Trash browser in the track panel: deleted clips stay in the project and can be restored
 - Undo/redo (Ctrl+Z, Ctrl+Shift+Z, Ctrl+Y) with merge for continuous slider edits — Phase 1.5 groundwork
 - Playback mixer now slices clips by `source_offset`/`length`
-- Next: the remaining 1.4 processing operations (fade rendering, consolidate, bounce)
+- Next: the remaining 1.4 processing operations (consolidate, bounce, stretch modes, LUFS normalize)
 
 **1.4 Clip Processing** - `[~]` In Progress
-- Right-click a clip to open a floating **Audio Effects** window: choose an effect from the list (Normalize, Reverse, Pitch Shift, Time Stretch), adjust parameters, then press **Apply**
+- Right-click a clip to open a floating **Audio Effects** window: choose an effect from the list (Normalize, Gain & Fades, Reverse, Pitch Shift, Time Stretch), adjust parameters, then press **Apply**
 - Peak Normalize (to −1 dBFS) is a gain edit and fully undoable
+- Gain & Fades bakes the clip's gain and fade envelopes into a new `*_process_<uuid>.wav`, then resets the gain/fades; undo restores them
 - Reverse renders the clip's visible audio backwards to a new `*_reverse_<uuid>.wav` (original file untouched) and repoints the clip; undoable
 - Pitch shift (±12 semitones) and time stretch (0.5×–2.0×) rendered through Rubber Band R3, with optional formant preservation; clip length follows the rendered audio and undo restores the original source
 - The window stays open, so effects can be applied in sequence; the top bar keeps only clip gain, fades and color
 - Rendered files regenerate their waveform overview in the background; stale overviews from a replaced file are ignored
 - Note: pitch/time rendering requires the `rubberband` binary in `PATH`
-- Not yet: stretch mode presets, fade rendering, consolidate, bounce in place, LUFS normalize
+- Not yet: stretch mode presets, consolidate, bounce in place, LUFS normalize
 
 **1.5 Undo/Redo** - Not started (basic undo/redo already available in the arrange view)

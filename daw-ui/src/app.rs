@@ -209,6 +209,7 @@ struct ClipSourceState {
     length: u64,
     fade_in: Option<Fade>,
     fade_out: Option<Fade>,
+    gain: f32,
 }
 
 impl ClipSourceState {
@@ -219,6 +220,7 @@ impl ClipSourceState {
             length: clip.length,
             fade_in: clip.fade_in,
             fade_out: clip.fade_out,
+            gain: clip.gain,
         }
     }
 
@@ -228,6 +230,7 @@ impl ClipSourceState {
         clip.length = self.length;
         clip.fade_in = self.fade_in;
         clip.fade_out = self.fade_out;
+        clip.gain = self.gain;
     }
 }
 
@@ -278,14 +281,16 @@ enum DragMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EffectKind {
     Normalize,
+    GainFades,
     Reverse,
     PitchShift,
     TimeStretch,
 }
 
 impl EffectKind {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 5] = [
         Self::Normalize,
+        Self::GainFades,
         Self::Reverse,
         Self::PitchShift,
         Self::TimeStretch,
@@ -294,6 +299,7 @@ impl EffectKind {
     fn label(self) -> &'static str {
         match self {
             Self::Normalize => "Normalize",
+            Self::GainFades => "Gain & Fades",
             Self::Reverse => "Reverse",
             Self::PitchShift => "Pitch Shift",
             Self::TimeStretch => "Time Stretch",
@@ -1343,6 +1349,7 @@ impl AppUI {
             length: frame_count as u64,
             fade_in: from.fade_in,
             fade_out: from.fade_out,
+            gain: from.gain,
         };
         if let Some(clip) = self.project.audio_clips.get_mut(clip_id) {
             to.apply(clip);
@@ -1352,6 +1359,97 @@ impl AppUI {
         self.refresh_playback_if_playing();
         // The rendered file has no cached waveform yet.
         self.spawn_overview(clip_id, new_path);
+    }
+
+    /// Bake the clip's gain and fade curves into a new WAV, then reset the
+    /// non-destructive gain/fade settings so they are not applied twice.
+    fn apply_gain_fades(&mut self, clip_id: ClipId) -> bool {
+        let Some(clip) = self.project.audio_clips.get(clip_id) else {
+            return false;
+        };
+        if clip.locked || clip.length == 0 {
+            return false;
+        }
+        if (clip.gain - 1.0).abs() < 1e-4
+            && clip.fade_in.is_none()
+            && clip.fade_out.is_none()
+        {
+            return false;
+        }
+
+        let from = ClipSourceState::of(clip);
+        let source_path = clip.source.path.clone();
+        let source_offset = clip.source_offset;
+        let source_length = clip.length;
+
+        let parent = source_path.parent().unwrap_or_else(|| Path::new(""));
+        let render_id = uuid::Uuid::new_v4();
+        let output_path = parent.join(format!(
+            "{}_process_{}.wav",
+            processed_file_stem(&source_path),
+            render_id
+        ));
+
+        // Match the playback mixer's gain/fade envelope in source frames.
+        let clip_frames = source_length;
+        let gain = from.gain;
+        let fade_in = from.fade_in;
+        let fade_out = from.fade_out;
+        let envelope = move |frame: u64| {
+            clip_gain_at(frame, clip_frames, gain, fade_in, fade_out)
+        };
+
+        if let Err(e) = write_wav_range_with_envelope(
+            &source_path,
+            source_offset,
+            source_length,
+            &output_path,
+            envelope,
+        ) {
+            let _ = std::fs::remove_file(&output_path);
+            self.error_message = Some(format!("Could not render gain and fades: {}", e));
+            return false;
+        }
+
+        let (frames, spec) = match wav_file_info(&output_path) {
+            Ok(info) => info,
+            Err(e) => {
+                let _ = std::fs::remove_file(&output_path);
+                self.error_message =
+                    Some(format!("Could not read rendered audio: {}", e));
+                return false;
+            }
+        };
+        if frames == 0 {
+            let _ = std::fs::remove_file(&output_path);
+            self.error_message = Some("Rendered audio is empty.".to_string());
+            return false;
+        }
+
+        let new_source = AudioFileRef::new(
+            output_path.clone(),
+            frames,
+            spec.sample_rate,
+            spec.channels,
+            bit_depth_from_spec(spec),
+        );
+        let to = ClipSourceState {
+            source: new_source,
+            source_offset: 0,
+            length: frames,
+            fade_in: None,
+            fade_out: None,
+            gain: 1.0,
+        };
+        if let Some(clip) = self.project.audio_clips.get_mut(clip_id) {
+            to.apply(clip);
+        }
+        self.push_undo(EditAction::Source { clip_id, from, to }, false);
+        self.error_message = None;
+        self.after_edit();
+        self.refresh_playback_if_playing();
+        self.spawn_overview(clip_id, output_path);
+        true
     }
 
     /// Render a pitch shift and/or time stretch to a new WAV and point the clip
@@ -1454,6 +1552,7 @@ impl AppUI {
             length: frames,
             fade_in,
             fade_out,
+            gain: from.gain,
         };
         if let Some(clip) = self.project.audio_clips.get_mut(clip_id) {
             to.apply(clip);
@@ -1663,6 +1762,27 @@ impl AppUI {
         let clip_seconds = clip.map(|clip| {
             clip.length as f64 / clip.source.sample_rate.max(1) as f64
         });
+        let clip_gain_db = 20.0
+            * clip
+                .map(|clip| clip.gain.max(1e-6))
+                .unwrap_or(1.0)
+                .log10();
+        let clip_sr = clip
+            .map(|clip| clip.source.sample_rate.max(1) as f64)
+            .unwrap_or(1.0);
+        let clip_fade_in_secs = clip
+            .and_then(|clip| clip.fade_in)
+            .map(|fade| fade.length as f64 / clip_sr)
+            .unwrap_or(0.0);
+        let clip_fade_out_secs = clip
+            .and_then(|clip| clip.fade_out)
+            .map(|fade| fade.length as f64 / clip_sr)
+            .unwrap_or(0.0);
+        let has_gain_fades = clip.map_or(false, |clip| {
+            (clip.gain - 1.0).abs() > 1e-4
+                || clip.fade_in.is_some()
+                || clip.fade_out.is_some()
+        });
         let mut open = true;
         let mut apply = false;
 
@@ -1731,6 +1851,16 @@ impl AppUI {
                                     "Set the clip gain so its loudest sample peaks at −1 dBFS.",
                                 );
                             }
+                            EffectKind::GainFades => {
+                                ui.label(egui::RichText::new("Gain & Fades").strong());
+                                ui.label(format!("Gain: {:+.1} dB", clip_gain_db));
+                                ui.label(format!("Fade in: {:.2} s", clip_fade_in_secs));
+                                ui.label(format!("Fade out: {:.2} s", clip_fade_out_secs));
+                                ui.weak(
+                                    "Bakes the gain and fades into a new audio file, then \
+                                     resets the clip's gain to 0 dB and removes the fades.",
+                                );
+                            }
                             EffectKind::Reverse => {
                                 ui.label(egui::RichText::new("Reverse").strong());
                                 ui.weak(
@@ -1766,6 +1896,7 @@ impl AppUI {
                         ui.add_space(10.0);
                         let can_apply = match window.selected {
                             EffectKind::Normalize | EffectKind::Reverse => true,
+                            EffectKind::GainFades => has_gain_fades,
                             EffectKind::PitchShift => window.pitch.abs() >= 0.05,
                             EffectKind::TimeStretch => {
                                 (window.stretch - 1.0).abs() >= 0.005
@@ -1789,6 +1920,9 @@ impl AppUI {
         if apply {
             match window.selected {
                 EffectKind::Normalize => self.normalize_clip(window.clip_id),
+                EffectKind::GainFades => {
+                    self.apply_gain_fades(window.clip_id);
+                }
                 EffectKind::Reverse => self.reverse_clip(window.clip_id),
                 EffectKind::PitchShift => {
                     if self.apply_pitch_stretch(
@@ -1821,6 +1955,33 @@ fn make_fade(length: u64, existing: Option<Fade>, clip_length: u64) -> Option<Fa
     }
     let curve = existing.map(|fade| fade.curve).unwrap_or(FadeCurve::Linear);
     Some(Fade::new(length.min(clip_length), curve))
+}
+
+/// Clip gain at a source-frame offset after applying the fade envelopes.
+/// Mirrors the playback mixer's gain calculation.
+fn clip_gain_at(
+    frame: u64,
+    clip_frames: u64,
+    gain: f32,
+    fade_in: Option<Fade>,
+    fade_out: Option<Fade>,
+) -> f32 {
+    let mut value = gain;
+    if let Some(fade) = fade_in {
+        if frame < fade.length {
+            value *= fade.gain_at(frame);
+        }
+    }
+    if let Some(fade) = fade_out {
+        if fade.length > 0 {
+            let start = clip_frames.saturating_sub(fade.length);
+            if frame >= start {
+                let t = ((frame - start) as f32 / fade.length as f32).clamp(0.0, 1.0);
+                value *= 1.0 - fade.curve.apply(t);
+            }
+        }
+    }
+    value.clamp(0.0, 4.0)
 }
 
 fn fade_curve_name(curve: FadeCurve) -> &'static str {
@@ -3491,6 +3652,21 @@ fn write_wav_range(
     frames: u64,
     dest: &Path,
 ) -> Result<()> {
+    write_wav_range_with_envelope(source_path, first_frame, frames, dest, |_| 1.0)
+}
+
+/// Like [`write_wav_range`], but applies a per-frame gain envelope while
+/// copying. The envelope index is relative to the start of the range.
+fn write_wav_range_with_envelope<F>(
+    source_path: &Path,
+    first_frame: u64,
+    frames: u64,
+    dest: &Path,
+    mut gain_at: F,
+) -> Result<()>
+where
+    F: FnMut(u64) -> f32,
+{
     let mut reader = hound::WavReader::open(source_path)?;
     let spec = reader.spec();
     let total_frames = reader.duration() as u64;
@@ -3509,18 +3685,28 @@ fn write_wav_range(
         sample_format: hound::SampleFormat::Float,
     };
     let mut writer = hound::WavWriter::create(dest, out_spec)?;
-    let sample_count = (frames * channels as u64) as usize;
 
     match spec.sample_format {
         hound::SampleFormat::Float => {
-            for sample in reader.samples::<f32>().take(sample_count) {
-                writer.write_sample(sample?)?;
+            let mut samples = reader.samples::<f32>();
+            for frame in 0..frames {
+                let gain = gain_at(frame);
+                for _ in 0..channels {
+                    let sample = samples.next().transpose()?.unwrap_or(0.0);
+                    writer.write_sample(sample * gain)?;
+                }
             }
         }
         hound::SampleFormat::Int => {
             let scale = pcm_scale(spec.bits_per_sample);
-            for sample in reader.samples::<i32>().take(sample_count) {
-                writer.write_sample(sample? as f32 * scale)?;
+            let mut samples = reader.samples::<i32>();
+            for frame in 0..frames {
+                let gain = gain_at(frame);
+                for _ in 0..channels {
+                    let sample =
+                        samples.next().transpose()?.unwrap_or(0) as f32 * scale;
+                    writer.write_sample(sample * gain)?;
+                }
             }
         }
     }
@@ -3629,8 +3815,9 @@ fn load_wav_interleaved(path: &Path) -> Result<(Vec<f32>, u16, u32)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        load_wav_interleaved, processed_file_stem, render_pitch_stretch, reverse_interleaved,
-        wav_file_info, wav_peak, write_wav_range, ClipSourceState,
+        clip_gain_at, load_wav_interleaved, processed_file_stem, render_pitch_stretch,
+        reverse_interleaved, wav_file_info, wav_peak, write_wav_range,
+        write_wav_range_with_envelope, ClipSourceState,
     };
     use daw_core::audio_pool::AudioFileRef;
     use daw_core::clip::{AudioClip, Fade, FadeCurve, TimelinePos};
@@ -3667,7 +3854,7 @@ mod tests {
     }
 
     #[test]
-    fn source_state_restores_length_and_fades() {
+    fn source_state_restores_length_fades_and_gain() {
         let source = AudioFileRef::new(
             std::path::PathBuf::from("source.wav"),
             1_000,
@@ -3682,22 +3869,26 @@ mod tests {
         );
         clip.source_offset = 25;
         clip.fade_in = Some(Fade::new(120, FadeCurve::Linear));
+        clip.gain = 0.5;
 
         let before = ClipSourceState::of(&clip);
         clip.source_offset = 0;
         clip.length = 500;
         clip.fade_in = Some(Fade::new(50, FadeCurve::Exponential));
+        clip.gain = 1.25;
         let after = ClipSourceState::of(&clip);
 
         after.apply(&mut clip);
         assert_eq!(clip.source_offset, 0);
         assert_eq!(clip.length, 500);
         assert_eq!(clip.fade_in.unwrap().length, 50);
+        assert!((clip.gain - 1.25).abs() < 1e-6);
 
         before.apply(&mut clip);
         assert_eq!(clip.source_offset, 25);
         assert_eq!(clip.length, 1_000);
         assert_eq!(clip.fade_in.unwrap().length, 120);
+        assert!((clip.gain - 0.5).abs() < 1e-6);
     }
 
     #[test]
@@ -3741,6 +3932,62 @@ mod tests {
         assert!((samples[1] + 0.5).abs() < 1e-3);
         assert!((samples[2] + 0.75).abs() < 1e-3);
         assert!((samples[3] - 0.75).abs() < 1e-3);
+
+        std::fs::remove_file(input).ok();
+        std::fs::remove_file(output).ok();
+    }
+
+    #[test]
+    fn clip_gain_applies_fades_at_source_offsets() {
+        let fade_in = Some(Fade::new(10, FadeCurve::Linear));
+        let fade_out = Some(Fade::new(20, FadeCurve::Linear));
+
+        // First frame of a fade-in is silent.
+        assert!(clip_gain_at(0, 100, 1.0, fade_in, fade_out).abs() < 1e-6);
+        // Halfway through the 10-frame fade-in is half gain.
+        assert!((clip_gain_at(5, 100, 1.0, fade_in, fade_out) - 0.5).abs() < 1e-6);
+        // Middle of the clip is unaffected.
+        assert!((clip_gain_at(50, 100, 1.0, fade_in, fade_out) - 1.0).abs() < 1e-6);
+        // The 20-frame fade-out starts at frame 80; frame 90 is half gain.
+        assert!((clip_gain_at(90, 100, 1.0, fade_in, fade_out) - 0.5).abs() < 1e-6);
+        // Clip gain is applied and limited to the mixer's 4x ceiling.
+        assert!((clip_gain_at(50, 100, 0.5, None, None) - 0.5).abs() < 1e-6);
+        assert!((clip_gain_at(50, 100, 10.0, None, None) - 4.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn write_wav_range_applies_frame_envelope() {
+        let input = std::env::temp_dir().join(format!(
+            "zoft_env_in_{}.wav",
+            uuid::Uuid::new_v4()
+        ));
+        let output = std::env::temp_dir().join(format!(
+            "zoft_env_out_{}.wav",
+            uuid::Uuid::new_v4()
+        ));
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 48_000,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let mut writer = hound::WavWriter::create(&input, spec).unwrap();
+        for _ in 0..4 {
+            writer.write_sample(1.0f32).unwrap();
+        }
+        writer.finalize().unwrap();
+
+        let envelope = [0.0f32, 0.5, 0.25, 1.0];
+        write_wav_range_with_envelope(&input, 0, 4, &output, |frame| {
+            envelope[frame as usize]
+        })
+        .unwrap();
+
+        let (samples, _, _) = load_wav_interleaved(&output).unwrap();
+        assert_eq!(samples.len(), 4);
+        for (sample, expected) in samples.iter().zip(envelope) {
+            assert!((sample - expected).abs() < 1e-6);
+        }
 
         std::fs::remove_file(input).ok();
         std::fs::remove_file(output).ok();
