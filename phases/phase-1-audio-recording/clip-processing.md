@@ -21,7 +21,7 @@ Offline clip processing: gain, pitch shift, time stretch, reverse, normalize. No
 - [ ] Fade in/out render: Bake fades into new file
 - [ ] Consolidate: Merge adjacent clips on same track into one file
 - [ ] Bounce in place: Render clip with inserts/sends to new file
-- [x] Process menu: Right-click clip → Process → Normalize / Reverse (more operations to follow)
+- [x] Audio Effects window: right-click a clip, choose an effect from the list, adjust parameters, then press Apply
 
 ## Technical Details
 
@@ -38,16 +38,20 @@ Offline clip processing: gain, pitch shift, time stretch, reverse, normalize. No
   previous `AudioFileRef`, offset and length via a `Source` undo entry. A fresh
   waveform overview is generated in the background; results for a replaced path
   are discarded.
-- **Pitch shift / time stretch**: the clip inspector exposes a pitch slider
-  (−12…+12 semitones), a stretch slider (0.5×–2.0×) and a formant-preservation
-  toggle. Rendering writes the visible source range to a temporary 32-bit float
-  WAV, runs `rubberband --fine --pitch <st> --time <ratio> [--formant]`, and
-  points the clip at a new `<name>_process_<uuid>.wav`. The clip length follows
-  the rendered duration, fades are clamped to it, and undo restores the previous
-  source, offset, length and fades via a `Source` entry. Controls reset after a
-  successful render. Rubber Band must be available in `PATH`.
-- **Process menu**: right-click a clip in the arrange view. The same actions
-  are available in the clip inspector.
+- **Pitch shift / time stretch**: the floating Audio Effects window exposes
+  separate Pitch Shift and Time Stretch effects. Pitch is −12…+12 semitones
+  (0.01 st = 1 cent) with an optional formant-preservation toggle; stretch is
+  0.5×–2.0×. Applying writes the visible source range to a temporary 32-bit
+  float WAV, runs `rubberband --fine --pitch <st> --time <ratio> [--formant]`,
+  and points the clip at a new `<name>_process_<uuid>.wav`. The clip length
+  follows the rendered duration, fades are clamped to it, and undo restores the
+  previous source, offset, length and fades via a `Source` entry. Pitch/stretch
+  controls reset after a successful apply. Rubber Band must be available in
+  `PATH`.
+- **Audio Effects window**: right-click a clip in the arrange view to open a
+  floating window with the effect list (Normalize, Reverse, Pitch Shift, Time
+  Stretch). The selected effect shows its parameters and a single **Apply**
+  button. The window stays open, so several effects can be applied in sequence.
 
 ### Processing Pipeline
 ```rust
@@ -114,5 +118,5 @@ enum NormalizeMode {
 - 2026-10-21: Reverse rendered to a new WAV per clip (channel-safe frame reversal, undo via source state); repeated reverses reuse a stable base filename
 - 2026-10-21: Pitch shift (±12 st) and time stretch (0.5×–2.0×) via Rubber Band R3, with optional formant preservation and undoable source replacement
 - 2026-10-21: Snap grid defaults to Beat
-- 2026-10-21: Right-click Process menu in the arrange view
+- 2026-10-21: Right-click opens a floating Audio Effects window with an effect list and one Apply button (replaces the inline processing controls and context menu)
 - Remaining: listening tests for pitch/time, stretch mode presets, fade rendering, consolidate, bounce in place, LUFS normalize

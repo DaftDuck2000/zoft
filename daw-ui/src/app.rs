@@ -274,6 +274,55 @@ enum DragMode {
     FadeOut,
 }
 
+/// Effect selected in the floating audio-effects window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EffectKind {
+    Normalize,
+    Reverse,
+    PitchShift,
+    TimeStretch,
+}
+
+impl EffectKind {
+    const ALL: [Self; 4] = [
+        Self::Normalize,
+        Self::Reverse,
+        Self::PitchShift,
+        Self::TimeStretch,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Normalize => "Normalize",
+            Self::Reverse => "Reverse",
+            Self::PitchShift => "Pitch Shift",
+            Self::TimeStretch => "Time Stretch",
+        }
+    }
+}
+
+/// State of the floating per-clip audio-effects window.
+#[derive(Debug, Clone)]
+struct EffectsWindow {
+    clip_id: ClipId,
+    selected: EffectKind,
+    pitch: f32,
+    stretch: f32,
+    formants: bool,
+}
+
+impl EffectsWindow {
+    fn new(clip_id: ClipId) -> Self {
+        Self {
+            clip_id,
+            selected: EffectKind::Normalize,
+            pitch: 0.0,
+            stretch: 1.0,
+            formants: true,
+        }
+    }
+}
+
 /// In-progress clip drag (move, trim or fade handle).
 struct ClipDrag {
     clip_id: ClipId,
@@ -350,8 +399,8 @@ struct AppUI {
     snap_suspended: bool,
     drag: Option<ClipDrag>,
     clipboard: Option<AudioClip>,
-    /// Clip under the last right-click, used by the process context menu.
-    context_clip: Option<ClipId>,
+    /// Floating audio-effects editor for the right-clicked clip.
+    effects_window: Option<EffectsWindow>,
     /// Where a trashed clip was last attached, so Restore can put it back.
     deleted_from: HashMap<ClipId, TrackId>,
     undo_stack: Vec<EditAction>,
@@ -361,11 +410,6 @@ struct AppUI {
     merge_chain: bool,
     /// Deferred mixer refresh for edits made while a pointer gesture is active.
     needs_audio_refresh: bool,
-
-    // Offline clip-processing controls
-    process_pitch: f32,
-    process_stretch: f32,
-    process_formants: bool,
 
     // Waveform overview generation
     waveform_tx: mpsc::Sender<(ClipId, PathBuf, Result<WaveformOverview>)>,
@@ -402,15 +446,12 @@ impl AppUI {
             snap_suspended: false,
             drag: None,
             clipboard: None,
-            context_clip: None,
+            effects_window: None,
             deleted_from: HashMap::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             merge_chain: false,
             needs_audio_refresh: false,
-            process_pitch: 0.0,
-            process_stretch: 1.0,
-            process_formants: true,
             waveform_tx,
             waveform_rx,
             detail_cache: DetailCache::default(),
@@ -1321,20 +1362,20 @@ impl AppUI {
         semitones: f32,
         stretch: f32,
         preserve_formants: bool,
-    ) {
+    ) -> bool {
         let semitones = semitones.clamp(-24.0, 24.0);
         let stretch = stretch.clamp(0.25, 4.0);
         let pitch_active = semitones.abs() >= 0.05;
         let stretch_active = (stretch - 1.0).abs() >= 0.005;
         if !pitch_active && !stretch_active {
-            return;
+            return false;
         }
 
         let Some(clip) = self.project.audio_clips.get(clip_id) else {
-            return;
+            return false;
         };
         if clip.locked || clip.length == 0 {
-            return;
+            return false;
         }
 
         let from = ClipSourceState::of(clip);
@@ -1355,7 +1396,7 @@ impl AppUI {
         {
             let _ = std::fs::remove_file(&temp_path);
             self.error_message = Some(format!("Could not prepare clip audio: {}", e));
-            return;
+            return false;
         }
 
         let render = render_pitch_stretch(
@@ -1372,7 +1413,7 @@ impl AppUI {
                 "Pitch/time processing failed: {}. Is rubberband installed?",
                 e
             ));
-            return;
+            return false;
         }
 
         let (frames, spec) = match wav_file_info(&output_path) {
@@ -1380,13 +1421,13 @@ impl AppUI {
             Err(e) => {
                 let _ = std::fs::remove_file(&output_path);
                 self.error_message = Some(format!("Could not read processed audio: {}", e));
-                return;
+                return false;
             }
         };
         if frames == 0 {
             let _ = std::fs::remove_file(&output_path);
             self.error_message = Some("Processed audio is empty.".to_string());
-            return;
+            return false;
         }
 
         // Keep fade lengths within the rendered clip, which may be shorter
@@ -1422,10 +1463,7 @@ impl AppUI {
         self.after_edit();
         self.refresh_playback_if_playing();
         self.spawn_overview(clip_id, output_path);
-
-        // The controls are baked into the rendered file now.
-        self.process_pitch = 0.0;
-        self.process_stretch = 1.0;
+        true
     }
 
     fn copy_selected_clip(&mut self) {
@@ -1512,8 +1550,9 @@ impl AppUI {
         self.refresh_playback_if_playing();
     }
 
-    /// Clip inspector in the arrange toolbar: gain, processing, fades and
-    /// color. Every change is recorded for undo.
+    /// Clip inspector in the arrange toolbar: gain, fades and color. Every
+    /// change is recorded for undo. Processing lives in the right-click
+    /// audio-effects window.
     fn clip_properties_ui(&mut self, ui: &mut egui::Ui) {
         let Some(clip_id) = self.selected_clip else {
             return;
@@ -1524,9 +1563,6 @@ impl AppUI {
 
         let before = ClipShape::of(clip);
         let mut after = before;
-        let mut normalize_clicked = false;
-        let mut reverse_clicked = false;
-        let mut apply_processing = false;
         let name = clip
             .source
             .path
@@ -1538,6 +1574,7 @@ impl AppUI {
 
         ui.label("Clip:");
         ui.label(name);
+        ui.weak("(right-click for effects)");
         ui.separator();
 
         // Gain (stored linearly, edited in dB).
@@ -1550,47 +1587,6 @@ impl AppUI {
         );
         if gain_response.changed() {
             after.gain = 10.0f32.powf(gain_db / 20.0);
-        }
-        ui.horizontal(|ui| {
-            if ui
-                .button("Normalize −1 dB")
-                .on_hover_text("Set the clip gain so its loudest sample peaks at −1 dBFS")
-                .clicked()
-            {
-                normalize_clicked = true;
-            }
-            if ui
-                .button("Reverse")
-                .on_hover_text("Render a reversed copy of the clip's audio (original file is kept)")
-                .clicked()
-            {
-                reverse_clicked = true;
-            }
-        });
-        ui.separator();
-
-        // Pitch shift and time stretch are rendered offline into a new file.
-        ui.label("Pitch:");
-        ui.add(
-            egui::Slider::new(&mut self.process_pitch, -12.0..=12.0)
-                .suffix(" st")
-                .max_decimals(2),
-        );
-        ui.label("Stretch:");
-        ui.add(
-            egui::Slider::new(&mut self.process_stretch, 0.5..=2.0)
-                .suffix("×")
-                .max_decimals(2),
-        );
-        ui.checkbox(&mut self.process_formants, "Formants");
-        if ui
-            .button("Render")
-            .on_hover_text(
-                "Render pitch shift / time stretch to a new file (original audio is kept)",
-            )
-            .clicked()
-        {
-            apply_processing = true;
         }
         ui.separator();
 
@@ -1646,20 +1642,155 @@ impl AppUI {
         if gain_response.drag_stopped() {
             self.refresh_playback_if_playing();
         }
+    }
 
-        // Offline/process actions run after the shape sliders have been applied.
-        if normalize_clicked {
-            self.normalize_clip(clip_id);
+    /// Floating audio-effects editor, opened by right-clicking a clip.
+    fn show_effects_window(&mut self, ctx: &egui::Context) {
+        let Some(mut window) = self.effects_window.clone() else {
+            return;
+        };
+        let clip = self.project.audio_clips.get(window.clip_id);
+        let clip_name = clip
+            .map(|clip| {
+                clip.source
+                    .path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("clip")
+                    .to_string()
+            })
+            .unwrap_or_else(|| "(clip removed)".to_string());
+        let clip_seconds = clip.map(|clip| {
+            clip.length as f64 / clip.source.sample_rate.max(1) as f64
+        });
+        let mut open = true;
+        let mut apply = false;
+
+        egui::Window::new("Audio Effects")
+            .id(egui::Id::new("audio_effects_window"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(410.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Clip:");
+                    ui.label(egui::RichText::new(clip_name).strong());
+                });
+                if let Some(seconds) = clip_seconds {
+                    ui.weak(format!("Length: {:.2} s", seconds));
+                }
+                ui.separator();
+
+                if clip.is_none() {
+                    ui.label("This clip is no longer in the project.");
+                    return;
+                }
+
+                ui.horizontal_top(|ui| {
+                    ui.vertical(|ui| {
+                        ui.set_min_width(120.0);
+                        ui.label("Effects");
+                        ui.add_space(2.0);
+                        for effect in EffectKind::ALL {
+                            if ui
+                                .selectable_label(window.selected == effect, effect.label())
+                                .clicked()
+                            {
+                                window.selected = effect;
+                            }
+                        }
+                    });
+
+                    ui.separator();
+
+                    ui.vertical(|ui| {
+                        ui.set_min_width(230.0);
+                        match window.selected {
+                            EffectKind::Normalize => {
+                                ui.label(egui::RichText::new("Normalize").strong());
+                                ui.weak(
+                                    "Set the clip gain so its loudest sample peaks at −1 dBFS.",
+                                );
+                            }
+                            EffectKind::Reverse => {
+                                ui.label(egui::RichText::new("Reverse").strong());
+                                ui.weak(
+                                    "Render the clip's audible range backwards to a new file. \
+                                     The original audio is kept.",
+                                );
+                            }
+                            EffectKind::PitchShift => {
+                                ui.label(egui::RichText::new("Pitch Shift").strong());
+                                ui.add(
+                                    egui::Slider::new(&mut window.pitch, -12.0..=12.0)
+                                        .suffix(" st")
+                                        .max_decimals(2),
+                                );
+                                ui.checkbox(&mut window.formants, "Preserve formants");
+                                ui.weak("Positive values raise the pitch; 0.01 st = 1 cent.");
+                            }
+                            EffectKind::TimeStretch => {
+                                ui.label(egui::RichText::new("Time Stretch").strong());
+                                ui.add(
+                                    egui::Slider::new(&mut window.stretch, 0.5..=2.0)
+                                        .suffix("×")
+                                        .max_decimals(2),
+                                );
+                                let target = clip_seconds.map(|seconds| seconds * window.stretch as f64);
+                                if let Some(seconds) = target {
+                                    ui.weak(format!("New clip length: {:.2} s", seconds));
+                                }
+                                ui.weak("Changes the clip length in place; pitch is unchanged.");
+                            }
+                        }
+
+                        ui.add_space(10.0);
+                        let can_apply = match window.selected {
+                            EffectKind::Normalize | EffectKind::Reverse => true,
+                            EffectKind::PitchShift => window.pitch.abs() >= 0.05,
+                            EffectKind::TimeStretch => {
+                                (window.stretch - 1.0).abs() >= 0.005
+                            }
+                        };
+                        if ui
+                            .add_enabled(can_apply, egui::Button::new("Apply"))
+                            .clicked()
+                        {
+                            apply = true;
+                        }
+                    });
+                });
+            });
+
+        if !open {
+            self.effects_window = None;
+            return;
         }
-        if reverse_clicked {
-            self.reverse_clip(clip_id);
+
+        if apply {
+            match window.selected {
+                EffectKind::Normalize => self.normalize_clip(window.clip_id),
+                EffectKind::Reverse => self.reverse_clip(window.clip_id),
+                EffectKind::PitchShift => {
+                    if self.apply_pitch_stretch(
+                        window.clip_id,
+                        window.pitch,
+                        1.0,
+                        window.formants,
+                    ) {
+                        window.pitch = 0.0;
+                    }
+                }
+                EffectKind::TimeStretch => {
+                    if self.apply_pitch_stretch(window.clip_id, 0.0, window.stretch, false) {
+                        window.stretch = 1.0;
+                    }
+                }
+            }
         }
-        let pitch = self.process_pitch;
-        let stretch = self.process_stretch;
-        let formants = self.process_formants;
-        if apply_processing {
-            self.apply_pitch_stretch(clip_id, pitch, stretch, formants);
-        }
+
+        self.effects_window = Some(window);
     }
 }
 
@@ -2405,41 +2536,15 @@ impl eframe::App for AppUI {
                 self.finish_clip_drag();
             }
 
-            // ---- Clip context menu (right-click) ----
-            if ui.input(|i| i.pointer.secondary_clicked()) && hovered {
+            // ---- Right-click opens the floating audio-effects editor ----
+            if edit_response.secondary_clicked() {
                 if let Some(pos) = pointer_pos {
                     if let Some((clip_id, _)) = Self::clip_hit(&clip_rects, pos) {
                         self.selected_clip = Some(clip_id);
-                        self.context_clip = Some(clip_id);
-                    } else {
-                        self.context_clip = None;
+                        self.effects_window = Some(EffectsWindow::new(clip_id));
                     }
                 }
             }
-            edit_response.context_menu(|ui| {
-                let Some(clip_id) = self.context_clip else {
-                    ui.label("No clip here");
-                    return;
-                };
-                let name = self
-                    .project
-                    .audio_clips
-                    .get(clip_id)
-                    .and_then(|clip| clip.source.path.file_name())
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("clip")
-                    .to_string();
-                ui.label(name);
-                ui.separator();
-                if ui.button("Normalize to −1 dB").clicked() {
-                    self.normalize_clip(clip_id);
-                    ui.close_menu();
-                }
-                if ui.button("Reverse").clicked() {
-                    self.reverse_clip(clip_id);
-                    ui.close_menu();
-                }
-            });
 
             // Hover feedback: resize cursor over trim/fade zones, grab over bodies.
             if self.drag.is_none() && !self.dragging_playhead && hovered {
@@ -2537,6 +2642,8 @@ impl eframe::App for AppUI {
                 ui.label("Zoft DAW v0.1.0");
             });
         });
+
+        self.show_effects_window(ctx);
 
         // Request repaint for smooth playback and async waveform polling
         ctx.request_repaint();
