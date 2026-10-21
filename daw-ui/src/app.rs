@@ -3811,6 +3811,10 @@ impl eframe::App for AppUI {
                     if selected_changed {
                         let _ = self.engine.set_selected_input_device(new_selection.clone());
                         self.selected_input_device = new_selection;
+                        // Restart the input stream so monitoring uses the new
+                        // device immediately.
+                        self.engine.set_monitoring(false);
+                        self.sync_monitoring();
                     }
                 }
                 ui.separator();

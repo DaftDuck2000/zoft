@@ -107,5 +107,5 @@ Monitor Mix        Recording           Metering
 - 2026-10-07: Input device selection dropdown in transport bar
 - 2026-10-07: Background writer task with tokio for BWF writing
 - 2026-10-21: Recording level meter (pre-fader peak + RMS in the transport bar) fed by the input callback
-- 2026-10-21: Input monitoring modes are enforced: track **Mon** cycles Off/Auto/On and the input is mixed into the output while the input stream runs; the mode is undoable
+- 2026-10-21: Input monitoring modes are enforced: track **Mon** cycles Off/Auto/On and the input is mixed into the output; the input stream stays open while armed/On, then hands off to the recording stream at roll. The mode is undoable
 - Next: Waveform rendering (1.2), Multi-take support, Disk space warning

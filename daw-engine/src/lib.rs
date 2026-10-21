@@ -30,6 +30,7 @@ use crate::audio_backend::AudioBackend;
 use crate::playback::{MetronomeConfig, PlayableClip, PlaybackMixer};
 use anyhow::Result;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc;
 
@@ -41,6 +42,8 @@ pub struct AudioEngine {
     project_bit_depth: u16,
     project_channels: u16,
     selected_input_device: Arc<Mutex<Option<String>>>,
+    /// Whether live input monitoring is requested (kept in sync with the UI).
+    monitoring_enabled: AtomicBool,
     /// Loop range in output-device frames, applied whenever a new mixer is
     /// created and to the live mixer when it changes.
     playback_loop: Arc<Mutex<Option<(u64, u64)>>>,
@@ -69,6 +72,7 @@ impl AudioEngine {
             project_bit_depth: 32, // 32-bit float
             project_channels: channels,
             selected_input_device: Arc::new(Mutex::new(None)),
+            monitoring_enabled: AtomicBool::new(false),
             playback_loop: Arc::new(Mutex::new(None)),
             playback_metronome: Arc::new(Mutex::new(None)),
         })
@@ -164,18 +168,16 @@ impl AudioEngine {
         let bit_depth = self.project_bit_depth;
 
         // Resolve the input device to record from
-        let selected_device = self.selected_input_device.lock().unwrap().clone();
-        let devices = self.backend.input_devices()?;
-
-        // Find the selected device, falling back to the default/first device
-        let device = selected_device
-            .and_then(|selected_id| devices.iter().find(|d| d.id == selected_id).cloned())
-            .or_else(|| devices.iter().find(|d| d.is_default_input).cloned())
-            .or_else(|| devices.first().cloned())
-            .ok_or_else(|| anyhow::anyhow!("No audio input device available for recording"))?;
+        let device = self.resolve_input_device()?;
 
         let (tx, rx) = mpsc::channel::<AudioBuffer>();
         let sender = Arc::new(std::sync::Mutex::new(Some(tx.clone())));
+
+        // If the monitoring stream is already open, close it so the recording
+        // stream owns the device and its format.
+        if self.backend.input_stream_running() {
+            let _ = self.backend.stop_input_stream();
+        }
 
         // Start the input stream first so we know the actual format it opened,
         // and so a failure leaves the engine in a clean, non-recording state.
@@ -191,6 +193,10 @@ impl AudioEngine {
                 return Err(e.context("Failed to start recording from input device"));
             }
         };
+
+        // Monitoring may have been active before the take; keep it audible.
+        self.backend
+            .set_monitoring(self.monitoring_enabled.load(Ordering::SeqCst));
 
         let metadata = daw_core::audio_pool::AudioMetadata {
             originator: "Zoft DAW".to_string(),
@@ -254,6 +260,11 @@ impl AudioEngine {
             // Without this, callers that open the file immediately after stopping
             // would see a placeholder (zero) data size and read a 0-length file.
             let _ = state.writer_thread.join();
+            // Reopen the input for monitoring when the UI still wants it.
+            if self.monitoring_enabled.load(Ordering::SeqCst) {
+                let _ = self.ensure_monitoring_stream();
+                self.backend.set_monitoring(true);
+            }
             Ok(Some((state.track_id, state.file_path)))
         } else {
             Ok(None)
@@ -280,14 +291,57 @@ impl AudioEngine {
         self.backend.input_level()
     }
 
-    /// Enable or disable live input monitoring to the output device.
+    /// Enable or disable live input monitoring. When enabled and the transport
+    /// is idle, an input stream is opened so armed/On tracks can be heard
+    /// before a take starts.
     pub fn set_monitoring(&self, enabled: bool) {
-        self.backend.set_monitoring(enabled);
+        self.monitoring_enabled.store(enabled, Ordering::SeqCst);
+        let recording = self.recording.lock().unwrap().is_some();
+
+        if enabled {
+            if !recording && !self.backend.input_stream_running() {
+                let _ = self.ensure_monitoring_stream();
+            }
+            self.backend.set_monitoring(true);
+        } else {
+            self.backend.set_monitoring(false);
+            if !recording {
+                let _ = self.backend.stop_input_stream();
+            }
+        }
+    }
+
+    fn resolve_input_device(&self) -> Result<crate::audio_backend::AudioDeviceInfo> {
+        let selected_device = self.selected_input_device.lock().unwrap().clone();
+        let devices = self.backend.input_devices()?;
+
+        selected_device
+            .and_then(|selected_id| devices.iter().find(|d| d.id == selected_id).cloned())
+            .or_else(|| devices.iter().find(|d| d.is_default_input).cloned())
+            .or_else(|| devices.first().cloned())
+            .ok_or_else(|| anyhow::anyhow!("No audio input device available"))
+    }
+
+    /// Open the input stream for monitoring while the transport is idle.
+    fn ensure_monitoring_stream(&self) -> Result<()> {
+        if self.backend.input_stream_running() {
+            return Ok(());
+        }
+        let device = self.resolve_input_device()?;
+        let (tx, _rx) = mpsc::channel::<AudioBuffer>();
+        self.backend.start_input_stream(
+            &device,
+            self.project_sample_rate,
+            Arc::new(Mutex::new(Some(tx))),
+        )?;
+        Ok(())
     }
 }
 
 impl Drop for AudioEngine {
     fn drop(&mut self) {
+        // Don't reopen the input stream for monitoring while tearing down.
+        self.monitoring_enabled.store(false, Ordering::SeqCst);
         // Use catch_unwind to prevent panic in destructor from causing abort
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _ = self.stop();

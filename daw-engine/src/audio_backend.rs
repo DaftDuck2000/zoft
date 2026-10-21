@@ -269,6 +269,10 @@ pub trait AudioBackend: Send + Sync {
     fn set_playback_metronome(&self, _config: Option<crate::playback::MetronomeConfig>) {}
     /// Enable or disable live input monitoring.
     fn set_monitoring(&self, _enabled: bool) {}
+    /// Whether the input stream is currently open.
+    fn input_stream_running(&self) -> bool {
+        false
+    }
     /// Peak and RMS of the most recent input block, if the input stream is
     /// running.
     fn input_level(&self) -> Option<(f32, f32)> {
@@ -649,6 +653,13 @@ fn stop_input_stream(&self) -> Result<()> {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .set_enabled(enabled);
+    }
+
+    fn input_stream_running(&self) -> bool {
+        *self
+            .input_running
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     fn input_level(&self) -> Option<(f32, f32)> {
