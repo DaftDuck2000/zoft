@@ -51,10 +51,10 @@
 - Track list has per-track volume sliders and M/S buttons; mute, solo and volume are applied by the mixer and recorded in undo history
 - UI loads the project's clips on play; the playhead follows the engine's sample clock
 - Playhead and timeline may extend past the last clip; the view auto-follows during playback
-- Click or drag anywhere in the ruler to seek; the playhead follows the current snap grid (hold Alt to bypass), and seeking during playback/recording pauses the transport
+- Click the lower ruler (or drag it) to seek; the playhead follows the current snap grid (hold Alt to bypass), and seeking during playback/recording pauses the transport
 - Timeline ruler defaults to musical bars/beats (labels like `3.2`), switchable to clock time with the Ruler dropdown; the time-signature picker in the transport bar (4/4, 3/4, 6/8, …) drives bar length, ruler labels and the snap grid
 - Recording arms on ● and only captures from the moment the transport (Space/▶) rolls, so a take's length matches the playhead travel; pausing ends the take and shows the waveform right away
-- Transport loop: **In**/**Out** set the range at the playhead, **Loop** repeats it; the engine wraps sample-accurately at the loop end and the ruler highlights the range
+- Transport loop: drag in the ruler's upper loop lane to set the range (or use **In**/**Out** at the playhead), then **Loop** repeats it; the engine wraps sample-accurately at the loop end and the ruler highlights the range
 - Metronome **Click** toggle with accented downbeats, following the project tempo and time signature
 - Tempo field (drag or type BPM) and **Tap** tempo; both are undoable and update the metronome live
 - Not yet: input monitoring while recording, transport scrub

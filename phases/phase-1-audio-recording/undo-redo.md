@@ -58,9 +58,10 @@ panel, for example:
 Continuous edits (gain slider, fade length) merge into the previous entry while
 the pointer gesture is active, so one drag is one undo step. Split and
 Consolidate are stored as labelled groups and undo as a single step. The
-floating **History** window lists past edits in order, shows redoable edits
-after the current point, and clicking any entry jumps the project to that
-state. Undo/redo during playback reloads the mixer immediately.
+floating **History** window lists edits newest-first, shows redoable states
+above the current point and past edits below it, and clicking any entry jumps
+the project to that state. Undo/redo during playback reloads the mixer
+immediately.
 
 ### Remaining
 
@@ -175,5 +176,5 @@ impl MacroRecorder {
 - 2026-10-21: Added generic `History<T>` with capacity, descriptions and take/complete undo/redo; rewrote `UndoHistory` and `UndoManager` to execute, undo and redo `dyn Command`s correctly
 - 2026-10-21: Arrange-view edits now use `History<EditAction>` with readable labels; split/consolidate are labelled groups and slider drags merge into one entry
 - 2026-10-21: Track mute, solo, record-arm and volume controls are recorded as undoable track-state edits; mute/solo/volume feed the playback mixer
-- 2026-10-21: Added the floating **History** panel with jump-to-any-point
+- 2026-10-21: Added the floating **History** panel (newest edits first) with jump-to-any-point
 - Remaining: snapshots, automation integration, optional per-track scope

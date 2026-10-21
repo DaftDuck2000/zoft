@@ -35,6 +35,8 @@ const CLIP_EDGE_PX: f32 = 8.0;
 const FADE_HANDLE_PX: f32 = 16.0;
 /// Smallest duration a clip may be trimmed/split to (seconds).
 const MIN_CLIP_SECS: f64 = 0.02;
+/// Smallest loop range created by dragging the ruler (seconds).
+const MIN_LOOP_SECS: f64 = 0.05;
 
 pub struct App {
     project: Project,
@@ -705,6 +707,8 @@ struct AppUI {
     loop_enabled: bool,
     loop_start_secs: f64,
     loop_end_secs: f64,
+    /// Anchor while dragging a new loop range in the ruler's loop lane.
+    loop_drag_anchor_secs: Option<f64>,
     /// Metronome click during playback.
     metronome_enabled: bool,
     /// Recent tap-tempo intervals (seconds) and the last tap time.
@@ -773,6 +777,7 @@ impl AppUI {
             loop_enabled: false,
             loop_start_secs: 0.0,
             loop_end_secs: 0.0,
+            loop_drag_anchor_secs: None,
             metronome_enabled: false,
             tap_intervals: VecDeque::new(),
             last_tap: None,
@@ -2501,19 +2506,27 @@ impl AppUI {
                 egui::ScrollArea::vertical()
                     .max_height(320.0)
                     .show(ui, |ui| {
-                        for (index, description) in &past {
+                        // Newest at the top: redoable future states first (most
+                        // distant first), then the current point, then past
+                        // edits in reverse chronological order.
+                        for (index, description) in future.iter().rev() {
                             if ui
-                                .selectable_label(*index == current, format!("{}. {}", index, description))
+                                .selectable_label(
+                                    false,
+                                    format!("{}. {} (redo)", index, description),
+                                )
                                 .clicked()
                             {
                                 jump = Some(*index);
                             }
                         }
-                        for (index, description) in &future {
+                        ui.separator();
+                        ui.weak("current state");
+                        for (index, description) in past.iter().rev() {
                             if ui
                                 .selectable_label(
-                                    false,
-                                    format!("{}. {} (redo)", index, description),
+                                    *index == current,
+                                    format!("{}. {}", index, description),
                                 )
                                 .clicked()
                             {
@@ -4060,6 +4073,9 @@ impl eframe::App for AppUI {
             let project_sr = self.project.sample_rate.max(1) as f64;
             let track_height = 80.0;
             let ruler_height = 30.0;
+            // Upper part of the ruler is the loop lane (drag to set the loop,
+            // like Logic's cycle area); the lower part seeks the playhead.
+            let loop_lane_bottom = rect.top() + ruler_height * 0.4;
 
             // ---- Ruler ----
             let ruler_rect = egui::Rect::from_min_max(
@@ -4067,6 +4083,13 @@ impl eframe::App for AppUI {
                 egui::pos2(rect.right(), rect.top() + ruler_height),
             );
             painter.rect_filled(ruler_rect, 0.0, egui::Color32::from_gray(25));
+            painter.line_segment(
+                [
+                    egui::pos2(rect.left(), loop_lane_bottom),
+                    egui::pos2(rect.right(), loop_lane_bottom),
+                ],
+                egui::Stroke::new(1.0_f32, egui::Color32::from_gray(48)),
+            );
 
             // ---- Loop region ----
             if self.loop_enabled && self.loop_end_secs > self.loop_start_secs {
@@ -4074,7 +4097,7 @@ impl eframe::App for AppUI {
                 let loop_end = view.x(rect, self.loop_end_secs);
                 let band = egui::Rect::from_min_max(
                     egui::pos2(loop_start, rect.top()),
-                    egui::pos2(loop_end, rect.top() + ruler_height),
+                    egui::pos2(loop_end, loop_lane_bottom),
                 )
                 .intersect(ruler_rect);
                 if band.width() > 0.0 {
@@ -4126,9 +4149,10 @@ impl eframe::App for AppUI {
                 }
             }
 
-            // ---- Ruler seek: click or drag the ruler to place the playhead ----
-            // Applies the current snap grid, so with Snap set to Bar/Beat a
-            // click lands exactly on a bar/beat (Alt bypasses snapping).
+            // ---- Ruler interaction ----
+            // Upper part = loop lane: dragging sets a new loop range (Logic's
+            // cycle area). Lower part = seek lane: click/drag places the
+            // playhead.
             let ruler_response = ui.interact(
                 ruler_rect,
                 ui.id().with("ruler_seek"),
@@ -4138,12 +4162,61 @@ impl eframe::App for AppUI {
             let pointer_on_playhead = pointer_pos
                 .map(|p| (p.x - playhead_x_before).abs() <= 8.0)
                 .unwrap_or(false);
+            let max_t = self.timeline_duration().max(view.t(rect, rect.right()));
+            let pointer_in_loop_lane = pointer_pos
+                .map(|p| p.y <= loop_lane_bottom)
+                .unwrap_or(false);
             let pressed = ui.input(|i| i.pointer.primary_pressed());
-            let seek_pos = if ruler_response.dragged() {
+
+            if ruler_response.drag_started() {
+                let started_in_loop_lane = ruler_response
+                    .interact_pointer_pos()
+                    .map(|p| p.y <= loop_lane_bottom)
+                    .unwrap_or(false);
+                if started_in_loop_lane {
+                    if let Some(pos) = ruler_response.interact_pointer_pos() {
+                        let t = view.t(rect, pos.x).clamp(0.0, max_t);
+                        let anchor = self.snap_secs(t);
+                        self.loop_drag_anchor_secs = Some(anchor);
+                        self.loop_enabled = true;
+                        self.loop_start_secs = anchor;
+                        self.loop_end_secs = anchor;
+                        self.sync_playback_loop();
+                    }
+                } else {
+                    self.loop_drag_anchor_secs = None;
+                }
+            }
+
+            if ruler_response.dragged() {
+                if let Some(anchor) = self.loop_drag_anchor_secs {
+                    if let Some(pos) = ruler_response.interact_pointer_pos() {
+                        let t = view.t(rect, pos.x).clamp(0.0, max_t);
+                        let current = self.snap_secs(t);
+                        self.loop_start_secs = anchor.min(current);
+                        self.loop_end_secs = anchor.max(current);
+                        self.sync_playback_loop();
+                    }
+                }
+            }
+
+            if ruler_response.drag_stopped() && self.loop_drag_anchor_secs.take().is_some() {
+                if self.loop_end_secs - self.loop_start_secs < MIN_LOOP_SECS {
+                    self.loop_end_secs = self.loop_start_secs + MIN_LOOP_SECS;
+                }
+                self.loop_changed();
+            }
+
+            let dragging_loop = self.loop_drag_anchor_secs.is_some();
+            let seek_pos = if !dragging_loop && ruler_response.dragged() {
                 ruler_response.interact_pointer_pos()
             } else if ruler_response.clicked() && !pointer_on_playhead {
                 ruler_response.interact_pointer_pos()
-            } else if pressed && ruler_response.hovered() && !pointer_on_playhead {
+            } else if pressed
+                && ruler_response.hovered()
+                && !pointer_on_playhead
+                && !pointer_in_loop_lane
+            {
                 pointer_pos
             } else {
                 None
@@ -4153,9 +4226,6 @@ impl eframe::App for AppUI {
                 if self.playing || self.recording {
                     self.pause_transport();
                 }
-                // Allow placing the playhead anywhere on screen, including
-                // past the last clip.
-                let max_t = self.timeline_duration().max(view.t(rect, rect.right()));
                 let t = view.t(rect, pos.x).clamp(0.0, max_t);
                 self.playhead_secs = self.snap_secs(t);
             }
