@@ -1,4 +1,5 @@
 use crate::dsp::{peak_and_rms, AudioBuffer};
+use crate::monitor::MonitorBuffer;
 use anyhow::Result;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Sample, SampleFormat, SizedSample, Stream, StreamConfig};
@@ -266,6 +267,8 @@ pub trait AudioBackend: Send + Sync {
     fn set_playback_loop(&self, _range: Option<(u64, u64)>) {}
     /// Update the metronome on the current playback mixer, if any.
     fn set_playback_metronome(&self, _config: Option<crate::playback::MetronomeConfig>) {}
+    /// Enable or disable live input monitoring.
+    fn set_monitoring(&self, _enabled: bool) {}
     /// Peak and RMS of the most recent input block, if the input stream is
     /// running.
     fn input_level(&self) -> Option<(f32, f32)> {
@@ -301,6 +304,7 @@ pub struct CpalBackend {
     input_running: Arc<Mutex<bool>>,
     input_sender: Arc<Mutex<Option<mpsc::Sender<AudioBuffer>>>>,
     input_level: Arc<Mutex<InputLevel>>,
+    monitor: Arc<Mutex<MonitorBuffer>>,
     output_stream: Arc<Mutex<SendStream>>,
     input_stream: Arc<Mutex<SendStream>>,
     playback: Arc<Mutex<Option<crate::playback::PlaybackMixer>>>,
@@ -325,6 +329,7 @@ impl CpalBackend {
             input_running: Arc::new(Mutex::new(false)),
             input_sender: Arc::new(Mutex::new(None)),
             input_level: Arc::new(Mutex::new(InputLevel::default())),
+            monitor: Arc::new(Mutex::new(MonitorBuffer::new())),
             output_stream: Arc::new(Mutex::new(SendStream(None))),
             input_stream: Arc::new(Mutex::new(SendStream(None))),
             playback: Arc::new(Mutex::new(None)),
@@ -476,11 +481,12 @@ impl AudioBackend for CpalBackend {
         let running = Arc::clone(&self.running);
         let error_logger = Arc::clone(&self.error_logger);
         let playback = Arc::clone(&self.playback);
+        let monitor = Arc::clone(&self.monitor);
 
         let stream = match config.sample_format() {
-            cpal::SampleFormat::F32 => build_stream::<f32>(&device, &config.into(), &running, &playback, &error_logger)?,
-            cpal::SampleFormat::I16 => build_stream::<i16>(&device, &config.into(), &running, &playback, &error_logger)?,
-            cpal::SampleFormat::U16 => build_stream::<u16>(&device, &config.into(), &running, &playback, &error_logger)?,
+            cpal::SampleFormat::F32 => build_stream::<f32>(&device, &config.into(), &running, &playback, &monitor, &error_logger)?,
+            cpal::SampleFormat::I16 => build_stream::<i16>(&device, &config.into(), &running, &playback, &monitor, &error_logger)?,
+            cpal::SampleFormat::U16 => build_stream::<u16>(&device, &config.into(), &running, &playback, &monitor, &error_logger)?,
             _ => return Err(anyhow::anyhow!("Unsupported sample format")),
         };
 
@@ -566,15 +572,20 @@ impl AudioBackend for CpalBackend {
         let running = Arc::clone(&self.input_running);
         let sender_clone = Arc::clone(&sender);
         let level = Arc::clone(&self.input_level);
+        let monitor = Arc::clone(&self.monitor);
         let error_logger = Arc::clone(&self.error_logger);
+        self.monitor
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .configure(actual_rate, actual_channels);
 
         let stream = match supported_config.sample_format() {
-            SampleFormat::F32 => build_input_stream::<f32, _>(&device, &stream_config, &running, sender_clone, &level, &error_logger, |s| s)?,
-            SampleFormat::I16 => build_input_stream::<i16, _>(&device, &stream_config, &running, sender_clone, &level, &error_logger, |s| s as f32 / 32768.0)?,
-            SampleFormat::I32 => build_input_stream::<i32, _>(&device, &stream_config, &running, sender_clone, &level, &error_logger, |s| s as f32 / 2147483648.0)?,
-            SampleFormat::U16 => build_input_stream::<u16, _>(&device, &stream_config, &running, sender_clone, &level, &error_logger, |s| (s as f32 - 32768.0) / 32768.0)?,
-            SampleFormat::U32 => build_input_stream::<u32, _>(&device, &stream_config, &running, sender_clone, &level, &error_logger, |s| (s as f64 - 2147483648.0) as f32 / 2147483648.0)?,
-            SampleFormat::F64 => build_input_stream::<f64, _>(&device, &stream_config, &running, sender_clone, &level, &error_logger, |s| s as f32)?,
+            SampleFormat::F32 => build_input_stream::<f32, _>(&device, &stream_config, &running, sender_clone, &level, &monitor, &error_logger, |s| s)?,
+            SampleFormat::I16 => build_input_stream::<i16, _>(&device, &stream_config, &running, sender_clone, &level, &monitor, &error_logger, |s| s as f32 / 32768.0)?,
+            SampleFormat::I32 => build_input_stream::<i32, _>(&device, &stream_config, &running, sender_clone, &level, &monitor, &error_logger, |s| s as f32 / 2147483648.0)?,
+            SampleFormat::U16 => build_input_stream::<u16, _>(&device, &stream_config, &running, sender_clone, &level, &monitor, &error_logger, |s| (s as f32 - 32768.0) / 32768.0)?,
+            SampleFormat::U32 => build_input_stream::<u32, _>(&device, &stream_config, &running, sender_clone, &level, &monitor, &error_logger, |s| (s as f64 - 2147483648.0) as f32 / 2147483648.0)?,
+            SampleFormat::F64 => build_input_stream::<f64, _>(&device, &stream_config, &running, sender_clone, &level, &monitor, &error_logger, |s| s as f32)?,
             other => return Err(anyhow::anyhow!("Unsupported sample format: {:?}", other)),
         };
 
@@ -600,6 +611,9 @@ fn stop_input_stream(&self) -> Result<()> {
         }
         if let Ok(mut level) = self.input_level.lock() {
             *level = InputLevel::default();
+        }
+        if let Ok(mut monitor) = self.monitor.lock() {
+            monitor.set_enabled(false);
         }
         Ok(())
     }
@@ -628,6 +642,13 @@ fn stop_input_stream(&self) -> Result<()> {
         {
             mixer.set_metronome(config);
         }
+    }
+
+    fn set_monitoring(&self, enabled: bool) {
+        self.monitor
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .set_enabled(enabled);
     }
 
     fn input_level(&self) -> Option<(f32, f32)> {
@@ -659,6 +680,7 @@ fn build_stream<T>(
     config: &StreamConfig,
     running: &Arc<Mutex<bool>>,
     playback: &Arc<Mutex<Option<crate::playback::PlaybackMixer>>>,
+    monitor: &Arc<Mutex<MonitorBuffer>>,
     error_logger: &Arc<RateLimitedLogger>,
 ) -> Result<Stream>
 where
@@ -670,6 +692,9 @@ where
     };
     let running = Arc::clone(running);
     let playback = Arc::clone(playback);
+    let monitor = Arc::clone(monitor);
+    let out_channels = config.channels as usize;
+    let mut scratch: Vec<f32> = Vec::new();
 
     let stream = device.build_output_stream(
         config,
@@ -681,14 +706,39 @@ where
                 }
             }
 
-            let mut playback_guard = playback.lock().unwrap_or_else(|e| e.into_inner());
-            match playback_guard.as_mut() {
-                Some(mixer) => mixer.fill(data),
-                None => {
-                    for sample in data.iter_mut() {
-                        *sample = T::from_sample(0.0f32);
+            let frames = data.len() / out_channels;
+            let needed = frames * out_channels;
+            if scratch.len() < needed {
+                scratch.resize(needed, 0.0);
+            }
+            scratch[..needed].fill(0.0);
+
+            // Playback mixdown (no device limiter yet; we clamp below once the
+            // input monitor has been added).
+            {
+                let mut playback_guard = playback.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(mixer) = playback_guard.as_mut() {
+                    mixer.fill_unclamped(&mut scratch[..needed]);
+                }
+            }
+
+            // Mix the live input while monitoring is enabled.
+            if let Ok(mut monitor) = monitor.lock() {
+                if monitor.is_enabled() {
+                    let mut input_frame = [0.0f32; 2];
+                    for frame in 0..frames {
+                        if monitor.read_frame(&mut input_frame) {
+                            for channel in 0..out_channels {
+                                let source = input_frame[channel.min(1)];
+                                scratch[frame * out_channels + channel] += source;
+                            }
+                        }
                     }
                 }
+            }
+
+            for (index, sample) in data.iter_mut().enumerate() {
+                *sample = T::from_sample(scratch[index].clamp(-1.0, 1.0));
             }
         },
         err_fn,
@@ -704,6 +754,7 @@ fn build_input_stream<T, F>(
     running: &Arc<Mutex<bool>>,
     sender: Arc<Mutex<Option<mpsc::Sender<AudioBuffer>>>>,
     level: &Arc<Mutex<InputLevel>>,
+    monitor: &Arc<Mutex<MonitorBuffer>>,
     error_logger: &Arc<RateLimitedLogger>,
     convert: F,
 ) -> Result<Stream>
@@ -718,6 +769,7 @@ where
     let running = Arc::clone(running);
     let sender = Arc::clone(&sender);
     let level = Arc::clone(level);
+    let monitor = Arc::clone(monitor);
     let channels = config.channels as usize;
 
     let stream = device.build_input_stream(
@@ -736,6 +788,9 @@ where
                         if let Ok(mut meter) = level.lock() {
                             meter.peak = peak;
                             meter.rms = rms;
+                        }
+                        if let Ok(mut monitor) = monitor.lock() {
+                            monitor.push(&buffer.data);
                         }
                         let _ = tx.send(buffer);
                     }

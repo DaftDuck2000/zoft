@@ -11,6 +11,7 @@ pub mod plugin_host;
 pub mod bwf_writer;
 pub mod waveform;
 pub mod playback;
+pub mod monitor;
 
 pub use audio_backend::*;
 pub use process_graph::*;
@@ -23,6 +24,7 @@ pub use plugin_host::*;
 pub use bwf_writer::*;
 pub use waveform::*;
 pub use playback::*;
+pub use monitor::*;
 
 use crate::audio_backend::AudioBackend;
 use crate::playback::{MetronomeConfig, PlayableClip, PlaybackMixer};
@@ -276,6 +278,11 @@ impl AudioEngine {
     /// running (used by the recording level meter).
     pub fn input_level(&self) -> Option<(f32, f32)> {
         self.backend.input_level()
+    }
+
+    /// Enable or disable live input monitoring to the output device.
+    pub fn set_monitoring(&self, enabled: bool) {
+        self.backend.set_monitoring(enabled);
     }
 }
 

@@ -36,6 +36,7 @@
 - Input device selection dropdown in transport bar
 - Background writer task with tokio for BWF writing
 - Recording level meter in the transport bar (pre-fader peak + RMS from the input stream)
+- Input monitoring: track **Mon** cycles Off/Auto/On and mixes the input into the output while the input stream is open (during a take); the mode is undoable
 
 **1.2 Waveform Rendering** - `[~]` In Progress
 - Overview (min/max + RMS) pre-computed per audio file, stored and serialized with the project
@@ -54,10 +55,11 @@
 - Click the lower ruler (or drag it) to seek; the playhead follows the current snap grid (hold Alt to bypass), and seeking during playback/recording pauses the transport
 - Timeline ruler defaults to musical bars/beats (labels like `3.2`), switchable to clock time with the Ruler dropdown; the time-signature picker in the transport bar (4/4, 3/4, 6/8, …) drives bar length, ruler labels and the snap grid
 - Recording arms on ● and only captures from the moment the transport (Space/▶) rolls, so a take's length matches the playhead travel; pausing ends the take and shows the waveform right away
+- Input monitoring: the track **Mon** button cycles Off → Auto (monitor when armed or recording) → On; while the input stream is open (during a take) the live input is mixed into the output
 - Transport loop: drag in the ruler's upper loop lane to set the range (or use **In**/**Out** at the playhead), then **Loop** repeats it; the engine wraps sample-accurately at the loop end and the ruler highlights the range
 - Metronome **Click** toggle with accented downbeats, following the project tempo and time signature
 - Tempo field (drag or type BPM) and **Tap** tempo; both are undoable and update the metronome live
-- Not yet: input monitoring while recording, transport scrub
+- Not yet: transport scrub
 
 **1.3 Non-Destructive Clip Editing** - `[~]` In Progress
 - Drag clips to move them (horizontal + between tracks) with snapping: Off / Bar / Beat (default) / 1/8 / 1/16 (hold Alt to bypass)

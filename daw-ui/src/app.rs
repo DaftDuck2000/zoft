@@ -4,7 +4,7 @@ use anyhow::Result;
 use daw_core::audio_pool::AudioFileRef;
 use daw_core::clip::{AudioClip, ClipId, Fade, FadeCurve, TimeStretchMode, TimelinePos};
 use daw_core::project::{BitDepth, Color};
-use daw_core::track::TrackId;
+use daw_core::track::{MonitorMode, TrackId};
 use daw_core::undo::History;
 use daw_core::Project;
 use daw_core::WaveformOverview;
@@ -210,6 +210,7 @@ struct TrackShape {
     solo: bool,
     record_arm: bool,
     volume: f32,
+    monitor_mode: MonitorMode,
 }
 
 impl TrackShape {
@@ -219,6 +220,7 @@ impl TrackShape {
             solo: track.solo,
             record_arm: track.record_arm,
             volume: track.volume,
+            monitor_mode: track.monitor_mode,
         }
     }
 
@@ -227,6 +229,7 @@ impl TrackShape {
         track.solo = self.solo;
         track.record_arm = self.record_arm;
         track.set_volume(self.volume);
+        track.monitor_mode = self.monitor_mode;
     }
 }
 
@@ -502,6 +505,13 @@ impl EditAction {
                     .to_string()
                 } else if from.volume != to.volume {
                     "Track volume".to_string()
+                } else if from.monitor_mode != to.monitor_mode {
+                    match to.monitor_mode {
+                        MonitorMode::Off => "Monitor off",
+                        MonitorMode::Auto => "Monitor auto",
+                        MonitorMode::On => "Monitor on",
+                    }
+                    .to_string()
                 } else {
                     "Track change".to_string()
                 }
@@ -818,6 +828,7 @@ impl AppUI {
         // Projects loaded from disk may predate stored overviews; generate any
         // that are missing in the background.
         app.spawn_missing_overviews();
+        app.sync_monitoring();
         app
     }
 
@@ -1156,6 +1167,19 @@ impl AppUI {
         }
     }
 
+    /// Enable live input monitoring when any track asks for it: `On` always,
+    /// `Auto` while the track is armed or a take is running.
+    fn sync_monitoring(&self) {
+        let enabled = self.project.tracks.values().any(|track| {
+            match track.monitor_mode {
+                MonitorMode::Off => false,
+                MonitorMode::Auto => track.record_arm || self.recording,
+                MonitorMode::On => true,
+            }
+        });
+        self.engine.set_monitoring(enabled);
+    }
+
     fn push_undo(&mut self, action: EditAction, merge: bool) {
         // Merge continuous edits of the same clip (e.g. dragging a gain slider)
         // into a single history entry while the pointer stays down.
@@ -1255,6 +1279,7 @@ impl AppUI {
         if self.undo_step() {
             self.after_edit();
             self.refresh_playback_if_playing();
+            self.sync_monitoring();
         }
     }
 
@@ -1262,6 +1287,7 @@ impl AppUI {
         if self.redo_step() {
             self.after_edit();
             self.refresh_playback_if_playing();
+            self.sync_monitoring();
         }
     }
 
@@ -1295,6 +1321,7 @@ impl AppUI {
         while self.history.past_len() < past_len && self.redo_step() {}
         self.after_edit();
         self.refresh_playback_if_playing();
+        self.sync_monitoring();
     }
 
     /// Hit-test a pointer position against drawn clips and choose the gesture
@@ -3855,6 +3882,30 @@ impl eframe::App for AppUI {
                             after.record_arm = !after.record_arm;
                         }
 
+                        let monitor_color = match after.monitor_mode {
+                            MonitorMode::Off => egui::Color32::GRAY,
+                            MonitorMode::Auto => egui::Color32::YELLOW,
+                            MonitorMode::On => egui::Color32::GREEN,
+                        };
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new("Mon").color(monitor_color),
+                                )
+                                .min_size([30.0, 20.0].into()),
+                            )
+                            .on_hover_text(
+                                "Input monitoring: Off → Auto (armed or recording) → On",
+                            )
+                            .clicked()
+                        {
+                            after.monitor_mode = match after.monitor_mode {
+                                MonitorMode::Off => MonitorMode::Auto,
+                                MonitorMode::Auto => MonitorMode::On,
+                                MonitorMode::On => MonitorMode::Off,
+                            };
+                        }
+
                         ui.add_sized(
                             [80.0, 18.0],
                             egui::Slider::new(&mut after.volume, 0.0..=1.5).show_value(false),
@@ -3865,7 +3916,9 @@ impl eframe::App for AppUI {
                     if after != before {
                         let volume_only = after.mute == before.mute
                             && after.solo == before.solo
-                            && after.record_arm == before.record_arm;
+                            && after.record_arm == before.record_arm
+                            && after.monitor_mode == before.monitor_mode
+                            && (after.volume - before.volume).abs() > f32::EPSILON;
                         track_changes.push((*track_id, before, after, volume_only));
                     }
                 }
@@ -3883,6 +3936,7 @@ impl eframe::App for AppUI {
                     self.refresh_playback_if_playing();
                 }
             }
+            self.sync_monitoring();
 
             // ---- Trash browser ----
             // Deleting a clip only detaches it from its track; the audio and
@@ -4904,6 +4958,7 @@ impl AppUI {
             self.record_start_secs = Some(self.playhead_secs);
             self.error_message = None;
         }
+        self.sync_monitoring();
     }
 
     /// Stop an active recording and add the finished file to the timeline as an
@@ -4920,6 +4975,7 @@ impl AppUI {
             Ok(None) => {}
             Err(e) => self.error_message = Some(format!("Failed to stop recording: {}", e)),
         }
+        self.sync_monitoring();
     }
 
     fn create_audio_clip(&mut self, track_id: TrackId, file_path: PathBuf, start_sample: u64) {
@@ -5855,7 +5911,7 @@ mod tests {
         processed_file_stem, render_pitch_stretch, reverse_interleaved, saturate,
         tape_stretch_interleaved, tremolo, wav_file_info, wav_peak, write_wav_f32,
         write_wav_range, write_wav_range_with_envelope, ClipShape, ClipSourceState, EditAction,
-        FilterKind, TrackShape,
+        FilterKind, MonitorMode, TrackShape,
     };
     use daw_core::audio_pool::AudioFileRef;
     use daw_core::clip::{AudioClip, ClipId, Fade, FadeCurve, TimeStretchMode, TimelinePos};
@@ -5928,6 +5984,7 @@ mod tests {
             solo: false,
             record_arm: false,
             volume: 1.0,
+            monitor_mode: MonitorMode::Off,
         };
 
         let mut muted = base;
@@ -5972,6 +6029,15 @@ mod tests {
             to: louder,
         };
         assert_eq!(action.description(), "Track volume");
+
+        let mut monitoring = base;
+        monitoring.monitor_mode = MonitorMode::Auto;
+        let action = EditAction::TrackState {
+            track_id,
+            from: base,
+            to: monitoring,
+        };
+        assert_eq!(action.description(), "Monitor auto");
     }
 
     #[test]
