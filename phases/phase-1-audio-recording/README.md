@@ -68,9 +68,10 @@
 - Next: the remaining 1.4 processing operations (consolidate, bounce, stretch modes, LUFS normalize)
 
 **1.4 Clip Processing** - `[~]` In Progress
-- Right-click a clip to open a floating **Audio Effects** window: choose an effect from the list (Normalize, Gain & Fades, Reverse, Pitch Shift, Time Stretch), adjust parameters, then press **Apply**
+- Right-click a clip to open a floating **Audio Effects** window: choose an effect from the list (Normalize, Bake into Clip, Reverse, Pitch Shift, Time Stretch, Bit Crusher, Saturation, Filter, Tremolo), adjust parameters, then press **Apply**
 - Peak Normalize (to −1 dBFS) is a gain edit and fully undoable
-- Gain & Fades bakes the clip's gain and fade envelopes into a new `*_process_<uuid>.wav`, then resets the gain/fades; undo restores them
+- Bake into Clip bakes the clip's gain and fade envelopes into a new `*_process_<uuid>.wav`, then resets the gain/fades; undo restores them
+- Bit Crusher, Saturation, Filter and Tremolo render creative effects to a new file while preserving clip gain, fades, position and track; all are undoable
 - Reverse renders the clip's visible audio backwards to a new `*_reverse_<uuid>.wav` (original file untouched) and repoints the clip; undoable
 - Pitch shift (±12 semitones) and time stretch (0.5×–2.0×) rendered through Rubber Band R3, with optional formant preservation; clip length follows the rendered audio and undo restores the original source
 - The window stays open, so effects can be applied in sequence; the top bar keeps only clip gain, fades and color

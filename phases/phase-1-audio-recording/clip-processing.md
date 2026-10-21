@@ -8,17 +8,21 @@
 ## Depends On: 1.2
 
 ## Description
-Offline clip processing: gain, pitch shift, time stretch, reverse, normalize. Non-destructive — creates new audio files, original preserved.
+Offline clip processing: gain, pitch shift, time stretch, reverse, normalize, bit crush, saturation, filtering and tremolo. Non-destructive — creates new audio files, original preserved.
 
 ## Requirements
 
-- [x] Clip gain: Apply gain to create new rendered file (combined with fades in the Gain & Fades effect)
+- [x] Clip gain: Apply gain to create new rendered file (combined with fades in the Bake into Clip effect)
 - [x] Pitch shift: Semitone slider with optional formant preservation (Rubber Band R3)
 - [x] Time stretch: 0.5×–2.0× via Rubber Band R3
 - [ ] Time-stretch modes: tape / elastic / musical presets
 - [x] Reverse: Render the clip backwards to a new file (original preserved)
 - [x] Normalize: Peak to −1 dBFS, per clip
-- [x] Fade in/out render: Bake fades into new file (Gain & Fades effect)
+- [x] Fade in/out render: Bake fades into new file (Bake into Clip effect)
+- [x] Bit Crusher: bit-depth reduction and sample-and-hold decimation
+- [x] Saturation: soft-clip drive with dry/wet mix
+- [x] Filter: low-pass or high-pass cutoff
+- [x] Tremolo: rate and depth modulation
 - [ ] Consolidate: Merge adjacent clips on same track into one file
 - [ ] Bounce in place: Render clip with inserts/sends to new file
 - [x] Audio Effects window: right-click a clip, choose an effect from the list, adjust parameters, then press Apply
@@ -49,15 +53,24 @@ Offline clip processing: gain, pitch shift, time stretch, reverse, normalize. No
   controls reset after a successful apply. Rubber Band must be available in
   `PATH`.
 - **Audio Effects window**: right-click a clip in the arrange view to open a
-  floating window with the effect list (Normalize, Gain & Fades, Reverse, Pitch
-  Shift, Time Stretch). The selected effect shows its parameters and a single
-  **Apply** button. The window stays open, so several effects can be applied in
-  sequence.
-- **Gain & Fades**: renders the visible source range with the clip gain and
+  floating window with the effect list (Normalize, Bake into Clip, Reverse,
+  Pitch Shift, Time Stretch, Bit Crusher, Saturation, Filter, Tremolo). The
+  selected effect shows its parameters and a single **Apply** button. The
+  window stays open, so several effects can be applied in sequence.
+- **Bake into Clip**: renders the visible source range with the clip gain and
   fade-in/fade-out envelopes applied, matching the playback mixer's envelope.
   The output is a new `<name>_process_<uuid>.wav`; the clip then points at it
   with gain reset to 0 dB and fades removed. Undo restores the previous source,
   offset, length, fades and gain via a `Source` entry.
+- **Bit Crusher**: quantizes samples to 1–16 bits and holds them for 1–64
+  frames, producing digital aliasing and crunch.
+- **Saturation**: tanh soft clipping with 0–36 dB drive and a dry/wet mix.
+- **Filter**: first-order low-pass or high-pass with a logarithmic 20 Hz–20 kHz
+  cutoff. The cutoff is clamped below Nyquist on render.
+- **Tremolo**: sine amplitude modulation with 0.1–20 Hz rate and 0–100 % depth.
+- The creative effects preserve the clip's gain, fades, timeline position and
+  track; undo/redo uses the same `Source` state as the other file-rendering
+  operations.
 
 ### Processing Pipeline
 ```rust
@@ -125,5 +138,6 @@ enum NormalizeMode {
 - 2026-10-21: Pitch shift (±12 st) and time stretch (0.5×–2.0×) via Rubber Band R3, with optional formant preservation and undoable source replacement
 - 2026-10-21: Snap grid defaults to Beat
 - 2026-10-21: Right-click opens a floating Audio Effects window with an effect list and one Apply button (replaces the inline processing controls and context menu)
-- 2026-10-21: Gain & Fades effect bakes clip gain and fade envelopes into a new WAV, resets the clip's gain/fades, and is undoable
-- Remaining: listening tests for pitch/time, stretch mode presets, consolidate, bounce in place, LUFS normalize
+- 2026-10-21: Bake into Clip (formerly Gain & Fades) bakes clip gain and fade envelopes into a new WAV, resets the clip's gain/fades, and is undoable
+- 2026-10-21: Added Bit Crusher, Saturation, Filter and Tremolo effect processors; renamed the gain/fade bake action to Bake into Clip
+- Remaining: listening tests for pitch/time and creative effects, stretch mode presets, consolidate, bounce in place, LUFS normalize

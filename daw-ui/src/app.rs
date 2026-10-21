@@ -281,28 +281,55 @@ enum DragMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EffectKind {
     Normalize,
-    GainFades,
+    BakeIntoClip,
     Reverse,
     PitchShift,
     TimeStretch,
+    BitCrusher,
+    Saturation,
+    Filter,
+    Tremolo,
 }
 
 impl EffectKind {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 9] = [
         Self::Normalize,
-        Self::GainFades,
+        Self::BakeIntoClip,
         Self::Reverse,
         Self::PitchShift,
         Self::TimeStretch,
+        Self::BitCrusher,
+        Self::Saturation,
+        Self::Filter,
+        Self::Tremolo,
     ];
 
     fn label(self) -> &'static str {
         match self {
             Self::Normalize => "Normalize",
-            Self::GainFades => "Gain & Fades",
+            Self::BakeIntoClip => "Bake into Clip",
             Self::Reverse => "Reverse",
             Self::PitchShift => "Pitch Shift",
             Self::TimeStretch => "Time Stretch",
+            Self::BitCrusher => "Bit Crusher",
+            Self::Saturation => "Saturation",
+            Self::Filter => "Filter",
+            Self::Tremolo => "Tremolo",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FilterKind {
+    LowPass,
+    HighPass,
+}
+
+impl FilterKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::LowPass => "Low-pass",
+            Self::HighPass => "High-pass",
         }
     }
 }
@@ -315,6 +342,14 @@ struct EffectsWindow {
     pitch: f32,
     stretch: f32,
     formants: bool,
+    crush_bits: u32,
+    crush_downsample: u32,
+    drive_db: f32,
+    saturation_mix: f32,
+    filter_kind: FilterKind,
+    filter_cutoff: f32,
+    tremolo_rate: f32,
+    tremolo_depth: f32,
 }
 
 impl EffectsWindow {
@@ -325,6 +360,14 @@ impl EffectsWindow {
             pitch: 0.0,
             stretch: 1.0,
             formants: true,
+            crush_bits: 8,
+            crush_downsample: 4,
+            drive_db: 12.0,
+            saturation_mix: 100.0,
+            filter_kind: FilterKind::LowPass,
+            filter_cutoff: 8_000.0,
+            tremolo_rate: 5.0,
+            tremolo_depth: 50.0,
         }
     }
 }
@@ -1363,7 +1406,7 @@ impl AppUI {
 
     /// Bake the clip's gain and fade curves into a new WAV, then reset the
     /// non-destructive gain/fade settings so they are not applied twice.
-    fn apply_gain_fades(&mut self, clip_id: ClipId) -> bool {
+    fn bake_into_clip(&mut self, clip_id: ClipId) -> bool {
         let Some(clip) = self.project.audio_clips.get(clip_id) else {
             return false;
         };
@@ -1552,6 +1595,88 @@ impl AppUI {
             length: frames,
             fade_in,
             fade_out,
+            gain: from.gain,
+        };
+        if let Some(clip) = self.project.audio_clips.get_mut(clip_id) {
+            to.apply(clip);
+        }
+        self.push_undo(EditAction::Source { clip_id, from, to }, false);
+        self.error_message = None;
+        self.after_edit();
+        self.refresh_playback_if_playing();
+        self.spawn_overview(clip_id, output_path);
+        true
+    }
+
+    /// Apply an offline effect to the clip's visible source range and point the
+    /// clip at a new rendered WAV. Gain, fades and placement are preserved.
+    fn render_clip_effect<F>(&mut self, clip_id: ClipId, mut process: F) -> bool
+    where
+        F: FnMut(&mut [f32], u16, u32),
+    {
+        let Some(clip) = self.project.audio_clips.get(clip_id) else {
+            return false;
+        };
+        if clip.locked || clip.length == 0 {
+            return false;
+        }
+
+        let from = ClipSourceState::of(clip);
+        let source_path = clip.source.path.clone();
+        let source_offset = clip.source_offset;
+        let source_length = clip.length;
+
+        let (mut samples, channels, sample_rate) = match load_wav_range_interleaved(
+            &source_path,
+            source_offset,
+            source_length,
+        ) {
+            Ok(range) => range,
+            Err(e) => {
+                self.error_message =
+                    Some(format!("Could not read clip audio: {}", e));
+                return false;
+            }
+        };
+        if samples.is_empty() || channels == 0 {
+            self.error_message = Some("The clip has no audio to process.".to_string());
+            return false;
+        }
+
+        process(&mut samples, channels, sample_rate);
+        let channel_count = channels as usize;
+        let frames = samples.len() as u64 / channel_count as u64;
+        if frames == 0 {
+            self.error_message = Some("The processed audio is empty.".to_string());
+            return false;
+        }
+        samples.truncate(frames as usize * channel_count);
+
+        let parent = source_path.parent().unwrap_or_else(|| Path::new(""));
+        let output_path = parent.join(format!(
+            "{}_process_{}.wav",
+            processed_file_stem(&source_path),
+            uuid::Uuid::new_v4()
+        ));
+        if let Err(e) = write_wav_f32(&output_path, &samples, channels, sample_rate) {
+            let _ = std::fs::remove_file(&output_path);
+            self.error_message = Some(format!("Could not write processed audio: {}", e));
+            return false;
+        }
+
+        let new_source = AudioFileRef::new(
+            output_path.clone(),
+            frames,
+            sample_rate,
+            channels,
+            BitDepth::Float32,
+        );
+        let to = ClipSourceState {
+            source: new_source,
+            source_offset: 0,
+            length: frames,
+            fade_in: from.fade_in,
+            fade_out: from.fade_out,
             gain: from.gain,
         };
         if let Some(clip) = self.project.audio_clips.get_mut(clip_id) {
@@ -1851,14 +1976,14 @@ impl AppUI {
                                     "Set the clip gain so its loudest sample peaks at −1 dBFS.",
                                 );
                             }
-                            EffectKind::GainFades => {
-                                ui.label(egui::RichText::new("Gain & Fades").strong());
+                            EffectKind::BakeIntoClip => {
+                                ui.label(egui::RichText::new("Bake into Clip").strong());
                                 ui.label(format!("Gain: {:+.1} dB", clip_gain_db));
                                 ui.label(format!("Fade in: {:.2} s", clip_fade_in_secs));
                                 ui.label(format!("Fade out: {:.2} s", clip_fade_out_secs));
                                 ui.weak(
-                                    "Bakes the gain and fades into a new audio file, then \
-                                     resets the clip's gain to 0 dB and removes the fades.",
+                                    "Bakes the clip's gain and fades into a new audio file, then \
+                                     resets the gain to 0 dB and removes the fades.",
                                 );
                             }
                             EffectKind::Reverse => {
@@ -1891,16 +2016,111 @@ impl AppUI {
                                 }
                                 ui.weak("Changes the clip length in place; pitch is unchanged.");
                             }
+                            EffectKind::BitCrusher => {
+                                ui.label(egui::RichText::new("Bit Crusher").strong());
+                                ui.add(
+                                    egui::Slider::new(&mut window.crush_bits, 1..=16)
+                                        .suffix(" bits"),
+                                );
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut window.crush_downsample,
+                                        1..=64,
+                                    )
+                                    .suffix("× hold"),
+                                );
+                                ui.weak(
+                                    "Reduces the bit depth and holds samples for a crunchy, \
+                                     digital character.",
+                                );
+                            }
+                            EffectKind::Saturation => {
+                                ui.label(egui::RichText::new("Saturation").strong());
+                                ui.add(
+                                    egui::Slider::new(&mut window.drive_db, 0.0..=36.0)
+                                        .suffix(" dB")
+                                        .max_decimals(1),
+                                );
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut window.saturation_mix,
+                                        0.0..=100.0,
+                                    )
+                                    .suffix(" %")
+                                    .max_decimals(0),
+                                );
+                                ui.weak(
+                                    "Soft clipping adds harmonics. Mix blends the saturated \
+                                     signal with the dry audio.",
+                                );
+                            }
+                            EffectKind::Filter => {
+                                ui.label(egui::RichText::new("Filter").strong());
+                                ui.horizontal(|ui| {
+                                    ui.label("Type:");
+                                    egui::ComboBox::from_id_salt("effect_filter_kind")
+                                        .selected_text(window.filter_kind.label())
+                                        .width(110.0)
+                                        .show_ui(ui, |ui| {
+                                            ui.selectable_value(
+                                                &mut window.filter_kind,
+                                                FilterKind::LowPass,
+                                                FilterKind::LowPass.label(),
+                                            );
+                                            ui.selectable_value(
+                                                &mut window.filter_kind,
+                                                FilterKind::HighPass,
+                                                FilterKind::HighPass.label(),
+                                            );
+                                        });
+                                });
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut window.filter_cutoff,
+                                        20.0..=20_000.0,
+                                    )
+                                    .suffix(" Hz")
+                                    .logarithmic(true)
+                                    .max_decimals(0),
+                                );
+                                ui.weak(
+                                    "First-order filter. Cutoff is clamped below Nyquist on \
+                                     render.",
+                                );
+                            }
+                            EffectKind::Tremolo => {
+                                ui.label(egui::RichText::new("Tremolo").strong());
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut window.tremolo_rate,
+                                        0.1..=20.0,
+                                    )
+                                    .suffix(" Hz")
+                                    .max_decimals(2),
+                                );
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut window.tremolo_depth,
+                                        0.0..=100.0,
+                                    )
+                                    .suffix(" %")
+                                    .max_decimals(0),
+                                );
+                                ui.weak("Modulates the clip volume at the chosen rate.");
+                            }
                         }
 
                         ui.add_space(10.0);
                         let can_apply = match window.selected {
                             EffectKind::Normalize | EffectKind::Reverse => true,
-                            EffectKind::GainFades => has_gain_fades,
+                            EffectKind::BakeIntoClip => has_gain_fades,
                             EffectKind::PitchShift => window.pitch.abs() >= 0.05,
                             EffectKind::TimeStretch => {
                                 (window.stretch - 1.0).abs() >= 0.005
                             }
+                            EffectKind::BitCrusher | EffectKind::Filter => true,
+                            EffectKind::Saturation => window.saturation_mix > 0.0,
+                            EffectKind::Tremolo => window.tremolo_depth > 0.0,
                         };
                         if ui
                             .add_enabled(can_apply, egui::Button::new("Apply"))
@@ -1920,8 +2140,8 @@ impl AppUI {
         if apply {
             match window.selected {
                 EffectKind::Normalize => self.normalize_clip(window.clip_id),
-                EffectKind::GainFades => {
-                    self.apply_gain_fades(window.clip_id);
+                EffectKind::BakeIntoClip => {
+                    self.bake_into_clip(window.clip_id);
                 }
                 EffectKind::Reverse => self.reverse_clip(window.clip_id),
                 EffectKind::PitchShift => {
@@ -1938,6 +2158,46 @@ impl AppUI {
                     if self.apply_pitch_stretch(window.clip_id, 0.0, window.stretch, false) {
                         window.stretch = 1.0;
                     }
+                }
+                EffectKind::BitCrusher => {
+                    let bits = window.crush_bits;
+                    let downsample = window.crush_downsample;
+                    self.render_clip_effect(
+                        window.clip_id,
+                        move |samples, channels, _sample_rate| {
+                            bit_crush(samples, channels, bits, downsample);
+                        },
+                    );
+                }
+                EffectKind::Saturation => {
+                    let drive_db = window.drive_db;
+                    let mix = window.saturation_mix / 100.0;
+                    self.render_clip_effect(
+                        window.clip_id,
+                        move |samples, _channels, _sample_rate| {
+                            saturate(samples, drive_db, mix);
+                        },
+                    );
+                }
+                EffectKind::Filter => {
+                    let kind = window.filter_kind;
+                    let cutoff = window.filter_cutoff;
+                    self.render_clip_effect(
+                        window.clip_id,
+                        move |samples, channels, sample_rate| {
+                            filter_audio(samples, channels, sample_rate, cutoff, kind);
+                        },
+                    );
+                }
+                EffectKind::Tremolo => {
+                    let rate = window.tremolo_rate;
+                    let depth = window.tremolo_depth / 100.0;
+                    self.render_clip_effect(
+                        window.clip_id,
+                        move |samples, channels, sample_rate| {
+                            tremolo(samples, channels, sample_rate, rate, depth);
+                        },
+                    );
                 }
             }
         }
@@ -3715,6 +3975,27 @@ where
     Ok(())
 }
 
+/// Write interleaved samples as a new 32-bit float WAV.
+fn write_wav_f32(
+    path: &Path,
+    samples: &[f32],
+    channels: u16,
+    sample_rate: u32,
+) -> Result<()> {
+    let spec = hound::WavSpec {
+        channels: channels.max(1),
+        sample_rate,
+        bits_per_sample: 32,
+        sample_format: hound::SampleFormat::Float,
+    };
+    let mut writer = hound::WavWriter::create(path, spec)?;
+    for sample in samples {
+        writer.write_sample(*sample)?;
+    }
+    writer.finalize()?;
+    Ok(())
+}
+
 /// Run Rubber Band in fine (R3) mode to pitch-shift and/or time-stretch a WAV.
 fn render_pitch_stretch(
     input: &Path,
@@ -3756,6 +4037,108 @@ fn render_pitch_stretch(
     Ok(())
 }
 
+/// Reduce bit depth and hold samples for a crunchy, digital character.
+fn bit_crush(samples: &mut [f32], channels: u16, bits: u32, downsample: u32) {
+    let channel_count = channels.max(1) as usize;
+    if samples.is_empty() {
+        return;
+    }
+    let bits = bits.clamp(1, 24);
+    let steps = 2f32.powi(bits as i32 - 1);
+    let factor = downsample.max(1) as usize;
+    let frames = samples.len() / channel_count;
+    let mut held = vec![0.0f32; channel_count];
+
+    for frame in 0..frames {
+        let base = frame * channel_count;
+        if frame % factor == 0 {
+            held.copy_from_slice(&samples[base..base + channel_count]);
+        }
+        for channel in 0..channel_count {
+            let quantized =
+                (held[channel].clamp(-1.0, 1.0) * steps).round() / steps;
+            samples[base + channel] = quantized;
+        }
+    }
+}
+
+/// Soft-clip the signal with adjustable drive and dry/wet mix.
+fn saturate(samples: &mut [f32], drive_db: f32, mix: f32) {
+    let mix = mix.clamp(0.0, 1.0);
+    if mix <= 0.0 {
+        return;
+    }
+    let drive = 10f32.powf(drive_db.clamp(0.0, 48.0) / 20.0);
+    let norm = if drive > 1e-3 {
+        drive.tanh().recip()
+    } else {
+        1.0
+    };
+
+    for sample in samples {
+        let dry = *sample;
+        let wet = (dry * drive).tanh() * norm;
+        *sample = dry * (1.0 - mix) + wet * mix;
+    }
+}
+
+/// Apply a first-order low-pass or high-pass filter in place.
+fn filter_audio(
+    samples: &mut [f32],
+    channels: u16,
+    sample_rate: u32,
+    cutoff: f32,
+    kind: FilterKind,
+) {
+    let channel_count = channels.max(1) as usize;
+    if samples.is_empty() {
+        return;
+    }
+    let sample_rate = sample_rate.max(1) as f32;
+    let max_cutoff = (sample_rate * 0.475).max(1.0);
+    let cutoff = cutoff.clamp(1.0, max_cutoff);
+    let alpha = 1.0 - (-2.0 * std::f32::consts::PI * cutoff / sample_rate).exp();
+    let frames = samples.len() / channel_count;
+    let mut state = vec![0.0f32; channel_count];
+
+    for frame in 0..frames {
+        let base = frame * channel_count;
+        for channel in 0..channel_count {
+            let input = samples[base + channel];
+            state[channel] += alpha * (input - state[channel]);
+            samples[base + channel] = match kind {
+                FilterKind::LowPass => state[channel],
+                FilterKind::HighPass => input - state[channel],
+            };
+        }
+    }
+}
+
+/// Modulate clip volume with a sine LFO.
+fn tremolo(samples: &mut [f32], channels: u16, sample_rate: u32, rate: f32, depth: f32) {
+    let channel_count = channels.max(1) as usize;
+    if samples.is_empty() {
+        return;
+    }
+    let depth = depth.clamp(0.0, 1.0);
+    if depth <= 0.0 {
+        return;
+    }
+    let sample_rate = sample_rate.max(1) as f32;
+    let rate = rate.clamp(0.0, sample_rate * 0.5);
+    let frames = samples.len() / channel_count;
+
+    for frame in 0..frames {
+        let t = frame as f32 / sample_rate;
+        let modulation =
+            1.0 - depth * 0.5 * (1.0 - (std::f32::consts::TAU * rate * t).cos());
+        let base = frame * channel_count;
+        for channel in 0..channel_count {
+            samples[base + channel] *= modulation;
+        }
+    }
+}
+
 /// Peak absolute sample of a WAV frame range, without loading the whole file.
 fn wav_peak(path: &Path, first_frame: u64, frames: u64) -> Result<f32> {
     let mut reader = hound::WavReader::open(path)?;
@@ -3790,6 +4173,43 @@ fn wav_peak(path: &Path, first_frame: u64, frames: u64) -> Result<f32> {
     Ok(peak)
 }
 
+/// Read a WAV frame range into interleaved f32 samples.
+fn load_wav_range_interleaved(
+    path: &Path,
+    first_frame: u64,
+    frames: u64,
+) -> Result<(Vec<f32>, u16, u32)> {
+    let mut reader = hound::WavReader::open(path)?;
+    let spec = reader.spec();
+    let total_frames = reader.duration() as u64;
+    let first = first_frame.min(total_frames);
+    let frames = frames.min(total_frames - first);
+    if frames == 0 {
+        anyhow::bail!("no audio in the selected range");
+    }
+    reader.seek(first as u32)?;
+
+    let channels = spec.channels.max(1);
+    let sample_count = (frames * channels as u64) as usize;
+    let samples: Vec<f32> = match spec.sample_format {
+        hound::SampleFormat::Float => reader
+            .samples::<f32>()
+            .take(sample_count)
+            .collect::<std::result::Result<Vec<_>, _>>()?,
+        hound::SampleFormat::Int => {
+            let scale = pcm_scale(spec.bits_per_sample);
+            reader
+                .samples::<i32>()
+                .take(sample_count)
+                .filter_map(std::result::Result::ok)
+                .map(|sample| sample as f32 * scale)
+                .collect()
+        }
+    };
+
+    Ok((samples, channels, spec.sample_rate))
+}
+
 /// Read an entire WAV file into interleaved f32 samples.
 fn load_wav_interleaved(path: &Path) -> Result<(Vec<f32>, u16, u32)> {
     let mut reader = hound::WavReader::open(path)?;
@@ -3815,9 +4235,10 @@ fn load_wav_interleaved(path: &Path) -> Result<(Vec<f32>, u16, u32)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        clip_gain_at, load_wav_interleaved, processed_file_stem, render_pitch_stretch,
-        reverse_interleaved, wav_file_info, wav_peak, write_wav_range,
-        write_wav_range_with_envelope, ClipSourceState,
+        bit_crush, clip_gain_at, filter_audio, load_wav_interleaved,
+        load_wav_range_interleaved, processed_file_stem, render_pitch_stretch,
+        reverse_interleaved, saturate, tremolo, wav_file_info, wav_peak, write_wav_f32,
+        write_wav_range, write_wav_range_with_envelope, ClipSourceState, FilterKind,
     };
     use daw_core::audio_pool::AudioFileRef;
     use daw_core::clip::{AudioClip, Fade, FadeCurve, TimelinePos};
@@ -3953,6 +4374,96 @@ mod tests {
         // Clip gain is applied and limited to the mixer's 4x ceiling.
         assert!((clip_gain_at(50, 100, 0.5, None, None) - 0.5).abs() < 1e-6);
         assert!((clip_gain_at(50, 100, 10.0, None, None) - 4.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn bit_crusher_holds_and_quantizes_samples() {
+        let mut samples = vec![0.6, 0.7, -0.6, 0.8];
+        bit_crush(&mut samples, 1, 1, 2);
+        assert_eq!(samples, vec![1.0, 1.0, -1.0, -1.0]);
+    }
+
+    #[test]
+    fn saturation_mix_zero_is_dry() {
+        let original = vec![0.25, -0.5, 0.9];
+        let mut samples = original.clone();
+        saturate(&mut samples, 24.0, 0.0);
+        assert_eq!(samples, original);
+
+        let mut wet = original;
+        saturate(&mut wet, 24.0, 1.0);
+        assert!(wet.iter().all(|sample| sample.abs() <= 1.0 + 1e-6));
+        assert!(wet[0] > 0.25);
+    }
+
+    #[test]
+    fn filters_low_and_high_pass() {
+        let mut low = vec![1.0; 100];
+        filter_audio(&mut low, 1, 1_000, 100.0, FilterKind::LowPass);
+        assert!(low[0] > 0.0 && low[0] < 1.0);
+        assert!(low[99] > 0.99);
+
+        let mut high = vec![1.0; 100];
+        filter_audio(&mut high, 1, 1_000, 100.0, FilterKind::HighPass);
+        assert!(high[0] > 0.0 && high[0] < 1.0);
+        assert!(high[99].abs() < 0.01);
+    }
+
+    #[test]
+    fn tremolo_modulates_volume_at_the_lfo_rate() {
+        let mut samples = vec![1.0; 1_001];
+        tremolo(&mut samples, 1, 1_000, 1.0, 1.0);
+        assert!((samples[0] - 1.0).abs() < 1e-6);
+        assert!(samples[500].abs() < 1e-6);
+        assert!((samples[1000] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn load_wav_range_reads_selected_frames() {
+        let input = std::env::temp_dir().join(format!(
+            "zoft_load_range_{}.wav",
+            uuid::Uuid::new_v4()
+        ));
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: 48_000,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let mut writer = hound::WavWriter::create(&input, spec).unwrap();
+        for frame in [[0.1f32, -0.2], [0.3, -0.4], [0.5, -0.6]] {
+            writer.write_sample(frame[0]).unwrap();
+            writer.write_sample(frame[1]).unwrap();
+        }
+        writer.finalize().unwrap();
+
+        let (samples, channels, sample_rate) =
+            load_wav_range_interleaved(&input, 1, 2).unwrap();
+        assert_eq!(channels, 2);
+        assert_eq!(sample_rate, 48_000);
+        assert_eq!(samples.len(), 4);
+        for (sample, expected) in samples.iter().zip([0.3f32, -0.4, 0.5, -0.6]) {
+            assert!((sample - expected).abs() < 1e-6);
+        }
+
+        std::fs::remove_file(input).ok();
+    }
+
+    #[test]
+    fn write_wav_f32_round_trips_samples() {
+        let path = std::env::temp_dir().join(format!(
+            "zoft_write_f32_{}.wav",
+            uuid::Uuid::new_v4()
+        ));
+        let expected = vec![0.25f32, -0.5, 0.75];
+        write_wav_f32(&path, &expected, 1, 48_000).unwrap();
+
+        let (samples, channels, sample_rate) = load_wav_interleaved(&path).unwrap();
+        assert_eq!(channels, 1);
+        assert_eq!(sample_rate, 48_000);
+        assert_eq!(samples, expected);
+
+        std::fs::remove_file(path).ok();
     }
 
     #[test]
