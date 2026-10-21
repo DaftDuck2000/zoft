@@ -15,7 +15,7 @@ Implement non-destructive audio clip editing: split, trim, move, copy, delete, f
 - [x] Split clip at playhead (S key)
 - [x] Trim clip edges (drag clip boundaries)
 - [x] Move clips: drag between tracks, snap to grid
-- [x] Copy/paste/duplicate clips (Ctrl+C / Ctrl+V / Ctrl+D)
+- [x] Copy/paste/duplicate clips (Ctrl+C / Ctrl+V / Ctrl+X / Ctrl+D)
 - [x] Delete clips (removed from track but kept in the project pool; undo restores)
 - [x] Fade in/out: drag fade handles, curve types (linear, exp, log, S, equal power)
 - [x] Crossfade: Overlap two clips → automatic equal-power crossfade (mixer + visual overlay)

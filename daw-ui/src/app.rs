@@ -716,6 +716,9 @@ struct AppUI {
     last_tap: Option<std::time::Instant>,
     /// Tempo before a BPM drag, so one drag is one undo entry.
     bpm_edit_from: Option<f32>,
+    /// When the last paste shortcut was handled, used to avoid double-pasting
+    /// when a backend reports both a clipboard event and a key release.
+    last_paste_signal: Option<std::time::Instant>,
     /// Where recording started, so the clip lands at the right spot.
     record_start_secs: Option<f64>,
     /// Armed take waiting for the transport to roll (see `begin_recording`).
@@ -782,6 +785,7 @@ impl AppUI {
             tap_intervals: VecDeque::new(),
             last_tap: None,
             bpm_edit_from: None,
+            last_paste_signal: None,
             record_start_secs: None,
             pending_record_track: None,
             last_playhead_update: std::time::Instant::now(),
@@ -4537,26 +4541,78 @@ impl AppUI {
         let command = modifiers.command || modifiers.ctrl;
 
         if command {
-            // Undo / redo
-            if ctx.input(|i| i.key_pressed(Key::Z)) {
-                if modifiers.shift {
+            // egui-winit turns Ctrl+C/X/V into Clipboard events instead of key
+            // presses, so listen for those as well as ordinary key events.
+            let (
+                undo_pressed,
+                redo_shift_pressed,
+                redo_y_pressed,
+                copy_pressed,
+                cut_pressed,
+                paste_pressed,
+                paste_released,
+                duplicate_pressed,
+            ) = ctx.input(|i| {
+                let has_copy = i
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, egui::Event::Copy));
+                let has_cut = i
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, egui::Event::Cut));
+                let has_paste = i
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, egui::Event::Paste(_)));
+
+                let z_pressed = i.key_pressed(Key::Z);
+                (
+                    z_pressed,
+                    z_pressed && i.modifiers.shift,
+                    i.key_pressed(Key::Y),
+                    has_copy || i.key_pressed(Key::C),
+                    has_cut || i.key_pressed(Key::X),
+                    has_paste || i.key_pressed(Key::V),
+                    (i.modifiers.command || i.modifiers.ctrl) && i.key_released(Key::V),
+                    i.key_pressed(Key::D),
+                )
+            });
+
+            if copy_pressed {
+                self.copy_selected_clip();
+            }
+            if cut_pressed {
+                self.copy_selected_clip();
+                self.delete_selected_clip();
+            }
+            if paste_pressed {
+                self.paste_clip();
+                self.last_paste_signal = Some(std::time::Instant::now());
+            } else if paste_released
+                && self
+                    .last_paste_signal
+                    .map(|instant| instant.elapsed().as_millis() >= 500)
+                    .unwrap_or(true)
+            {
+                // Some backends emit no Paste event when the system clipboard
+                // is empty; the key release still arrives, so use it.
+                self.paste_clip();
+            }
+
+            if duplicate_pressed {
+                self.duplicate_selected_clip();
+            }
+
+            if undo_pressed {
+                if redo_shift_pressed {
                     self.redo();
                 } else {
                     self.undo();
                 }
             }
-            if ctx.input(|i| i.key_pressed(Key::Y)) {
+            if redo_y_pressed {
                 self.redo();
-            }
-            // Clipboard and duplicate
-            if ctx.input(|i| i.key_pressed(Key::C)) {
-                self.copy_selected_clip();
-            }
-            if ctx.input(|i| i.key_pressed(Key::V)) {
-                self.paste_clip();
-            }
-            if ctx.input(|i| i.key_pressed(Key::D)) {
-                self.duplicate_selected_clip();
             }
             return;
         }

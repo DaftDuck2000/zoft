@@ -63,7 +63,7 @@
 - Drag clips to move them (horizontal + between tracks) with snapping: Off / Bar / Beat (default) / 1/8 / 1/16 (hold Alt to bypass)
 - Edge drags trim non-destructively (adjusts `source_offset`/`length`; the WAV file is never touched)
 - Split at the playhead (S) creates a second clip referencing the same source
-- Copy/paste/duplicate (Ctrl+C / Ctrl+V / Ctrl+D); Delete removes the clip from the track (data stays in the pool, undo restores it)
+- Copy/paste/cut/duplicate (Ctrl+C / Ctrl+V / Ctrl+X / Ctrl+D); Delete removes the clip from the track (data stays in the pool, undo restores it)
 - Fade handles in the clip's top corners; clip inspector with fade curve (linear/exp/log/S/equal-power), fade length, gain and color
 - Automatic equal-power crossfade where clips overlap on the same track, with an X overlay in the overlap region; contained clips are layered instead
 - Snap: Off / Bar / Beat (default) / 1/8 / 1/16, optional Relative mode, Alt bypass; the grid follows the chosen time signature
