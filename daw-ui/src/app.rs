@@ -1671,8 +1671,10 @@ impl AppUI {
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
-            .default_width(410.0)
+            .default_width(430.0)
+            .max_width(460.0)
             .show(ctx, |ui| {
+                ui.set_max_width(400.0);
                 ui.horizontal(|ui| {
                     ui.label("Clip:");
                     ui.label(egui::RichText::new(clip_name).strong());
@@ -1695,9 +1697,19 @@ impl AppUI {
                                 .small()
                                 .strong(),
                         );
-                        ui.add_space(2.0);
-                        ui.separator();
-                        ui.add_space(2.0);
+                        ui.add_space(3.0);
+                        // A fixed-width rule keeps the header visually distinct
+                        // without making the window expand to the available width.
+                        let (rule, _) = ui.allocate_exact_size(
+                            egui::vec2(115.0, 1.0),
+                            egui::Sense::hover(),
+                        );
+                        ui.painter().hline(
+                            rule.x_range(),
+                            rule.center().y,
+                            ui.visuals().widgets.noninteractive.bg_stroke,
+                        );
+                        ui.add_space(4.0);
                         for effect in EffectKind::ALL {
                             if ui
                                 .selectable_label(window.selected == effect, effect.label())
