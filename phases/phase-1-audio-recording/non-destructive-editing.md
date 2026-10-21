@@ -115,6 +115,7 @@ fn snap_position(pos: TimelinePos, grid: SnapGrid, relative: bool) -> TimelinePo
 - 2026-10-21: Playback mixer slices clips by source_offset/length so edits are audible
 - 2026-10-21: Musical ruler (bars/beats default, time switchable) and time-signature picker; snapping follows the chosen signature
 - 2026-10-21: Automatic equal-power crossfades where clips partially overlap on the same track (mixer gain envelopes + X overlay)
-- 2026-10-21: Relative snap toggle (moves in grid steps from the clip's original position)
+- 2026-10-21: Relative snap toggle (moves in grid steps from the clip's original position); snap now defaults to Beat
+- 2026-10-21: Reverse renders reuse a stable base filename instead of stacking `_reverse_<uuid>` suffixes
 - 2026-10-21: Trash browser in the track panel; removed clips can be restored to their previous track
 - Remaining: runtime verification of crossfades, relative snap and the trash browser

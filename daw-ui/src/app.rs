@@ -385,7 +385,7 @@ impl AppUI {
             needs_fit: true,
             last_timeline_width: 1000.0,
             selected_clip: None,
-            snap_mode: SnapMode::Off,
+            snap_mode: SnapMode::Beat,
             snap_relative: false,
             ruler_mode: RulerMode::BarsBeats,
             snap_suspended: false,
@@ -1248,12 +1248,7 @@ impl AppUI {
         let reversed = reverse_interleaved(&samples[start..end], channel_count);
 
         let parent = clip.source.path.parent().unwrap_or_else(|| Path::new(""));
-        let stem = clip
-            .source
-            .path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or("clip");
+        let stem = processed_file_stem(&clip.source.path);
         let new_path = parent.join(format!(
             "{}_reverse_{}.wav",
             stem,
@@ -3139,6 +3134,41 @@ fn format_clock(secs: f64) -> String {
     format!("{:02}:{:06.3}", minutes, rem)
 }
 
+/// Strip generated processing suffixes such as `_reverse_<uuid>` so repeated
+/// renders keep a stable base name instead of growing on every operation.
+fn processed_file_stem(path: &Path) -> String {
+    const MARKERS: [&str; 4] = ["_reverse_", "_process_", "_pitch_", "_stretch_"];
+
+    let mut stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("clip")
+        .to_string();
+
+    loop {
+        let mut stripped = false;
+        for marker in MARKERS {
+            if let Some(index) = stem.rfind(marker) {
+                let suffix = &stem[index + marker.len()..];
+                if uuid::Uuid::parse_str(suffix).is_ok() {
+                    stem.truncate(index);
+                    stripped = true;
+                    break;
+                }
+            }
+        }
+        if !stripped {
+            break;
+        }
+    }
+
+    if stem.is_empty() {
+        "clip".to_string()
+    } else {
+        stem
+    }
+}
+
 /// Reverse interleaved audio frame-wise, preserving channel order inside each
 /// frame. A trailing incomplete frame is dropped.
 fn reverse_interleaved(samples: &[f32], channels: usize) -> Vec<f32> {
@@ -3221,7 +3251,23 @@ fn load_wav_interleaved(path: &Path) -> Result<(Vec<f32>, u16, u32)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{reverse_interleaved, wav_peak};
+    use super::{processed_file_stem, reverse_interleaved, wav_peak};
+
+    #[test]
+    fn processed_stem_strips_generated_suffixes() {
+        let first = uuid::Uuid::new_v4();
+        let second = uuid::Uuid::new_v4();
+
+        let once = std::path::PathBuf::from(format!("take_reverse_{}.wav", first));
+        assert_eq!(processed_file_stem(&once), "take");
+
+        // Folders created by older builds may already contain stacked suffixes.
+        let twice = std::path::PathBuf::from(format!(
+            "take_reverse_{}_reverse_{}.wav",
+            second, first
+        ));
+        assert_eq!(processed_file_stem(&twice), "take");
+    }
 
     #[test]
     fn reverse_preserves_channel_order_within_frames() {

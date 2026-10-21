@@ -32,9 +32,11 @@ Offline clip processing: gain, pitch shift, time stretch, reverse, normalize. No
 - **Reverse**: decodes the clip's visible source range, reverses frames while
   preserving channel order, writes a new 32-bit float WAV next to the source
   (`<name>_reverse_<uuid>.wav`), and points the clip at it with
-  `source_offset = 0`. Undo restores the previous `AudioFileRef`, offset and
-  length via a `Source` undo entry. A fresh waveform overview is generated in
-  the background; results for a replaced path are discarded.
+  `source_offset = 0`. Previously generated suffixes are stripped from the base
+  name, so reversing repeatedly does not grow the filename. Undo restores the
+  previous `AudioFileRef`, offset and length via a `Source` undo entry. A fresh
+  waveform overview is generated in the background; results for a replaced path
+  are discarded.
 - **Process menu**: right-click a clip in the arrange view. The same actions
   are available in the clip inspector.
 
@@ -99,6 +101,7 @@ enum NormalizeMode {
 ## Progress Log
 
 - 2026-10-21: Peak normalize to −1 dBFS (exact per-channel peak over the clip range, gain edit, undoable)
-- 2026-10-21: Reverse rendered to a new WAV per clip (channel-safe frame reversal, undo via source state)
+- 2026-10-21: Reverse rendered to a new WAV per clip (channel-safe frame reversal, undo via source state); repeated reverses reuse a stable base filename
+- 2026-10-21: Snap grid defaults to Beat
 - 2026-10-21: Right-click Process menu in the arrange view
 - Remaining: pitch shift, time stretch, fade rendering, consolidate, bounce in place, LUFS normalize
