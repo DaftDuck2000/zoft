@@ -1690,7 +1690,13 @@ impl AppUI {
                 ui.horizontal_top(|ui| {
                     ui.vertical(|ui| {
                         ui.set_min_width(120.0);
-                        ui.label("Effects");
+                        ui.label(
+                            egui::RichText::new("AVAILABLE EFFECTS")
+                                .small()
+                                .strong(),
+                        );
+                        ui.add_space(2.0);
+                        ui.separator();
                         ui.add_space(2.0);
                         for effect in EffectKind::ALL {
                             if ui
