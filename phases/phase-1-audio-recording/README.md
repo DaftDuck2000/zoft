@@ -35,6 +35,7 @@
 - Recording UI integrated - record arm button, record button, R key
 - Input device selection dropdown in transport bar
 - Background writer task with tokio for BWF writing
+- Recording level meter in the transport bar (pre-fader peak + RMS from the input stream)
 
 **1.2 Waveform Rendering** - `[~]` In Progress
 - Overview (min/max + RMS) pre-computed per audio file, stored and serialized with the project

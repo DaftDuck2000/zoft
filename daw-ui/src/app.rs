@@ -259,6 +259,41 @@ fn loop_range_frames(
     }
 }
 
+/// Small pre-fader recording meter: a green RMS bar with a peak tick.
+fn draw_input_meter(ui: &mut egui::Ui, peak: f32, rms: f32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(90.0, 14.0), egui::Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, 2.0, egui::Color32::from_gray(30));
+
+    let rms_width = rect.width() * rms.clamp(0.0, 1.0);
+    if rms_width > 0.0 {
+        let bar = egui::Rect::from_min_max(
+            rect.min,
+            egui::pos2(rect.left() + rms_width, rect.bottom()),
+        );
+        painter.rect_filled(bar, 2.0, egui::Color32::from_rgb(70, 180, 90));
+    }
+
+    let peak_x = rect.left() + rect.width() * peak.clamp(0.0, 1.0);
+    if peak > 0.0 {
+        let color = if peak >= 0.99 {
+            egui::Color32::RED
+        } else {
+            egui::Color32::from_rgb(220, 200, 80)
+        };
+        painter.line_segment(
+            [
+                egui::pos2(peak_x, rect.top()),
+                egui::pos2(peak_x, rect.bottom()),
+            ],
+            egui::Stroke::new(2.0_f32, color),
+        );
+    }
+
+    let db = 20.0 * peak.max(1e-6).log10();
+    ui.label(format!("{:.0} dB", db));
+}
+
 /// Source reference and trimmed range, used by processing operations that
 /// render a new file (the original file is never modified).
 #[derive(Debug, Clone)]
@@ -3518,6 +3553,13 @@ impl eframe::App for AppUI {
                     .clicked()
                 {
                     self.toggle_recording();
+                }
+
+                if self.recording {
+                    if let Some((peak, rms)) = self.engine.input_level() {
+                        ui.separator();
+                        draw_input_meter(ui, peak, rms);
+                    }
                 }
 
                 ui.separator();

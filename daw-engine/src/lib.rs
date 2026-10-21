@@ -258,6 +258,12 @@ impl AudioEngine {
     pub fn input_devices(&self) -> Result<Vec<crate::audio_backend::AudioDeviceInfo>> {
         self.backend.input_devices()
     }
+
+    /// Peak and RMS of the most recent input block, if the input stream is
+    /// running (used by the recording level meter).
+    pub fn input_level(&self) -> Option<(f32, f32)> {
+        self.backend.input_level()
+    }
 }
 
 impl Drop for AudioEngine {
