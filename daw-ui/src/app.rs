@@ -238,6 +238,27 @@ fn audible_track_gain(track: &daw_core::track::Track, any_solo: bool) -> Option<
     }
 }
 
+/// Convert a loop range in seconds to output-device frames. Returns `None`
+/// when looping is off or the range is empty.
+fn loop_range_frames(
+    enabled: bool,
+    start_secs: f64,
+    end_secs: f64,
+    out_rate: u32,
+) -> Option<(u64, u64)> {
+    if !enabled || end_secs <= start_secs {
+        return None;
+    }
+    let rate = out_rate.max(1) as f64;
+    let start = (start_secs.max(0.0) * rate) as u64;
+    let end = (end_secs.max(0.0) * rate).ceil() as u64;
+    if end > start {
+        Some((start, end))
+    } else {
+        None
+    }
+}
+
 /// Source reference and trimmed range, used by processing operations that
 /// render a new file (the original file is never modified).
 #[derive(Debug, Clone)]
@@ -609,6 +630,10 @@ struct AppUI {
     recording: bool,
     /// Playhead position in seconds.
     playhead_secs: f64,
+    /// Transport loop: when enabled, playback repeats between these points.
+    loop_enabled: bool,
+    loop_start_secs: f64,
+    loop_end_secs: f64,
     /// Where recording started, so the clip lands at the right spot.
     record_start_secs: Option<f64>,
     /// Armed take waiting for the transport to roll (see `begin_recording`).
@@ -667,6 +692,9 @@ impl AppUI {
             playing: false,
             recording: false,
             playhead_secs: 0.0,
+            loop_enabled: false,
+            loop_start_secs: 0.0,
+            loop_end_secs: 0.0,
             record_start_secs: None,
             pending_record_track: None,
             last_playhead_update: std::time::Instant::now(),
@@ -1031,6 +1059,7 @@ impl AppUI {
             let out_rate = self.engine.output_sample_rate().max(1);
             let clips = self.collect_playable_clips(out_rate);
             let start_frame = (self.playhead_secs.max(0.0) * out_rate as f64) as u64;
+            self.sync_playback_loop();
             self.engine.set_playback_clips(clips, start_frame);
         }
     }
@@ -3492,6 +3521,48 @@ impl eframe::App for AppUI {
                 }
 
                 ui.separator();
+
+                // Transport loop: In/Out set the range at the playhead; Loop
+                // repeats it during playback.
+                if ui
+                    .selectable_label(self.loop_enabled, "Loop")
+                    .on_hover_text("Repeat playback between the In and Out points")
+                    .clicked()
+                {
+                    self.loop_enabled = !self.loop_enabled;
+                    self.loop_changed();
+                }
+                if ui
+                    .small_button("In")
+                    .on_hover_text("Set loop start at the playhead")
+                    .clicked()
+                {
+                    self.loop_start_secs = self.playhead_secs.max(0.0);
+                    if self.loop_end_secs <= self.loop_start_secs {
+                        self.loop_end_secs = self.loop_start_secs + 1.0;
+                    }
+                    self.loop_enabled = true;
+                    self.loop_changed();
+                }
+                if ui
+                    .small_button("Out")
+                    .on_hover_text("Set loop end at the playhead")
+                    .clicked()
+                {
+                    self.loop_end_secs = self.playhead_secs.max(0.0);
+                    if self.loop_end_secs <= self.loop_start_secs {
+                        self.loop_start_secs = (self.loop_end_secs - 1.0).max(0.0);
+                    }
+                    self.loop_enabled = true;
+                    self.loop_changed();
+                }
+                ui.label(format!(
+                    "{} – {}",
+                    format_clock(self.loop_start_secs),
+                    format_clock(self.loop_end_secs)
+                ));
+
+                ui.separator();
                 ui.label(format!("Project: {}", self.project.name));
                 ui.separator();
                 ui.label(format!("Sample Rate: {} Hz", self.project.sample_rate));
@@ -3855,6 +3926,28 @@ impl eframe::App for AppUI {
                 egui::pos2(rect.right(), rect.top() + ruler_height),
             );
             painter.rect_filled(ruler_rect, 0.0, egui::Color32::from_gray(25));
+
+            // ---- Loop region ----
+            if self.loop_enabled && self.loop_end_secs > self.loop_start_secs {
+                let loop_start = view.x(rect, self.loop_start_secs);
+                let loop_end = view.x(rect, self.loop_end_secs);
+                let band = egui::Rect::from_min_max(
+                    egui::pos2(loop_start, rect.top()),
+                    egui::pos2(loop_end, rect.top() + ruler_height),
+                )
+                .intersect(ruler_rect);
+                if band.width() > 0.0 {
+                    painter.rect_filled(band, 0.0, egui::Color32::from_rgb(42, 68, 104));
+                }
+                for x in [loop_start, loop_end] {
+                    if x >= rect.left() && x <= rect.right() {
+                        painter.line_segment(
+                            [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+                            egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(80, 130, 190)),
+                        );
+                    }
+                }
+            }
 
             let view_end = self.view_start_secs + view.visible_secs(rect);
             let ruler_ticks = self.build_ruler_ticks(self.view_start_secs, view_end);
@@ -4322,12 +4415,48 @@ impl AppUI {
         let _ = self.engine.stop();
     }
 
+    /// Push the current loop range into the engine. Called whenever the loop
+    /// controls change and before playback starts.
+    fn sync_playback_loop(&self) {
+        let out_rate = self.engine.output_sample_rate().max(1);
+        self.engine.set_playback_loop(loop_range_frames(
+            self.loop_enabled,
+            self.loop_start_secs,
+            self.loop_end_secs,
+            out_rate,
+        ));
+    }
+
+    /// Handle an edit to the loop controls: keep the range valid, move the
+    /// playhead inside it, and restart the mixer if the transport is running.
+    fn loop_changed(&mut self) {
+        if self.loop_enabled && self.loop_end_secs <= self.loop_start_secs {
+            // Enabling Loop with no range loops the project (or at least 4 s).
+            self.loop_start_secs = 0.0;
+            self.loop_end_secs = self.timeline_duration().max(4.0);
+        }
+        if self.loop_enabled
+            && (self.playhead_secs < self.loop_start_secs
+                || self.playhead_secs >= self.loop_end_secs)
+        {
+            self.playhead_secs = self.loop_start_secs.max(0.0);
+        }
+
+        self.sync_playback_loop();
+        if self.playing {
+            // Rebuild the mixer from the playhead so the new range takes
+            // effect immediately.
+            self.start_playback();
+        }
+    }
+
     /// Load the project's audio clips into the engine and start sound output
     /// from the current playhead position.
     fn start_playback(&mut self) {
         let out_rate = self.engine.output_sample_rate().max(1);
         let clips = self.collect_playable_clips(out_rate);
         let start_frame = (self.playhead_secs.max(0.0) * out_rate as f64) as u64;
+        self.sync_playback_loop();
         self.engine.set_playback_clips(clips, start_frame);
         if let Err(e) = self.engine.start() {
             self.engine.clear_playback();
@@ -5404,9 +5533,9 @@ mod tests {
     use super::{
         audible_track_gain, bit_crush, clip_gain_at, contiguous_clip_span, filter_audio,
         knob_from_normalized, knob_to_normalized, load_wav_interleaved,
-        load_wav_range_interleaved, measure_integrated_loudness, merge_continuous_edit,
-        processed_file_stem, render_pitch_stretch, reverse_interleaved, saturate,
-        tape_stretch_interleaved, tremolo, wav_file_info, wav_peak, write_wav_f32,
+        load_wav_range_interleaved, loop_range_frames, measure_integrated_loudness,
+        merge_continuous_edit, processed_file_stem, render_pitch_stretch, reverse_interleaved,
+        saturate, tape_stretch_interleaved, tremolo, wav_file_info, wav_peak, write_wav_f32,
         write_wav_range, write_wav_range_with_envelope, ClipShape, ClipSourceState, EditAction,
         FilterKind, TrackShape,
     };
@@ -5525,6 +5654,17 @@ mod tests {
             to: louder,
         };
         assert_eq!(action.description(), "Track volume");
+    }
+
+    #[test]
+    fn loop_range_frames_converts_seconds_and_disables_empty_ranges() {
+        assert_eq!(loop_range_frames(false, 0.0, 1.0, 10), None);
+        assert_eq!(loop_range_frames(true, 0.0, 1.0, 10), Some((0, 10)));
+        assert_eq!(loop_range_frames(true, 0.5, 1.0, 10), Some((5, 10)));
+        assert_eq!(loop_range_frames(true, 1.0, 1.0, 10), None);
+        assert_eq!(loop_range_frames(true, 1.0, 0.5, 10), None);
+        // The end is rounded up so a fractional frame is not lost.
+        assert_eq!(loop_range_frames(true, 0.0, 0.15, 10), Some((0, 2)));
     }
 
     #[test]

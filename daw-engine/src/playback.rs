@@ -40,6 +40,8 @@ pub struct PlaybackMixer {
     lengths: Vec<u64>,
     auto_fades: Vec<AutoFade>,
     scratch: Vec<f32>,
+    /// Optional repeating range in output-device frames.
+    loop_range: Option<(u64, u64)>,
 }
 
 impl PlaybackMixer {
@@ -113,12 +115,31 @@ impl PlaybackMixer {
             lengths,
             auto_fades,
             scratch: Vec::new(),
+            loop_range: None,
         }
     }
 
     /// Current playback position in output frames.
     pub fn position(&self) -> u64 {
         self.position
+    }
+
+    /// Restrict playback to a repeating range of output frames. `None`
+    /// disables looping.
+    pub fn set_loop_range(&mut self, range: Option<(u64, u64)>) {
+        self.loop_range = match range {
+            Some((start, end)) if end > start => Some((start, end)),
+            _ => None,
+        };
+        if let Some((start, end)) = self.loop_range {
+            if self.position >= end {
+                self.position = start + (self.position - start) % (end - start);
+            }
+        }
+    }
+
+    pub fn loop_range(&self) -> Option<(u64, u64)> {
+        self.loop_range
     }
 
     /// Fill `data` with the mixed output, advancing the playback position.
@@ -131,21 +152,22 @@ impl PlaybackMixer {
         let frames = data.len() / out_ch;
         let needed = frames * out_ch;
 
-        self.mix_into_scratch(frames);
-
-        // Hard limit so summed clips can't clip the device.
-        for value in &mut self.scratch[..needed] {
-            *value = value.clamp(-1.0, 1.0);
+        let mut scratch = std::mem::take(&mut self.scratch);
+        if scratch.len() < needed {
+            // Only allocates on the first callback (or if the buffer grows).
+            scratch.resize(needed, 0.0);
         }
+        self.mix_output(&mut scratch[..needed]);
 
         for (i, sample) in data[..needed].iter_mut().enumerate() {
-            *sample = T::from_sample(self.scratch[i]);
+            // Hard limit so summed clips can't clip the device.
+            *sample = T::from_sample(scratch[i].clamp(-1.0, 1.0));
         }
         for sample in data[needed..].iter_mut() {
             *sample = T::from_sample(0.0f32);
         }
 
-        self.position += frames as u64;
+        self.scratch = scratch;
     }
 
     /// Offline render without the device safety limiter. Used when bouncing or
@@ -155,26 +177,61 @@ impl PlaybackMixer {
         let frames = data.len() / out_ch;
         let needed = frames * out_ch;
 
-        self.mix_into_scratch(frames);
-        data[..needed].copy_from_slice(&self.scratch[..needed]);
+        let mut scratch = std::mem::take(&mut self.scratch);
+        if scratch.len() < needed {
+            scratch.resize(needed, 0.0);
+        }
+        self.mix_output(&mut scratch[..needed]);
+        data[..needed].copy_from_slice(&scratch[..needed]);
         for sample in data[needed..].iter_mut() {
             *sample = 0.0;
         }
 
-        self.position += frames as u64;
+        self.scratch = scratch;
     }
 
-    fn mix_into_scratch(&mut self, frames: usize) {
+    /// Mix `out.len() / channels` frames starting at the current position,
+    /// wrapping at the loop end when looping is enabled.
+    fn mix_output(&mut self, out: &mut [f32]) {
         let out_ch = self.out_channels as usize;
-        let needed = frames * out_ch;
+        let frames = out.len() / out_ch;
+        let mut written = 0;
 
-        if self.scratch.len() < needed {
-            // Only allocates on the first callback (or if the buffer grows).
-            self.scratch.resize(needed, 0.0);
+        while written < frames {
+            let remaining = frames - written;
+            let segment = self.frames_until_loop_end(remaining);
+            let start = written * out_ch;
+            let end = start + segment * out_ch;
+            self.mix_segment(&mut out[start..end]);
+            written += segment;
+            self.advance_position(segment as u64);
         }
+    }
 
-        let scratch = &mut self.scratch[..needed];
-        scratch.fill(0.0);
+    /// Number of frames to mix before the next loop wrap.
+    fn frames_until_loop_end(&self, remaining: usize) -> usize {
+        if let Some((start, end)) = self.loop_range {
+            if end > start && self.position < end {
+                let until_end = (end - self.position) as usize;
+                return remaining.min(until_end);
+            }
+        }
+        remaining
+    }
+
+    fn advance_position(&mut self, frames: u64) {
+        self.position = self.position.saturating_add(frames);
+        if let Some((start, end)) = self.loop_range {
+            if end > start && self.position >= end {
+                self.position = start + (self.position - start) % (end - start);
+            }
+        }
+    }
+
+    fn mix_segment(&mut self, out: &mut [f32]) {
+        let out_ch = self.out_channels as usize;
+        let frames = out.len() / out_ch;
+        out.fill(0.0);
 
         for frame in 0..frames {
             let pos = self.position + frame as u64;
@@ -203,7 +260,7 @@ impl PlaybackMixer {
                     );
 
                 for channel in 0..out_ch {
-                    scratch[frame * out_ch + channel] +=
+                    out[frame * out_ch + channel] +=
                         sample_at(clip, src_pos, channel) * gain;
                 }
             }
@@ -306,6 +363,38 @@ mod tests {
         mixer.fill_unclamped(&mut out);
 
         assert!(out.iter().all(|sample| (sample - 2.0).abs() < 1e-6));
+    }
+
+    #[test]
+    fn loop_range_wraps_position_and_output() {
+        // A single constant clip long enough to cover the loop.
+        let a = clip(vec![1.0; 20], 0, 0);
+        let mut mixer = PlaybackMixer::new(10, 1, vec![a], 0);
+        mixer.set_loop_range(Some((4, 8)));
+
+        // Start before the loop end; position should wrap when it reaches 8.
+        let mut out = [0.0f32; 6];
+        mixer.fill_unclamped(&mut out);
+        assert!(out.iter().all(|sample| (sample - 1.0).abs() < 1e-6));
+        assert_eq!(mixer.position(), 6);
+
+        // Crossing the loop boundary continues from the loop start.
+        let mut out = [0.0f32; 4];
+        mixer.fill_unclamped(&mut out);
+        assert!(out.iter().all(|sample| (sample - 1.0).abs() < 1e-6));
+        assert_eq!(mixer.position(), 6);
+    }
+
+    #[test]
+    fn setting_loop_range_resets_position_inside_the_range() {
+        let a = clip(vec![1.0; 20], 0, 0);
+        let mut mixer = PlaybackMixer::new(10, 1, vec![a], 0);
+        let mut out = [0.0f32; 12];
+        mixer.fill_unclamped(&mut out);
+        assert_eq!(mixer.position(), 12);
+
+        mixer.set_loop_range(Some((4, 8)));
+        assert_eq!(mixer.position(), 4);
     }
 
     #[test]

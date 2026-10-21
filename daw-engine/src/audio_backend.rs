@@ -262,6 +262,8 @@ pub trait AudioBackend: Send + Sync {
     fn stop_input_stream(&self) -> Result<()>;
     /// Set (or clear) the mixer that the output stream pulls samples from.
     fn set_playback_mixer(&self, mixer: Option<crate::playback::PlaybackMixer>);
+    /// Update the loop range on the current playback mixer, if any.
+    fn set_playback_loop(&self, _range: Option<(u64, u64)>) {}
     /// Current playback position in output frames, if playback is loaded.
     fn playback_position(&self) -> Option<u64>;
 }
@@ -584,6 +586,17 @@ fn stop_input_stream(&self) -> Result<()> {
 
     fn set_playback_mixer(&self, mixer: Option<crate::playback::PlaybackMixer>) {
         *self.playback.lock().unwrap_or_else(|e| e.into_inner()) = mixer;
+    }
+
+    fn set_playback_loop(&self, range: Option<(u64, u64)>) {
+        if let Some(mixer) = self
+            .playback
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
+            mixer.set_loop_range(range);
+        }
     }
 
     fn playback_position(&self) -> Option<u64> {

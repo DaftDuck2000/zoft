@@ -53,7 +53,8 @@
 - Click or drag anywhere in the ruler to seek; the playhead follows the current snap grid (hold Alt to bypass), and seeking during playback/recording pauses the transport
 - Timeline ruler defaults to musical bars/beats (labels like `3.2`), switchable to clock time with the Ruler dropdown; the time-signature picker in the transport bar (4/4, 3/4, 6/8, …) drives bar length, ruler labels and the snap grid
 - Recording arms on ● and only captures from the moment the transport (Space/▶) rolls, so a take's length matches the playhead travel; pausing ends the take and shows the waveform right away
-- Not yet: input monitoring while recording, loop playback, transport scrub
+- Transport loop: **In**/**Out** set the range at the playhead, **Loop** repeats it; the engine wraps sample-accurately at the loop end and the ruler highlights the range
+- Not yet: input monitoring while recording, transport scrub
 
 **1.3 Non-Destructive Clip Editing** - `[~]` In Progress
 - Drag clips to move them (horizontal + between tracks) with snapping: Off / Bar / Beat (default) / 1/8 / 1/16 (hold Alt to bypass)

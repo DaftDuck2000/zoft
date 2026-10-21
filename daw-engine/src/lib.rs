@@ -39,6 +39,9 @@ pub struct AudioEngine {
     project_bit_depth: u16,
     project_channels: u16,
     selected_input_device: Arc<Mutex<Option<String>>>,
+    /// Loop range in output-device frames, applied whenever a new mixer is
+    /// created and to the live mixer when it changes.
+    playback_loop: Arc<Mutex<Option<(u64, u64)>>>,
 }
 
 struct RecordingState {
@@ -62,6 +65,7 @@ impl AudioEngine {
             project_bit_depth: 32, // 32-bit float
             project_channels: channels,
             selected_input_device: Arc::new(Mutex::new(None)),
+            playback_loop: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -101,13 +105,24 @@ impl AudioEngine {
     /// timeline position in output-device frames where playback begins. Call
     /// `start()` afterwards to open the output stream.
     pub fn set_playback_clips(&self, clips: Vec<PlayableClip>, start_frame: u64) {
-        let mixer = PlaybackMixer::new(
+        let mut mixer = PlaybackMixer::new(
             self.backend.sample_rate() as u32,
             self.backend.channels(),
             clips,
             start_frame,
         );
+        if let Some(range) = *self.playback_loop.lock().unwrap() {
+            mixer.set_loop_range(Some(range));
+        }
         self.backend.set_playback_mixer(Some(mixer));
+    }
+
+    /// Set (or clear) the transport loop range in output-device frames. The
+    /// range is applied to the live mixer immediately and to any mixer created
+    /// later by [`set_playback_clips`](Self::set_playback_clips).
+    pub fn set_playback_loop(&self, range: Option<(u64, u64)>) {
+        *self.playback_loop.lock().unwrap() = range;
+        self.backend.set_playback_loop(range);
     }
 
     /// Remove the playback content (output falls silent).

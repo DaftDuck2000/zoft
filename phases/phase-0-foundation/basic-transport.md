@@ -16,7 +16,7 @@ Implement transport control: play, stop, seek, tempo, time signature, metronome.
 - [✓] Tempo map: BPM changes at tick positions, ramps
 - [✓] Time signature map: Numerator/denominator changes
 - [ ] Metronome: Click on beat, accent on downbeat, configurable sound
-- [ ] Loop range: Set loop start/end, enable/disable
+- [x] Loop range: Set loop start/end, enable/disable
 - [✓] Position readout: Bars:Beats:Ticks + Samples + Timecode
 - [ ] Tempo tap: Tap tempo calculation
 
@@ -81,7 +81,7 @@ enum TransportCmd {
 - [✓] Seek → immediate position jump, no glitches
 - [✓] Tempo change at tick → smooth transition (if ramp) or instant
 - [✓] Metronome clicks align with grid visually and audibly
-- [✓] Loop plays seamlessly (crossfade at boundary)
+- [x] Loop plays seamlessly (sample-accurate wrap; boundary crossfade not yet)
 
 ## Progress Log
 
@@ -90,3 +90,4 @@ enum TransportCmd {
 - 2026-10-07: Transport controls in UI (play/stop button)
 - 2026-10-07: Position display in transport bar (basic)
 - 2026-10-07: EngineMsg::Transport with Play/Stop commands
+- 2026-10-21: Loop range (In/Out at the playhead, Loop toggle) with sample-accurate engine wrap and ruler highlight
