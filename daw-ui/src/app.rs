@@ -297,6 +297,12 @@ fn bpm_from_tap_intervals(intervals: &[f64]) -> Option<f32> {
     Some((60.0 / average).clamp(20.0, 300.0) as f32)
 }
 
+/// Whether an armed take should wait for the punch-in point instead of
+/// capturing immediately.
+fn punch_waiting(punch_enabled: bool, punch_in: f64, punch_out: f64, playhead: f64) -> bool {
+    punch_enabled && punch_out > punch_in && playhead < punch_in
+}
+
 /// Small pre-fader recording meter: a green RMS bar with a peak tick.
 fn draw_input_meter(ui: &mut egui::Ui, peak: f32, rms: f32) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(90.0, 14.0), egui::Sense::hover());
@@ -719,6 +725,10 @@ struct AppUI {
     loop_end_secs: f64,
     /// Anchor while dragging a new loop range in the ruler's loop lane.
     loop_drag_anchor_secs: Option<f64>,
+    /// Punch recording: capture only between these points.
+    punch_enabled: bool,
+    punch_in_secs: f64,
+    punch_out_secs: f64,
     /// Metronome click during playback.
     metronome_enabled: bool,
     /// Recent tap-tempo intervals (seconds) and the last tap time.
@@ -791,6 +801,9 @@ impl AppUI {
             loop_start_secs: 0.0,
             loop_end_secs: 0.0,
             loop_drag_anchor_secs: None,
+            punch_enabled: false,
+            punch_in_secs: 0.0,
+            punch_out_secs: 0.0,
             metronome_enabled: false,
             tap_intervals: VecDeque::new(),
             last_tap: None,
@@ -3607,6 +3620,36 @@ impl eframe::App for AppUI {
                 self.playhead_secs += elapsed;
             }
             self.last_playhead_update = std::time::Instant::now();
+
+            // Punch-in / punch-out scheduling.
+            if let Some(track_id) = self.pending_record_track {
+                if !punch_waiting(
+                    self.punch_enabled,
+                    self.punch_in_secs,
+                    self.punch_out_secs,
+                    self.playhead_secs,
+                ) {
+                    if self.punch_enabled
+                        && self.punch_out_secs > self.punch_in_secs
+                        && self.playhead_secs >= self.punch_out_secs
+                    {
+                        self.pending_record_track = None;
+                        self.error_message =
+                            Some("The punch range has already passed.".to_string());
+                    } else {
+                        self.pending_record_track = None;
+                        self.begin_recording(track_id);
+                    }
+                }
+            }
+            if self.recording
+                && self.punch_enabled
+                && self.punch_out_secs > self.punch_in_secs
+                && self.playhead_secs >= self.punch_out_secs
+            {
+                // End the take but keep the transport rolling.
+                self.stop_recording_and_create_clip();
+            }
         }
 
         // Error banner (shown when an operation, e.g. recording, fails)
@@ -3700,6 +3743,46 @@ impl eframe::App for AppUI {
                     format_clock(self.loop_start_secs),
                     format_clock(self.loop_end_secs)
                 ));
+                if ui
+                    .selectable_label(self.punch_enabled, "Punch")
+                    .on_hover_text("Record only between the punch points")
+                    .clicked()
+                {
+                    self.punch_enabled = !self.punch_enabled;
+                    if self.punch_enabled && self.punch_out_secs <= self.punch_in_secs {
+                        self.punch_in_secs = 0.0;
+                        self.punch_out_secs = self.timeline_duration().max(4.0);
+                    }
+                }
+                if ui
+                    .small_button("P-In")
+                    .on_hover_text("Set punch-in at the playhead")
+                    .clicked()
+                {
+                    self.punch_in_secs = self.playhead_secs.max(0.0);
+                    if self.punch_out_secs <= self.punch_in_secs {
+                        self.punch_out_secs = self.punch_in_secs + 4.0;
+                    }
+                    self.punch_enabled = true;
+                }
+                if ui
+                    .small_button("P-Out")
+                    .on_hover_text("Set punch-out at the playhead")
+                    .clicked()
+                {
+                    self.punch_out_secs = self.playhead_secs.max(0.0);
+                    if self.punch_out_secs <= self.punch_in_secs {
+                        self.punch_in_secs = (self.punch_out_secs - 1.0).max(0.0);
+                    }
+                    self.punch_enabled = true;
+                }
+                if self.punch_enabled {
+                    ui.label(format!(
+                        "{} – {}",
+                        format_clock(self.punch_in_secs),
+                        format_clock(self.punch_out_secs)
+                    ));
+                }
                 if ui
                     .selectable_label(self.metronome_enabled, "Click")
                     .on_hover_text("Metronome click during playback")
@@ -4170,6 +4253,31 @@ impl eframe::App for AppUI {
                         painter.line_segment(
                             [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
                             egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(80, 130, 190)),
+                        );
+                    }
+                }
+            }
+
+            // ---- Punch region: a red bar at the bottom of the ruler ----
+            if self.punch_enabled && self.punch_out_secs > self.punch_in_secs {
+                let punch_in = view.x(rect, self.punch_in_secs);
+                let punch_out = view.x(rect, self.punch_out_secs);
+                let band = egui::Rect::from_min_max(
+                    egui::pos2(punch_in, rect.top() + ruler_height - 3.0),
+                    egui::pos2(punch_out, rect.top() + ruler_height),
+                )
+                .intersect(ruler_rect);
+                if band.width() > 0.0 {
+                    painter.rect_filled(band, 0.0, egui::Color32::from_rgb(170, 60, 60));
+                }
+                for x in [punch_in, punch_out] {
+                    if x >= rect.left() && x <= rect.right() {
+                        painter.line_segment(
+                            [
+                                egui::pos2(x, rect.top() + ruler_height - 6.0),
+                                egui::pos2(x, rect.top() + ruler_height),
+                            ],
+                            egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(200, 80, 80)),
                         );
                     }
                 }
@@ -4721,9 +4829,19 @@ impl AppUI {
             self.start_playback();
             self.last_playhead_update = std::time::Instant::now();
 
-            // An armed take starts capturing the moment the transport rolls.
-            if let Some(track_id) = self.pending_record_track.take() {
-                self.begin_recording(track_id);
+            // An armed take either starts now or waits for the punch-in point.
+            if let Some(track_id) = self.pending_record_track {
+                if punch_waiting(
+                    self.punch_enabled,
+                    self.punch_in_secs,
+                    self.punch_out_secs,
+                    self.playhead_secs,
+                ) {
+                    // The playback poll starts the take at punch-in.
+                } else {
+                    self.pending_record_track = None;
+                    self.begin_recording(track_id);
+                }
             }
         }
     }
@@ -4935,8 +5053,18 @@ impl AppUI {
             // Record on the first armed track.
             let track_id = armed_tracks[0];
             if self.playing {
-                // Transport already rolling: punch in immediately.
-                self.begin_recording(track_id);
+                // Already rolling: start now, or wait for the punch-in point.
+                if punch_waiting(
+                    self.punch_enabled,
+                    self.punch_in_secs,
+                    self.punch_out_secs,
+                    self.playhead_secs,
+                ) {
+                    self.pending_record_track = Some(track_id);
+                    self.error_message = None;
+                } else {
+                    self.begin_recording(track_id);
+                }
             } else {
                 // Wait for the transport to roll before capturing audio, so the
                 // take starts exactly where the playhead starts moving.
@@ -5912,8 +6040,8 @@ mod tests {
         contiguous_clip_span, filter_audio, knob_from_normalized, knob_to_normalized,
         load_wav_interleaved, load_wav_range_interleaved, loop_range_frames,
         measure_integrated_loudness, merge_continuous_edit, metronome_config,
-        processed_file_stem, render_pitch_stretch, reverse_interleaved, saturate,
-        tape_stretch_interleaved, tremolo, wav_file_info, wav_peak, write_wav_f32,
+        processed_file_stem, punch_waiting, render_pitch_stretch, reverse_interleaved,
+        saturate, tape_stretch_interleaved, tremolo, wav_file_info, wav_peak, write_wav_f32,
         write_wav_range, write_wav_range_with_envelope, ClipShape, ClipSourceState, EditAction,
         FilterKind, MonitorMode, TrackShape,
     };
@@ -6070,6 +6198,17 @@ mod tests {
         let config = metronome_config(true, 120.0, 6, 8, 48_000).unwrap();
         assert!((config.frames_per_beat - 12_000.0).abs() < 1e-6);
         assert_eq!(config.beats_per_bar, 6);
+    }
+
+    #[test]
+    fn punch_waiting_waits_only_before_the_in_point() {
+        assert!(punch_waiting(true, 2.0, 4.0, 1.0));
+        // At the in point the take starts.
+        assert!(!punch_waiting(true, 2.0, 4.0, 2.0));
+        assert!(!punch_waiting(true, 2.0, 4.0, 3.0));
+        assert!(!punch_waiting(false, 2.0, 4.0, 1.0));
+        // An empty range behaves like punch disabled.
+        assert!(!punch_waiting(true, 4.0, 2.0, 1.0));
     }
 
     #[test]

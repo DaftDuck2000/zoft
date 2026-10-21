@@ -19,7 +19,7 @@ Implement audio track with record arm, input monitoring, and BWF file writing. S
 - [ ] Multi-take: New clip per take, layered or new lane
 - [ ] Disk space warning: Calculate remaining time at current sample rate
 - [x] Recording level meter: Pre-fader, peak + RMS
-- [ ] Punch in/out: Set punch points, auto-arm at punch in
+- [x] Punch in/out: Set punch points, auto-arm at punch in
 
 ## Technical Details
 
@@ -108,4 +108,5 @@ Monitor Mix        Recording           Metering
 - 2026-10-07: Background writer task with tokio for BWF writing
 - 2026-10-21: Recording level meter (pre-fader peak + RMS in the transport bar) fed by the input callback
 - 2026-10-21: Input monitoring modes are enforced: track **Mon** cycles Off/Auto/On and the input is mixed into the output; both the input and output streams stay open while armed/On so monitoring is audible before rolling. The mode is undoable
+- 2026-10-21: Punch recording: **Punch** plus **P-In**/**P-Out** set the capture range; an armed take waits for punch-in and ends at punch-out while the transport keeps rolling. The ruler shows the punch region in red
 - Next: Waveform rendering (1.2), Multi-take support, Disk space warning

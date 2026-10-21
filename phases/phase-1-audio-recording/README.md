@@ -56,6 +56,7 @@
 - Timeline ruler defaults to musical bars/beats (labels like `3.2`), switchable to clock time with the Ruler dropdown; the time-signature picker in the transport bar (4/4, 3/4, 6/8, …) drives bar length, ruler labels and the snap grid
 - Recording arms on ● and only captures from the moment the transport (Space/▶) rolls, so a take's length matches the playhead travel; pausing ends the take and shows the waveform right away
 - Input monitoring: the track **Mon** button cycles Off → Auto (monitor when armed or recording) → On; the input stream opens when monitoring is needed, so armed/On tracks are audible before and during a take
+- Punch recording: **Punch** enables a capture range set with **P-In**/**P-Out** at the playhead; an armed take waits for punch-in and ends at punch-out while the transport keeps rolling, and the ruler marks the region in red
 - Transport loop: drag in the ruler's upper loop lane to set the range (or use **In**/**Out** at the playhead), then **Loop** repeats it; the engine wraps sample-accurately at the loop end and the ruler highlights the range
 - Metronome **Click** toggle with accented downbeats, following the project tempo and time signature
 - Tempo field (drag or type BPM) and **Tap** tempo; both are undoable and update the metronome live
