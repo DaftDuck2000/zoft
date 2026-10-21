@@ -89,7 +89,7 @@ impl AudioEngine {
 
     pub fn stop(&self) -> Result<()> {
         let mut running = self.running.lock().unwrap();
-        if *running {
+        if *running && !self.monitoring_enabled.load(Ordering::SeqCst) {
             self.backend.stop()?;
             *running = false;
         }
@@ -299,14 +299,23 @@ impl AudioEngine {
         let recording = self.recording.lock().unwrap().is_some();
 
         if enabled {
-            if !recording && !self.backend.input_stream_running() {
+            if !self.backend.input_stream_running() {
                 let _ = self.ensure_monitoring_stream();
+            }
+            // Monitoring is heard through the output stream, so open it even
+            // while the transport is stopped.
+            if !self.is_running() {
+                let _ = self.start();
             }
             self.backend.set_monitoring(true);
         } else {
             self.backend.set_monitoring(false);
             if !recording {
                 let _ = self.backend.stop_input_stream();
+            }
+            let playback_loaded = self.backend.playback_position().is_some();
+            if !recording && !playback_loaded {
+                let _ = self.stop();
             }
         }
     }
