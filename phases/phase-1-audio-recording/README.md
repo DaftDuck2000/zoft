@@ -68,7 +68,7 @@
 - Next: the remaining 1.4 processing operations (consolidate, bounce, stretch modes, LUFS normalize)
 
 **1.4 Clip Processing** - `[~]` In Progress
-- Right-click a clip to open a floating **Audio Effects** window: choose an effect from the list (Normalize, Bake into Clip, Reverse, Pitch Shift, Time Stretch, Bit Crusher, Saturation, Filter, Tremolo), adjust parameters, then press **Apply**
+- Right-click a clip to open a floating **Audio Effects** window: choose an effect from the list (Normalize, Bake into Clip, Reverse, Pitch Shift, Time Stretch, Bit Crusher, Saturation, Filter, Tremolo), adjust its Logic-style knobs (drag vertically, hold Shift for fine control, double-click to reset), then press **Apply**
 - Peak Normalize (to −1 dBFS) is a gain edit and fully undoable
 - Bake into Clip bakes the clip's gain and fade envelopes into a new `*_process_<uuid>.wav`, then resets the gain/fades; undo restores them
 - Bit Crusher, Saturation, Filter and Tremolo render creative effects to a new file while preserving clip gain, fades, position and track; all are undoable

@@ -342,8 +342,8 @@ struct EffectsWindow {
     pitch: f32,
     stretch: f32,
     formants: bool,
-    crush_bits: u32,
-    crush_downsample: u32,
+    crush_bits: f32,
+    crush_downsample: f32,
     drive_db: f32,
     saturation_mix: f32,
     filter_kind: FilterKind,
@@ -360,8 +360,8 @@ impl EffectsWindow {
             pitch: 0.0,
             stretch: 1.0,
             formants: true,
-            crush_bits: 8,
-            crush_downsample: 4,
+            crush_bits: 8.0,
+            crush_downsample: 4.0,
             drive_db: 12.0,
             saturation_mix: 100.0,
             filter_kind: FilterKind::LowPass,
@@ -1995,20 +1995,28 @@ impl AppUI {
                             }
                             EffectKind::PitchShift => {
                                 ui.label(egui::RichText::new("Pitch Shift").strong());
-                                ui.add(
-                                    egui::Slider::new(&mut window.pitch, -12.0..=12.0)
-                                        .suffix(" st")
-                                        .max_decimals(2),
+                                knob(
+                                    ui,
+                                    &mut window.pitch,
+                                    -12.0..=12.0,
+                                    0.0,
+                                    "Pitch",
+                                    false,
+                                    |value| format!("{:+.2} st", value),
                                 );
                                 ui.checkbox(&mut window.formants, "Preserve formants");
                                 ui.weak("Positive values raise the pitch; 0.01 st = 1 cent.");
                             }
                             EffectKind::TimeStretch => {
                                 ui.label(egui::RichText::new("Time Stretch").strong());
-                                ui.add(
-                                    egui::Slider::new(&mut window.stretch, 0.5..=2.0)
-                                        .suffix("×")
-                                        .max_decimals(2),
+                                knob(
+                                    ui,
+                                    &mut window.stretch,
+                                    0.5..=2.0,
+                                    1.0,
+                                    "Stretch",
+                                    false,
+                                    |value| format!("{:.2}×", value),
                                 );
                                 let target = clip_seconds.map(|seconds| seconds * window.stretch as f64);
                                 if let Some(seconds) = target {
@@ -2018,17 +2026,26 @@ impl AppUI {
                             }
                             EffectKind::BitCrusher => {
                                 ui.label(egui::RichText::new("Bit Crusher").strong());
-                                ui.add(
-                                    egui::Slider::new(&mut window.crush_bits, 1..=16)
-                                        .suffix(" bits"),
-                                );
-                                ui.add(
-                                    egui::Slider::new(
+                                ui.horizontal_top(|ui| {
+                                    knob(
+                                        ui,
+                                        &mut window.crush_bits,
+                                        1.0..=16.0,
+                                        8.0,
+                                        "Bits",
+                                        false,
+                                        |value| format!("{:.0} bit", value),
+                                    );
+                                    knob(
+                                        ui,
                                         &mut window.crush_downsample,
-                                        1..=64,
-                                    )
-                                    .suffix("× hold"),
-                                );
+                                        1.0..=64.0,
+                                        4.0,
+                                        "Hold",
+                                        false,
+                                        |value| format!("{:.0}×", value),
+                                    );
+                                });
                                 ui.weak(
                                     "Reduces the bit depth and holds samples for a crunchy, \
                                      digital character.",
@@ -2036,19 +2053,26 @@ impl AppUI {
                             }
                             EffectKind::Saturation => {
                                 ui.label(egui::RichText::new("Saturation").strong());
-                                ui.add(
-                                    egui::Slider::new(&mut window.drive_db, 0.0..=36.0)
-                                        .suffix(" dB")
-                                        .max_decimals(1),
-                                );
-                                ui.add(
-                                    egui::Slider::new(
+                                ui.horizontal_top(|ui| {
+                                    knob(
+                                        ui,
+                                        &mut window.drive_db,
+                                        0.0..=36.0,
+                                        12.0,
+                                        "Drive",
+                                        false,
+                                        |value| format!("{:.1} dB", value),
+                                    );
+                                    knob(
+                                        ui,
                                         &mut window.saturation_mix,
                                         0.0..=100.0,
-                                    )
-                                    .suffix(" %")
-                                    .max_decimals(0),
-                                );
+                                        100.0,
+                                        "Mix",
+                                        false,
+                                        |value| format!("{:.0}%", value),
+                                    );
+                                });
                                 ui.weak(
                                     "Soft clipping adds harmonics. Mix blends the saturated \
                                      signal with the dry audio.",
@@ -2074,14 +2098,14 @@ impl AppUI {
                                             );
                                         });
                                 });
-                                ui.add(
-                                    egui::Slider::new(
-                                        &mut window.filter_cutoff,
-                                        20.0..=20_000.0,
-                                    )
-                                    .suffix(" Hz")
-                                    .logarithmic(true)
-                                    .max_decimals(0),
+                                knob(
+                                    ui,
+                                    &mut window.filter_cutoff,
+                                    20.0..=20_000.0,
+                                    8_000.0,
+                                    "Cutoff",
+                                    true,
+                                    format_frequency,
                                 );
                                 ui.weak(
                                     "First-order filter. Cutoff is clamped below Nyquist on \
@@ -2090,22 +2114,26 @@ impl AppUI {
                             }
                             EffectKind::Tremolo => {
                                 ui.label(egui::RichText::new("Tremolo").strong());
-                                ui.add(
-                                    egui::Slider::new(
+                                ui.horizontal_top(|ui| {
+                                    knob(
+                                        ui,
                                         &mut window.tremolo_rate,
                                         0.1..=20.0,
-                                    )
-                                    .suffix(" Hz")
-                                    .max_decimals(2),
-                                );
-                                ui.add(
-                                    egui::Slider::new(
+                                        5.0,
+                                        "Rate",
+                                        false,
+                                        |value| format!("{:.2} Hz", value),
+                                    );
+                                    knob(
+                                        ui,
                                         &mut window.tremolo_depth,
                                         0.0..=100.0,
-                                    )
-                                    .suffix(" %")
-                                    .max_decimals(0),
-                                );
+                                        50.0,
+                                        "Depth",
+                                        false,
+                                        |value| format!("{:.0}%", value),
+                                    );
+                                });
                                 ui.weak("Modulates the clip volume at the chosen rate.");
                             }
                         }
@@ -2160,8 +2188,8 @@ impl AppUI {
                     }
                 }
                 EffectKind::BitCrusher => {
-                    let bits = window.crush_bits;
-                    let downsample = window.crush_downsample;
+                    let bits = window.crush_bits.round() as u32;
+                    let downsample = window.crush_downsample.round() as u32;
                     self.render_clip_effect(
                         window.clip_id,
                         move |samples, channels, _sample_rate| {
@@ -2215,6 +2243,232 @@ fn make_fade(length: u64, existing: Option<Fade>, clip_length: u64) -> Option<Fa
     }
     let curve = existing.map(|fade| fade.curve).unwrap_or(FadeCurve::Linear);
     Some(Fade::new(length.min(clip_length), curve))
+}
+
+const KNOB_WIDTH: f32 = 82.0;
+const KNOB_HEIGHT: f32 = 84.0;
+const KNOB_CENTER_Y: f32 = 43.0;
+const KNOB_RADIUS: f32 = 17.0;
+const KNOB_ARC_RADIUS: f32 = 22.0;
+const KNOB_START_ANGLE: f32 = std::f32::consts::PI * 0.75;
+const KNOB_SWEEP: f32 = std::f32::consts::PI * 1.5;
+const KNOB_DRAG_PIXELS: f32 = 160.0;
+
+/// Convert a value to a 0..1 knob position, optionally using a logarithmic
+/// taper (used for frequencies).
+fn knob_to_normalized(value: f32, min: f32, max: f32, logarithmic: bool) -> f32 {
+    if max <= min {
+        return 0.0;
+    }
+    if logarithmic && min > 0.0 && max > 0.0 {
+        ((value.max(min) / min).ln() / (max / min).ln()).clamp(0.0, 1.0)
+    } else {
+        ((value - min) / (max - min)).clamp(0.0, 1.0)
+    }
+}
+
+fn knob_from_normalized(norm: f32, min: f32, max: f32, logarithmic: bool) -> f32 {
+    let norm = norm.clamp(0.0, 1.0);
+    if max <= min {
+        min
+    } else if logarithmic && min > 0.0 && max > 0.0 {
+        min * (max / min).powf(norm)
+    } else {
+        min + (max - min) * norm
+    }
+}
+
+fn paint_knob_arc(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    radius: f32,
+    start: f32,
+    end: f32,
+    stroke: egui::Stroke,
+) {
+    let steps = (((end - start).abs() / 0.08).ceil() as usize).max(2);
+    let points = (0..=steps)
+        .map(|index| {
+            let t = index as f32 / steps as f32;
+            let angle = start + (end - start) * t;
+            center + egui::vec2(angle.cos(), angle.sin()) * radius
+        })
+        .collect();
+    painter.add(egui::Shape::line(points, stroke));
+}
+
+/// Logic-style rotary control. Drag vertically to change the value, hold Shift
+/// for fine adjustment, and double-click to return to the default.
+fn knob(
+    ui: &mut egui::Ui,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    default: f32,
+    label: &str,
+    logarithmic: bool,
+    format: impl Fn(f32) -> String,
+) -> egui::Response {
+    let min = *range.start();
+    let max = *range.end();
+    let default_norm = knob_to_normalized(default, min, max, logarithmic);
+    let mut norm = knob_to_normalized(*value, min, max, logarithmic);
+
+    let (rect, mut response) = ui.allocate_exact_size(
+        egui::vec2(KNOB_WIDTH, KNOB_HEIGHT),
+        egui::Sense::click_and_drag(),
+    );
+
+    if response.double_clicked() {
+        norm = default_norm;
+    } else if response.dragged() {
+        let fine = ui.input(|input| input.modifiers.shift);
+        let speed = if fine { 0.1 } else { 1.0 };
+        norm -= response.drag_delta().y / KNOB_DRAG_PIXELS * speed;
+        norm = norm.clamp(0.0, 1.0);
+    }
+
+    let keyboard_step = if ui.input(|input| input.modifiers.shift) {
+        0.005
+    } else {
+        0.02
+    };
+    let keyboard_delta = ui.input(|input| {
+        let mut delta = 0.0;
+        if input.key_pressed(egui::Key::ArrowUp)
+            || input.key_pressed(egui::Key::ArrowRight)
+        {
+            delta += keyboard_step;
+        }
+        if input.key_pressed(egui::Key::ArrowDown)
+            || input.key_pressed(egui::Key::ArrowLeft)
+        {
+            delta -= keyboard_step;
+        }
+        delta
+    });
+    if response.has_focus() && keyboard_delta != 0.0 {
+        norm = (norm + keyboard_delta).clamp(0.0, 1.0);
+    }
+
+    let old_value = *value;
+    let next = knob_from_normalized(norm, min, max, logarithmic).clamp(min, max);
+    if next != old_value {
+        *value = next;
+        response.mark_changed();
+    }
+
+    if response.clicked() {
+        response.request_focus();
+    }
+    if response.hovered() || response.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+    }
+
+    let value_text = format(*value);
+    let center = egui::pos2(rect.center().x, rect.top() + KNOB_CENTER_Y);
+    let visuals = ui.style().interact(&response).clone();
+    let painter = ui.painter();
+    let accent = ui.visuals().selection.bg_fill;
+    let track = ui.visuals().widgets.inactive.bg_stroke.color;
+    let tick_color = ui.visuals().widgets.noninteractive.bg_stroke.color;
+    let text_color = ui.visuals().text_color();
+    let weak_text = ui.visuals().weak_text_color();
+
+    painter.text(
+        egui::pos2(rect.center().x, rect.top()),
+        egui::Align2::CENTER_TOP,
+        label,
+        egui::FontId::proportional(10.0),
+        weak_text,
+    );
+
+    for tick in 0..=4 {
+        let angle = KNOB_START_ANGLE + KNOB_SWEEP * tick as f32 / 4.0;
+        let direction = egui::vec2(angle.cos(), angle.sin());
+        painter.line_segment(
+            [
+                center + direction * (KNOB_ARC_RADIUS + 3.0),
+                center + direction * (KNOB_ARC_RADIUS + 5.0),
+            ],
+            egui::Stroke::new(1.0_f32, tick_color),
+        );
+    }
+
+    paint_knob_arc(
+        painter,
+        center,
+        KNOB_ARC_RADIUS,
+        KNOB_START_ANGLE,
+        KNOB_START_ANGLE + KNOB_SWEEP,
+        egui::Stroke::new(2.0_f32, track),
+    );
+    // Bipolar ranges (for example pitch) fill outwards from the centre.
+    let arc_origin = if min < 0.0 && max > 0.0 {
+        knob_to_normalized(0.0, min, max, logarithmic)
+    } else {
+        0.0
+    };
+    let (fill_start, fill_end) = if norm >= arc_origin {
+        (
+            KNOB_START_ANGLE + KNOB_SWEEP * arc_origin,
+            KNOB_START_ANGLE + KNOB_SWEEP * norm,
+        )
+    } else {
+        (
+            KNOB_START_ANGLE + KNOB_SWEEP * norm,
+            KNOB_START_ANGLE + KNOB_SWEEP * arc_origin,
+        )
+    };
+    if (fill_end - fill_start).abs() > 0.001 {
+        paint_knob_arc(
+            painter,
+            center,
+            KNOB_ARC_RADIUS,
+            fill_start,
+            fill_end,
+            egui::Stroke::new(2.5_f32, accent),
+        );
+    }
+
+    painter.circle_filled(center, KNOB_RADIUS, visuals.bg_fill);
+    painter.circle_stroke(center, KNOB_RADIUS, visuals.bg_stroke);
+    painter.circle_stroke(
+        center,
+        KNOB_RADIUS - 3.0,
+        egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(8)),
+    );
+
+    let pointer_angle = KNOB_START_ANGLE + KNOB_SWEEP * norm;
+    let pointer_direction = egui::vec2(pointer_angle.cos(), pointer_angle.sin());
+    painter.line_segment(
+        [
+            center + pointer_direction * (KNOB_RADIUS * 0.35),
+            center + pointer_direction * (KNOB_RADIUS * 0.86),
+        ],
+        egui::Stroke::new(2.0_f32, visuals.fg_stroke.color),
+    );
+    painter.circle_filled(center, 2.0, accent);
+
+    painter.text(
+        egui::pos2(rect.center().x, rect.bottom() - 1.0),
+        egui::Align2::CENTER_BOTTOM,
+        &value_text,
+        egui::FontId::proportional(11.0),
+        text_color,
+    );
+
+    response.on_hover_text(format!(
+        "{}: {}\nDrag vertically to adjust · Shift for fine · Double-click to reset",
+        label, value_text
+    ))
+}
+
+fn format_frequency(value: f32) -> String {
+    if value >= 1_000.0 {
+        format!("{:.1} kHz", value / 1_000.0)
+    } else {
+        format!("{:.0} Hz", value)
+    }
 }
 
 /// Clip gain at a source-frame offset after applying the fade envelopes.
@@ -4235,10 +4489,11 @@ fn load_wav_interleaved(path: &Path) -> Result<(Vec<f32>, u16, u32)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        bit_crush, clip_gain_at, filter_audio, load_wav_interleaved,
-        load_wav_range_interleaved, processed_file_stem, render_pitch_stretch,
-        reverse_interleaved, saturate, tremolo, wav_file_info, wav_peak, write_wav_f32,
-        write_wav_range, write_wav_range_with_envelope, ClipSourceState, FilterKind,
+        bit_crush, clip_gain_at, filter_audio, knob_from_normalized, knob_to_normalized,
+        load_wav_interleaved, load_wav_range_interleaved, processed_file_stem,
+        render_pitch_stretch, reverse_interleaved, saturate, tremolo, wav_file_info,
+        wav_peak, write_wav_f32, write_wav_range, write_wav_range_with_envelope,
+        ClipSourceState, FilterKind,
     };
     use daw_core::audio_pool::AudioFileRef;
     use daw_core::clip::{AudioClip, Fade, FadeCurve, TimelinePos};
@@ -4374,6 +4629,22 @@ mod tests {
         // Clip gain is applied and limited to the mixer's 4x ceiling.
         assert!((clip_gain_at(50, 100, 0.5, None, None) - 0.5).abs() < 1e-6);
         assert!((clip_gain_at(50, 100, 10.0, None, None) - 4.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn knob_normalization_round_trips_linear_and_logarithmic_values() {
+        for value in [-12.0f32, 0.0, 12.0] {
+            let norm = knob_to_normalized(value, -12.0, 12.0, false);
+            assert!((norm - (value + 12.0) / 24.0).abs() < 1e-6);
+            let round_trip = knob_from_normalized(norm, -12.0, 12.0, false);
+            assert!((round_trip - value).abs() < 1e-6);
+        }
+
+        for value in [20.0f32, 1_000.0, 20_000.0] {
+            let norm = knob_to_normalized(value, 20.0, 20_000.0, true);
+            let round_trip = knob_from_normalized(norm, 20.0, 20_000.0, true);
+            assert!((round_trip - value).abs() < 0.1);
+        }
     }
 
     #[test]

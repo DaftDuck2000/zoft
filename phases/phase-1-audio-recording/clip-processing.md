@@ -55,8 +55,10 @@ Offline clip processing: gain, pitch shift, time stretch, reverse, normalize, bi
 - **Audio Effects window**: right-click a clip in the arrange view to open a
   floating window with the effect list (Normalize, Bake into Clip, Reverse,
   Pitch Shift, Time Stretch, Bit Crusher, Saturation, Filter, Tremolo). The
-  selected effect shows its parameters and a single **Apply** button. The
-  window stays open, so several effects can be applied in sequence.
+  selected effect shows its parameters as Logic-style rotary knobs and a single
+  **Apply** button. Drag a knob vertically to adjust it, hold Shift for fine
+  control, or double-click to restore its default. The window stays open, so
+  several effects can be applied in sequence.
 - **Bake into Clip**: renders the visible source range with the clip gain and
   fade-in/fade-out envelopes applied, matching the playback mixer's envelope.
   The output is a new `<name>_process_<uuid>.wav`; the clip then points at it
@@ -140,4 +142,5 @@ enum NormalizeMode {
 - 2026-10-21: Right-click opens a floating Audio Effects window with an effect list and one Apply button (replaces the inline processing controls and context menu)
 - 2026-10-21: Bake into Clip (formerly Gain & Fades) bakes clip gain and fade envelopes into a new WAV, resets the clip's gain/fades, and is undoable
 - 2026-10-21: Added Bit Crusher, Saturation, Filter and Tremolo effect processors; renamed the gain/fade bake action to Bake into Clip
+- 2026-10-21: Replaced the Audio Effects sliders with Logic-style rotary knobs (vertical drag, Shift fine adjustment, double-click reset)
 - Remaining: listening tests for pitch/time and creative effects, stretch mode presets, consolidate, bounce in place, LUFS normalize
