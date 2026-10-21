@@ -4,7 +4,7 @@ A fully vibe coded side project, just because I am not paying for an existing so
 
 ## Status
 
-**Phase 0: Foundation** — In Progress
+**Phases 0–1: Foundation + Audio Recording & Editing** — In Progress
 
 See [PLAN.md](PLAN.md) for detailed roadmap and [SPEC.md](SPEC.md) for technical specification.
 

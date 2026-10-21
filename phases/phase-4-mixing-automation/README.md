@@ -17,6 +17,12 @@
 - 4.1 → 4.2 → 4.3 (sequential)
 - 4.4 can start after 4.1
 
+## Status Notes
+
+Phase 1's playback mixer already provides clip gain, track mute/solo/volume,
+fades and automatic crossfades, and Phase 1.4 has LUFS measurement groundwork.
+There is no mixer view, bus routing, automation or bounce/export UI yet.
+
 ## Milestone: M4 — Full Mix & Automate (Week 92)
 
 - [ ] Mixer: faders, meters, inserts, sends, routing

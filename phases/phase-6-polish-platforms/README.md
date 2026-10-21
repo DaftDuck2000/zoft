@@ -20,6 +20,12 @@
 - 6.4 throughout, focused at end
 - 6.5 throughout, finalized at end
 
+## Status Notes
+
+The app currently targets Linux/X11 or Wayland via cpal and egui. No macOS or
+Windows build, iced/wgpu migration, PGO/SIMD pass, or documentation/factory
+content work has started.
+
 ## Milestone: M6 — v1.0 Release (Week 148)
 
 - [ ] macOS: Core Audio, AUv3, notarized, Apple Silicon

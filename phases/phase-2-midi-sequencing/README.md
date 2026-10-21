@@ -19,6 +19,12 @@
 - 2.4 can start after 2.1
 - 2.5 is stretch goal
 
+## Status Notes
+
+Only the `MidiClip` data model and the `TrackType::Midi` track variant exist as
+scaffolding. There is no MIDI I/O, recording, playback, piano roll or notation
+view yet.
+
 ## Milestone: M2 — MIDI Sequencing (Week 44)
 
 - [ ] Record MIDI → see in piano roll → edit → play back

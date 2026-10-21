@@ -18,6 +18,13 @@
 - 5.1 → 5.2 → 5.3 → 5.4 (sequential)
 - 5.5 can start after 5.1
 
+## Status Notes
+
+`daw-engine/src/plugin_host.rs` and the `daw-plugins` crate are placeholders.
+The workspace declares `vst3-sys`, `clack`/CLAP-related dependencies only as
+future groundwork; no CLAP/VST3 loading, scanning, sandboxing or UI embedding
+exists yet.
+
 ## Milestone: M5 — Plugin Host (Week 116)
 
 - [ ] Load CLAP/VST3 plugins

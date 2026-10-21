@@ -19,6 +19,12 @@
 - 3.4 can start after 3.1
 - 3.5 can start after 0.2 (DSP framework)
 
+## Status Notes
+
+The `daw-plugins` crate contains empty module stubs for the sampler,
+subtractive/wavetable synths, drum machine and effects; no instrument is
+implemented yet.
+
 ## Milestone: M3 — Built-in Instruments (Week 68)
 
 - [ ] Sampler loads SFZ/EXS24, plays multisamples

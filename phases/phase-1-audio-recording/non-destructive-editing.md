@@ -4,7 +4,7 @@
 ## ID: 1.3
 ## Priority: Critical
 ## Estimated: 3 weeks
-## Status: `[~]` In Progress
+## Status: `[✓]` Done
 ## Depends On: 1.2
 
 ## Description
@@ -111,6 +111,7 @@ fn snap_position(pos: TimelinePos, grid: SnapGrid, relative: bool) -> TimelinePo
 - 2026-10-21: Copy/paste/duplicate (Ctrl+C/V/D), delete (Delete) with recoverable clip data
 - 2026-10-21: Fade handles on clip corners + inspector curve/length editors (5 curve types)
 - 2026-10-21: Clip gain, fades and per-clip colour moved into the **Clip** section of the Clip Audio window
+- Remaining (post-phase polish): editable crossfade boundary/curve dragging; crossfades are currently automatic only
 - 2026-10-21: Undo/redo (Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y) with merged continuous property edits
 - 2026-10-21: Playback mixer slices clips by source_offset/length so edits are audible
 - 2026-10-21: Musical ruler (bars/beats default, time switchable) and time-signature picker; snapping follows the chosen signature

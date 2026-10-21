@@ -12,13 +12,13 @@ Build the main application window with egui: track list, transport bar, timeline
 ## Requirements
 
 - [✓] Main window: title bar, menu bar, status bar
-- [✓] Track list panel: add/remove tracks, track headers (name, color, M/S/R)
+- [~] Track list panel: track headers (name, colour, M/S/R, **Mon**, volume); add/remove/reorder tracks not implemented yet
 - [✓] Transport bar: play/stop/record, position display, tempo, time sig, metronome toggle
 - [✓] Timeline ruler: bars/beats, timecode, loop range markers, playhead
 - [✓] Clip lanes placeholder: empty track lanes showing clip blocks
 - [✓] Keyboard shortcuts: Space (play/stop), Enter (return to start), R (record)
-- [✓] Theme: Dark mode default, configurable colors
-- [✓] Window state persistence: size, position, panel sizes
+- [~] Theme: dark mode default; no light/user theme toggle yet
+- [ ] Window state persistence: size, position, panel sizes (not wired; eframe persistence is not enabled)
 
 ## Technical Details
 
@@ -76,13 +76,13 @@ struct UiState {
 ## Acceptance Criteria
 
 - [✓] Window opens, renders at 60 FPS
-- [✓] Add/remove tracks works
+- [~] Add/remove tracks works (track headers and controls work; add/remove UI not implemented)
 - [✓] Transport controls engine (play/stop/seek)
 - [✓] Position display updates in real-time
 - [✓] Timeline ruler shows correct bars/beats for tempo
-- [✓] Loop range visible and draggable
+- [✓] Loop range visible and draggable (ruler loop lane + In/Out buttons)
 - [✓] Keyboard shortcuts work
-- [✓] Window state persists across restarts
+- [ ] Window state persists across restarts
 
 ## Progress Log
 
@@ -91,21 +91,21 @@ struct UiState {
 - 2026-10-07: Transport bar connected (play/stop, position display)
 - 2026-10-07: Timeline ruler rendering (16 divisions, beat markers)
 - 2026-10-07: Keyboard shortcuts (Space play/stop, R record)
-- 2026-10-07: State persistence via eframe
+- 2026-10-21: Post-phase updates: ruler seek and loop lane, zoom/scroll, loop/In/Out, metronome, tempo/tap, track M/S/R/Mon/volume, Clip Audio window, History panel
 
 ## Future Tasks (Post-Phase 0)
 
-- [ ] **Cursor icon for playhead dragging**: Use `ResizeHorizontal` instead of `PointingHand` when hovering/dragging playhead
-- [ ] **Playhead click-to-seek**: Click on timeline ruler to jump playhead position
-- [ ] **Timeline zoom**: Ctrl+wheel to zoom in/out on timeline
-- [ ] **Timeline horizontal scroll**: Mouse wheel or drag to scroll horizontally
+- [✓] **Cursor icon for playhead dragging**: `ResizeHorizontal` while hovering/dragging the playhead
+- [✓] **Playhead click-to-seek**: ruler lower lane seeks; upper lane sets the loop
+- [✓] **Timeline zoom**: Ctrl+wheel to zoom in/out on timeline
+- [✓] **Timeline horizontal scroll**: Mouse wheel or middle-drag to scroll horizontally
 - [ ] **Vertical scroll**: Track list overflow handling
-- [ ] **Loop range UI**: Drag loop brace edges to set loop range
+- [✓] **Loop range UI**: Drag the ruler loop lane or use In/Out at the playhead
 - [ ] **Markers UI**: Flag icons on ruler, click to jump
 - [ ] **Track reordering**: Drag tracks to reorder in track list
 - [ ] **Track context menu**: Right-click to add/remove/duplicate tracks
-- [ ] **Track header controls**: M/S/R/Arm buttons, mini fader, pan
-- [ ] **Transport bar enhancements**: ◄◄ | ►► buttons, timecode dropdown, tap tempo
-- [ ] **Metronome toggle**: On/off with count-in
-- [ ] **Dark/light theme toggle**: User preference
+- [✓] **Track header controls**: M/S/R, monitor mode, volume fader; pan not yet
+- [~] **Transport bar enhancements**: Tap tempo and Bars/Time ruler dropdown done; ◄◄ | ►► buttons not yet
+- [✓] **Metronome toggle**: Click toggle; count-in not yet
+- [ ] **Dark/light theme toggle**: User preference (dark default only)
 - [ ] **Window state persistence**: Save/restore panel sizes, window position

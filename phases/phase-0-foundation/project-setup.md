@@ -4,7 +4,7 @@
 ## ID: 0.1
 ## Priority: Critical
 ## Estimated: 1 week
-## Status: `[✓]` Done
+## Status: `[~]` In Progress
 
 ## Description
 Set up Rust Cargo workspace, CI/CD pipeline, linting, formatting, and development tooling. Establish project conventions.
@@ -12,15 +12,15 @@ Set up Rust Cargo workspace, CI/CD pipeline, linting, formatting, and developmen
 ## Requirements
 
 - [✓] Cargo workspace with members: `daw-core`, `daw-engine`, `daw-ui`, `daw-plugins`, `xtask`, `zoft-app`
-- [✓] Rust toolchain pinned (rust-toolchain.toml)
-- [✓] GitHub Actions CI: build, test, clippy, fmt, audit
-- [✓] Pre-commit hooks: fmt, clippy, cargo check
-- [✓] Dependency policy: minimal deps, prefer std, audit regularly
-- [✓] Versioning: SemVer, conventional commits, changelog
+- [ ] Rust toolchain pinned (rust-toolchain.toml)
+- [ ] GitHub Actions CI: build, test, clippy, fmt, audit
+- [ ] Pre-commit hooks: fmt, clippy, cargo check
+- [~] Dependency policy: central workspace dependencies exist; no automated audit configured yet
+- [ ] Versioning: SemVer, conventional commits, changelog (no CHANGELOG yet)
 - [✓] Logging: `tracing` + `tracing-subscriber` (structured, filtered)
 - [✓] Error handling: `thiserror` + `anyhow` (library vs app)
-- [✓] Configuration: `config` crate (TOML, env, defaults)
-- [✓] Profiling: `pprof` / `flamegraph` integration
+- [~] Configuration: `config` crate available and a preferences model exists, but it is not wired into loading yet
+- [ ] Profiling: `pprof` / `flamegraph` integration (workspace dependency only, not wired)
 
 ## Technical Details
 
@@ -87,6 +87,6 @@ slotmap = "1.0"  # Generational indices for tracks/clips
 ## Progress Log
 
 - 2026-10-07: Created workspace structure with 6 crates
-- 2026-10-07: CI pipeline configured in GitHub Actions
-- 2026-10-07: Dependencies audited and minimal set selected
+- 2026-10-07: Central dependency policy established in the workspace Cargo.toml
 - 2026-10-07: Git repository initialized and pushed to GitHub
+- 2026-10-21: Status corrected to In Progress: no `rust-toolchain.toml`, GitHub Actions workflow, pre-commit hooks, CHANGELOG or wired profiling/config yet

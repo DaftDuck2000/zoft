@@ -4,19 +4,19 @@
 ## ID: 0.2
 ## Priority: Critical
 ## Estimated: 2 weeks
-## Status: `[✓]` Done
+## Status: `[~]` In Progress
 
 ## Description
-Build the core audio engine: cpal audio stream, lock-free ring buffer for UI↔audio communication, sample-accurate event scheduler, and basic DSP graph infrastructure.
+Build the core audio engine: cpal audio stream, lock-free ring buffer for UI↔audio communication, sample-accurate event scheduler, and basic DSP graph infrastructure. The current engine is a working cpal output/input engine with a mutex-protected playback mixer; the scheduler, graph, parameter and metering modules are still placeholders.
 
 ## Requirements
 
-- [✓] CPAL audio output stream (configurable sample rate, buffer size)
-- [✓] Lock-free ring buffer (SPSC) for UI → Audio thread messages
-- [✓] Sample-accurate event scheduler (timestamped events, frame offset)
-- [✓] Basic DSP graph: Node trait, connection, topological sort
-- [✓] Audio thread: process callback, meter collection, CPU monitoring
-- [✓] Parameter system: smooth parameter changes (linear/exponential ramps)
+- [✓] CPAL audio output stream (configurable sample rate, buffer size) and input stream for recording/monitoring
+- [ ] Lock-free ring buffer (SPSC) for UI → Audio thread messages (current engine uses mutex-protected state and channels)
+- [ ] Sample-accurate event scheduler (timestamped events, frame offset) (`daw-engine/src/scheduler.rs` is a placeholder)
+- [ ] Basic DSP graph: Node trait, connection, topological sort (`daw-engine/src/process_graph.rs` is a placeholder)
+- [~] Audio thread: output callback and mixer work; meter collection and CPU monitoring are not implemented
+- [ ] Parameter system: smooth parameter changes (linear/exponential ramps) (`daw-engine/src/parameters.rs` is a placeholder)
 - [ ] Silence detection & auto-suspend (optional)
 
 ## Technical Details
@@ -91,7 +91,5 @@ struct ProcessContext {
 ## Progress Log
 
 - 2026-10-07: CPAL stream initialized with default output device
-- 2026-10-07: Lock-free ring buffer working via crossbeam channels
-- 2026-10-07: DSP graph processes nodes (placeholder)
-- 2026-10-07: Parameter smoothing implemented (linear/exponential)
 - 2026-10-07: AudioEngine struct with start/stop/sample_rate/channels
+- 2026-10-21: Status corrected to In Progress: playback/input streams work through a mutex-protected mixer; `scheduler.rs`, `process_graph.rs`, `parameters.rs` and `metering.rs` remain placeholders

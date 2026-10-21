@@ -167,7 +167,7 @@ impl MacroRecorder {
 - [x] Ctrl+Shift+Z redoes
 - [x] History panel shows readable descriptions
 - [x] Drag = single undo step
-- [ ] Snapshots allow jumping back 100+ steps instantly
+- [ ] Snapshots allow jumping back 100+ steps instantly (the History panel currently jumps by replaying cheap edit actions; no serialized snapshots yet)
 - [x] Memory usage < 500 MB for 1000 commands (entries are small enums/boxes; no audio data is cloned)
 - [x] Undo during playback works (the mixer reloads after each undo/redo)
 

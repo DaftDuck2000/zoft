@@ -7,11 +7,12 @@
 
 | ID | Feature | Status | File |
 |----|---------|--------|------|
-| 1.1 | Audio Track & Recording | `[✓]` | `audio-track-record.md` |
+| 1.1 | Audio Track & Recording | `[~]` | `audio-track-record.md` |
 | 1.2 | Waveform Rendering | `[~]` | `waveform-rendering.md` |
-| 1.3 | Non-Destructive Clip Editing | `[~]` | `non-destructive-editing.md` |
+| 1.3 | Non-Destructive Clip Editing | `[✓]` | `non-destructive-editing.md` |
 | 1.4 | Clip Processing | `[~]` | `clip-processing.md` |
 | 1.5 | Undo/Redo System | `[~]` | `undo-redo.md` |
+| 1.6 | Audio Device Enumeration | `[~]` | `audio-device-enumeration.md` |
 
 ## Dependencies
 
@@ -27,7 +28,7 @@
 
 ## Progress Summary
 
-**1.1 Audio Track & Recording** - `[✓]` Done
+**1.1 Audio Track & Recording** - `[~]` In Progress
 - Audio track model has record_arm, monitor_mode, input/output
 - CPAL backend supports input device enumeration
 - BWF writer with `bext` chunk implemented
@@ -36,7 +37,9 @@
 - Input device selection dropdown in transport bar
 - Background writer task with tokio for BWF writing
 - Recording level meter in the transport bar (pre-fader peak + RMS from the input stream)
-- Input monitoring: track **Mon** cycles Off/Auto/On and mixes the input into the output while the input stream is open (during a take); the mode is undoable
+- Input monitoring: track **Mon** cycles Off/Auto/On; the input and output streams stay open while armed/On so monitoring is audible before and during a take; the mode is undoable
+- Punch recording: **Punch** enables a capture range set with **P-In**/**P-Out** at the playhead; an armed take waits for punch-in and ends at punch-out while the transport keeps rolling
+- Not yet: multi-take, disk-space warning, input monitoring mode details beyond the armed/recording heuristic
 
 **1.2 Waveform Rendering** - `[~]` In Progress
 - Overview (min/max + RMS) pre-computed per audio file, stored and serialized with the project
@@ -44,7 +47,7 @@
 - Sample-accurate detail view at high zoom (windowed decode, LRU cache)
 - Track colors, clip gain visualization, fade curves, selection highlight, silent-region dimming
 - Overview generated on background threads (no UI hitch after recording)
-- Remaining: GPU texture atlas layout, perf benchmarks (overview <1s/min, 100 tracks @60 FPS), runtime verification
+- Remaining: GPU texture atlas layout (deferred to a future wgpu migration), perf benchmarks (overview <1s/min, 100 tracks @60 FPS)
 
 **Playback (sound output)** - Pulled forward from M1 milestone
 - `daw-engine/src/playback.rs`: real-time mixer (clip gain, track mute/solo/volume, fades, sample-rate conversion) feeding the CPAL output callback
@@ -62,7 +65,7 @@
 - Tempo field (drag or type BPM) and **Tap** tempo; both are undoable and update the metronome live
 - Not yet: transport scrub
 
-**1.3 Non-Destructive Clip Editing** - `[~]` In Progress
+**1.3 Non-Destructive Clip Editing** - `[✓]` Done
 - Drag clips to move them (horizontal + between tracks) with snapping: Off / Bar / Beat (default) / 1/8 / 1/16 (hold Alt to bypass)
 - Edge drags trim non-destructively (adjusts `source_offset`/`length`; the WAV file is never touched)
 - Split at the playhead (S) creates a second clip referencing the same source
@@ -95,3 +98,10 @@
 - Every entry has a readable description; the **History** button in the arrange toolbar opens a floating panel that lists past edits, shows redoable edits and jumps to any point
 - Continuous slider/drag edits merge into one undo step; undo/redo reload the mixer when playback is running
 - Not yet: serialized snapshots for very large jumps, automation edit integration, optional per-track scope
+
+**1.6 Audio Device Enumeration** - `[~]` In Progress
+- `AudioDeviceInfo` has `raw_name` for matching; ALSA/`surround51:CARD=...` names are cleaned into user-friendly display names
+- Input/output device dropdowns use the cleaned names; the default input is marked
+- `daw-engine/src/device_enumerator.rs` contains a `DeviceEnumerator` trait plus `UdevDeviceEnumerator`, optional `PipeWireDeviceEnumerator` and `LinuxDeviceEnumerator` scaffolding, but it is not wired into the backend yet
+- Not yet: enable the `pipewire-support` feature, call the enumerator from the backend, and verify libudev/PipeWire naming on real hardware
+- Remaining: Windows/macOS regression checks

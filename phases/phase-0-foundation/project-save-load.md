@@ -4,10 +4,10 @@
 ## ID: 0.5
 ## Priority: Critical
 ## Estimated: 1 week
-## Status: `[✓]` Done
+## Status: `[~]` In Progress
 
 ## Description
-Implement project serialization: binary `.zoft` format with versioning, migration, and fast load/save. Support for audio file references (not embedded).
+Implement project serialization: binary `.zoft` format with versioning, migration, and fast load/save. Support for audio file references (not embedded). The binary format and serializer exist, but the app does not expose Save/Open UI yet.
 
 ## Requirements
 
@@ -16,6 +16,7 @@ Implement project serialization: binary `.zoft` format with versioning, migratio
 - [✓] Audio files: Referenced by relative path, not embedded
 - [✓] Versioning: Schema version per section, migration on load
 - [✓] Compression: `lz4` for large sections (automation, clip data)
+- [ ] Save/Open UI wired into the app (only the serializer API exists)
 - [ ] Recent projects menu (last 10)
 - [ ] Auto-save: Configurable interval, crash recovery
 - [ ] Project templates: Empty, Band, Electronic, Scoring
@@ -93,4 +94,5 @@ struct AudioFileRef {
 - 2026-10-07: Serialization working for core types (bincode + lz4 + xxHash)
 - 2026-10-07: Section versioning + migration framework
 - 2026-10-07: Audio pool references (relative paths)
-- 2026-10-07: Project save/load integrated in UI (placeholder)
+- 2026-10-07: Project save/load serializer implemented in `daw-core/src/serialization.rs` (API only; no UI Save/Open yet)
+- 2026-10-21: Status corrected to In Progress: the app launches a new in-memory project and does not yet wire Save/Open, recent projects, auto-save or templates

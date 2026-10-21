@@ -115,4 +115,5 @@ fn paint_waveform(ui: &mut Ui, clip: &AudioClip, overview: &WaveformOverview, zo
 - 2026-10-20: Selection highlight, silent-region dimming, RMS overlay, fade curves, gain label
 - 2026-10-20: Overview generated off the UI thread after recording; unique filename per take
 - 2026-10-20: Playhead/timeline can extend past the last clip; view follows playback
-- Next: Runtime verification of rendering; benchmark overview generation and scrolling performance
+- 2026-10-21: Rendering path confirmed in daily editing; GPU atlas and benchmark numbers still outstanding
+- Next: Benchmark overview generation and scrolling performance; defer GPU atlas to the wgpu migration

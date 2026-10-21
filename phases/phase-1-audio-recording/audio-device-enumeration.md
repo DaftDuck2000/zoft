@@ -14,16 +14,16 @@ Implement cross-platform audio device enumeration with user-friendly device name
 
 ## Requirements
 
-- [ ] Add `libudev` and `regex` dependencies
-- [ ] Add optional `pipewire` feature flag
-- [ ] Create `DeviceEnumerator` trait for cross-platform abstraction
-- [ ] Implement `UdevDeviceEnumerator` for Linux (libudev)
-- [ ] Implement optional `PipeWireDeviceEnumerator` (feature-gated)
-- [ ] Implement fallback to cpal device names
-- [ ] Update `AudioDeviceInfo` with `raw_name` field for matching
-- [ ] Update `clean_device_name` for user-friendly display names
-- [ ] Add device enumeration to audio backend
-- [ ] Update UI device selector to use new enumeration
+- [✓] Add `libudev` and `regex` dependencies (`libudev` is optional for the `pipewire-support` feature; `regex` is used for name cleaning)
+- [✓] Add optional `pipewire` feature flag (`pipewire-support` in `daw-engine/Cargo.toml`)
+- [~] Create `DeviceEnumerator` trait for cross-platform abstraction (trait exists in `daw-engine/src/device_enumerator.rs`, not yet wired into `lib.rs`)
+- [~] Implement `UdevDeviceEnumerator` for Linux (libudev) (source exists, not yet compiled into the backend)
+- [~] Implement optional `PipeWireDeviceEnumerator` (feature-gated) (source exists; feature is opt-in and disabled by default)
+- [✓] Implement fallback to cpal device names (`CpalDeviceEnumerator` plus the backend's cpal enumeration)
+- [✓] Update `AudioDeviceInfo` with `raw_name` field for matching
+- [✓] Update `clean_device_name` for user-friendly display names
+- [✓] Add device enumeration to audio backend (cpal input/output device listing)
+- [✓] Update UI device selector to use new enumeration
 
 ## Technical Details
 
@@ -83,14 +83,15 @@ pub struct AudioDeviceInfo {
 
 ## Acceptance Criteria
 
-- [ ] Device dropdown shows "Fifine Microphone" instead of "surround51:CARD=Generic_1,DEV=0"
-- [ ] All devices listed with meaningful names
-- [ ] Default device marked correctly
-- [ ] Recording works with selected device
-- [ ] No regression on Windows/macOS
-- [ ] PipeWire metadata used when available (feature-gated)
+- [✓] Device dropdown shows a cleaned name such as "Fifine Microphone" or the card name instead of raw `surround51:CARD=Generic_1,DEV=0`
+- [✓] All devices listed with meaningful names (cpal names are cleaned by `clean_device_name`)
+- [✓] Default device marked correctly
+- [✓] Recording works with selected device
+- [ ] No regression on Windows/macOS (not tested in this environment)
+- [ ] PipeWire metadata used when available (feature-gated; `pipewire-support` is not enabled by default and the enumerator is not wired into the backend yet)
 
 ## Progress Log
 
 - 2026-10-09: Added feature to plan
 - 2026-10-09: Started implementation
+- 2026-10-21: `AudioDeviceInfo.raw_name`, `clean_device_name` and the input/output dropdowns are in production use; `device_enumerator.rs` contains the trait, udev/PipeWire/cpal enumerators, but the module and `pipewire-support` feature are not wired into the compiled backend yet

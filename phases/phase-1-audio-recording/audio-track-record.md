@@ -89,7 +89,9 @@ Monitor Mix        Recording           Metering
 
 - [✓] Arm track → record button enabled
 - [✓] Press record → transport starts, audio written to disk
-- [✓] Monitor modes work: Off (silent), Auto (hear when armed), On (always)
+- [✓] Monitor modes work: Off (silent), Auto (monitor when armed/recording), On (always; input/output streams open while monitoring)
+- [✓] Recording level meter shows pre-fader peak + RMS
+- [✓] Punch in/out records only between the punch points while the transport keeps rolling
 - [✓] BWF file readable in other DAWs (Reaper, Logic, Pro Tools)
 - [✓] `bext` chunk contains correct time_reference
 - [ ] Multi-take creates separate clips

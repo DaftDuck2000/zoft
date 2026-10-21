@@ -171,4 +171,4 @@ enum NormalizeMode {
 - 2026-10-21: Added LUFS Normalize with ITU-R BS.1770 integrated loudness measurement, −30…−6 LUFS target, and a −1 dBFS sample-peak safety cap
 - 2026-10-21: Added Time Stretch modes: Tape varispeed, Elastic (R3 fine), Musical (R3 fine with centre focus)
 - 2026-10-21: Added Consolidate: renders a touching/overlapping run of clips on a track through the playback mixer, preserving gain, fades and automatic crossfades; undo restores the originals
-- Remaining: listening tests for pitch/time and creative effects, bounce in place
+- Remaining: listening tests for pitch/time and creative effects, bounce in place (depends on insert/send processing from a later phase)

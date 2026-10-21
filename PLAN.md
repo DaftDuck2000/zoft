@@ -24,17 +24,13 @@
 
 | ID | Feature | Status | Est. | Actual | Notes |
 |----|---------|--------|------|--------|-------|
-| 0.1 | Project Setup & Workspace | `[✓]` | 1w | 1w | Cargo workspace, CI, linting |
-| 0.2 | Audio Engine Skeleton | `[✓]` | 2w | 1w | CPAL, ring buffer, DSP graph |
-| 0.3 | Basic Transport | `[✓]` | 1w | 1w | Play/Stop, tempo, timeline |
-| 0.4 | Minimal UI Shell | `[✓]` | 2w | 1w | egui, track list, transport bar |
-| 0.5 | Project Save/Load | `[✓]` | 1w | 1w | Binary .zoft, LZ4, xxHash |
+| 0.1 | Project Setup & Workspace | `[~]` | 1w | | Workspace + deps; no CI/toolchain/CHANGELOG yet |
+| 0.2 | Audio Engine Skeleton | `[~]` | 2w | | CPAL output/input + mixer; graph/scheduler placeholders |
+| 0.3 | Basic Transport | `[✓]` | 1w | 1w | Play/Stop, tempo, time sig, loop, metronome, tap |
+| 0.4 | Minimal UI Shell | `[~]` | 2w | | egui, track list, transport; no markers/theme/persistence |
+| 0.5 | Project Save/Load | `[~]` | 1w | | Binary .zoft serializer; no Save/Open UI yet |
 
 ---
-
-## Phase 1: Audio Recording & Editing (Months 4-8)
-
-**Goal**: Record, edit, and manipulate audio clips non-destructively
 
 ## Phase 1: Audio Recording & Editing (Months 4-8)
 
@@ -44,12 +40,12 @@
 
 | ID | Feature | Status | Est. | Actual | Notes |
 |----|---------|--------|------|--------|-------|
-| 1.1 | Audio Track & Recording | `[✓]` | 2w | 1w | Arm, monitor, BWF write |
-| 1.2 | Waveform Rendering | `[~]` | 2w | | Overview + detail views |
-| 1.3 | Non-Destructive Clip Editing | `[ ]` | 3w | | Split, trim, move, fade |
-| 1.4 | Clip Processing | `[ ]` | 2w | | Gain, pitch, stretch, reverse |
-| 1.5 | Undo/Redo System | `[ ]` | 1w | | Command pattern, snapshots |
-| 1.6 | Audio Device Enumeration | `[~]` | 2w | | libudev + optional PipeWire |
+| 1.1 | Audio Track & Recording | `[~]` | 2w | | Arm, monitor, BWF, level meter, punch; multi-take/disk warning left |
+| 1.2 | Waveform Rendering | `[~]` | 2w | | Overview + detail views; benchmarks/GPU atlas left |
+| 1.3 | Non-Destructive Clip Editing | `[✓]` | 3w | | Split, trim, move, fades, crossfades, undo |
+| 1.4 | Clip Processing | `[~]` | 2w | | Normalize, LUFS, pitch/time, creative effects, consolidate; bounce left |
+| 1.5 | Undo/Redo System | `[~]` | 1w | | History + panel + labels; snapshots left |
+| 1.6 | Audio Device Enumeration | `[~]` | 2w | | Clean names/raw_name in use; enumerator scaffolding not wired |
 
 ---
 
