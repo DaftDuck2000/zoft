@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use daw_core::audio_pool::AudioFileRef;
-use daw_core::clip::{AudioClip, ClipId, Fade, FadeCurve, TimelinePos};
+use daw_core::clip::{AudioClip, ClipId, Fade, FadeCurve, TimeStretchMode, TimelinePos};
 use daw_core::project::{BitDepth, Color};
 use daw_core::track::TrackId;
 use daw_core::Project;
@@ -344,6 +344,7 @@ struct EffectsWindow {
     selected: EffectKind,
     pitch: f32,
     stretch: f32,
+    stretch_mode: TimeStretchMode,
     formants: bool,
     lufs_target: f32,
     crush_bits: f32,
@@ -363,6 +364,7 @@ impl EffectsWindow {
             selected: EffectKind::Normalize,
             pitch: 0.0,
             stretch: 1.0,
+            stretch_mode: TimeStretchMode::Elastic,
             formants: true,
             lufs_target: -14.0,
             crush_bits: 8.0,
@@ -1560,6 +1562,7 @@ impl AppUI {
         semitones: f32,
         stretch: f32,
         preserve_formants: bool,
+        mode: TimeStretchMode,
     ) -> bool {
         let semitones = semitones.clamp(-24.0, 24.0);
         let stretch = stretch.clamp(0.25, 4.0);
@@ -1583,35 +1586,56 @@ impl AppUI {
 
         let parent = source_path.parent().unwrap_or_else(|| Path::new(""));
         let render_id = uuid::Uuid::new_v4();
-        let temp_path = parent.join(format!(".zoft_process_{}.wav", render_id));
         let output_path = parent.join(format!(
             "{}_process_{}.wav",
             processed_file_stem(&source_path),
             render_id
         ));
 
-        if let Err(e) = write_wav_range(&source_path, source_offset, source_length, &temp_path)
-        {
-            let _ = std::fs::remove_file(&temp_path);
-            self.error_message = Some(format!("Could not prepare clip audio: {}", e));
-            return false;
-        }
+        if mode == TimeStretchMode::Tape && !pitch_active {
+            let (samples, channels, sample_rate) =
+                match load_wav_range_interleaved(&source_path, source_offset, source_length) {
+                    Ok(range) => range,
+                    Err(e) => {
+                        self.error_message = Some(format!("Could not read clip audio: {}", e));
+                        return false;
+                    }
+                };
+            let stretched = tape_stretch_interleaved(&samples, channels, stretch);
+            if let Err(e) =
+                write_wav_f32(&output_path, &stretched, channels.max(1), sample_rate)
+            {
+                let _ = std::fs::remove_file(&output_path);
+                self.error_message = Some(format!("Could not write stretched audio: {}", e));
+                return false;
+            }
+        } else {
+            let temp_path = parent.join(format!(".zoft_process_{}.wav", render_id));
+            if let Err(e) =
+                write_wav_range(&source_path, source_offset, source_length, &temp_path)
+            {
+                let _ = std::fs::remove_file(&temp_path);
+                self.error_message = Some(format!("Could not prepare clip audio: {}", e));
+                return false;
+            }
 
-        let render = render_pitch_stretch(
-            &temp_path,
-            &output_path,
-            semitones,
-            stretch,
-            preserve_formants,
-        );
-        let _ = std::fs::remove_file(&temp_path);
-        if let Err(e) = render {
-            let _ = std::fs::remove_file(&output_path);
-            self.error_message = Some(format!(
-                "Pitch/time processing failed: {}. Is rubberband installed?",
-                e
-            ));
-            return false;
+            let render = render_pitch_stretch(
+                &temp_path,
+                &output_path,
+                semitones,
+                stretch,
+                preserve_formants,
+                mode,
+            );
+            let _ = std::fs::remove_file(&temp_path);
+            if let Err(e) = render {
+                let _ = std::fs::remove_file(&output_path);
+                self.error_message = Some(format!(
+                    "Pitch/time processing failed: {}. Is rubberband installed?",
+                    e
+                ));
+                return false;
+            }
         }
 
         let (frames, spec) = match wav_file_info(&output_path) {
@@ -2083,6 +2107,25 @@ impl AppUI {
                             }
                             EffectKind::TimeStretch => {
                                 ui.label(egui::RichText::new("Time Stretch").strong());
+                                ui.horizontal(|ui| {
+                                    ui.label("Mode:");
+                                    egui::ComboBox::from_id_salt("effect_stretch_mode")
+                                        .selected_text(stretch_mode_label(window.stretch_mode))
+                                        .width(110.0)
+                                        .show_ui(ui, |ui| {
+                                            for mode in [
+                                                TimeStretchMode::Tape,
+                                                TimeStretchMode::Elastic,
+                                                TimeStretchMode::Musical,
+                                            ] {
+                                                ui.selectable_value(
+                                                    &mut window.stretch_mode,
+                                                    mode,
+                                                    stretch_mode_label(mode),
+                                                );
+                                            }
+                                        });
+                                });
                                 knob(
                                     ui,
                                     &mut window.stretch,
@@ -2096,7 +2139,17 @@ impl AppUI {
                                 if let Some(seconds) = target {
                                     ui.weak(format!("New clip length: {:.2} s", seconds));
                                 }
-                                ui.weak("Changes the clip length in place; pitch is unchanged.");
+                                ui.weak(match window.stretch_mode {
+                                    TimeStretchMode::Tape => {
+                                        "Varispeed: length and pitch change together, like tape."
+                                    }
+                                    TimeStretchMode::Elastic => {
+                                        "Rubber Band R3 fine mode; smooth and best for sustained sounds."
+                                    }
+                                    TimeStretchMode::Musical => {
+                                        "Rubber Band R3 with centre focus; best for mixed material."
+                                    }
+                                });
                             }
                             EffectKind::BitCrusher => {
                                 ui.label(egui::RichText::new("Bit Crusher").strong());
@@ -2257,12 +2310,19 @@ impl AppUI {
                         window.pitch,
                         1.0,
                         window.formants,
+                        TimeStretchMode::Elastic,
                     ) {
                         window.pitch = 0.0;
                     }
                 }
                 EffectKind::TimeStretch => {
-                    if self.apply_pitch_stretch(window.clip_id, 0.0, window.stretch, false) {
+                    if self.apply_pitch_stretch(
+                        window.clip_id,
+                        0.0,
+                        window.stretch,
+                        false,
+                        window.stretch_mode,
+                    ) {
                         window.stretch = 1.0;
                     }
                 }
@@ -2547,6 +2607,14 @@ fn format_frequency(value: f32) -> String {
         format!("{:.1} kHz", value / 1_000.0)
     } else {
         format!("{:.0} Hz", value)
+    }
+}
+
+fn stretch_mode_label(mode: TimeStretchMode) -> &'static str {
+    match mode {
+        TimeStretchMode::Tape => "Tape",
+        TimeStretchMode::Elastic => "Elastic",
+        TimeStretchMode::Musical => "Musical",
     }
 }
 
@@ -4512,6 +4580,7 @@ fn render_pitch_stretch(
     semitones: f32,
     stretch: f32,
     preserve_formants: bool,
+    mode: TimeStretchMode,
 ) -> Result<()> {
     let pitch_active = semitones.abs() >= 0.05;
     let stretch_active = (stretch - 1.0).abs() >= 0.005;
@@ -4521,6 +4590,9 @@ fn render_pitch_stretch(
 
     let mut command = std::process::Command::new("rubberband");
     command.arg("--quiet").arg("--fine");
+    if mode == TimeStretchMode::Musical {
+        command.arg("--centre-focus");
+    }
     if pitch_active {
         command.arg("--pitch").arg(format!("{:.4}", semitones));
         if preserve_formants {
@@ -4544,6 +4616,34 @@ fn render_pitch_stretch(
         anyhow::bail!("rubberband: {}", message);
     }
     Ok(())
+}
+
+/// Tape-style varispeed: resample the clip so length and pitch change together.
+/// `stretch` above 1 makes the clip longer and lower; below 1 makes it shorter
+/// and higher.
+fn tape_stretch_interleaved(samples: &[f32], channels: u16, stretch: f32) -> Vec<f32> {
+    let channels = channels.max(1) as usize;
+    let frames = samples.len() / channels;
+    let stretch = stretch.clamp(0.25, 4.0) as f64;
+    if frames == 0 {
+        return Vec::new();
+    }
+    let out_frames = ((frames as f64 * stretch).round() as usize).max(1);
+    let mut out = vec![0.0f32; out_frames * channels];
+
+    for frame in 0..out_frames {
+        let src_pos = frame as f64 / stretch;
+        let i0 = (src_pos.floor() as usize).min(frames - 1);
+        let i1 = (i0 + 1).min(frames - 1);
+        let frac = (src_pos - i0 as f64) as f32;
+        for channel in 0..channels {
+            let a = samples[i0 * channels + channel];
+            let b = samples[i1 * channels + channel];
+            out[frame * channels + channel] = a + (b - a) * frac;
+        }
+    }
+
+    out
 }
 
 /// Reduce bit depth and hold samples for a crunchy, digital character.
@@ -4747,11 +4847,11 @@ mod tests {
         bit_crush, clip_gain_at, filter_audio, knob_from_normalized, knob_to_normalized,
         load_wav_interleaved, load_wav_range_interleaved, measure_integrated_loudness,
         processed_file_stem, render_pitch_stretch, reverse_interleaved, saturate, tremolo,
-        wav_file_info, wav_peak, write_wav_f32, write_wav_range,
+        tape_stretch_interleaved, wav_file_info, wav_peak, write_wav_f32, write_wav_range,
         write_wav_range_with_envelope, ClipSourceState, FilterKind,
     };
     use daw_core::audio_pool::AudioFileRef;
-    use daw_core::clip::{AudioClip, Fade, FadeCurve, TimelinePos};
+    use daw_core::clip::{AudioClip, Fade, FadeCurve, TimeStretchMode, TimelinePos};
     use daw_core::project::BitDepth;
 
     #[test]
@@ -4900,6 +5000,23 @@ mod tests {
             let round_trip = knob_from_normalized(norm, 20.0, 20_000.0, true);
             assert!((round_trip - value).abs() < 0.1);
         }
+    }
+
+    #[test]
+    fn tape_stretch_changes_length_and_preserves_channels() {
+        let input = [1.0, 10.0, 2.0, 20.0, 3.0, 30.0, 4.0, 40.0];
+
+        let longer = tape_stretch_interleaved(&input, 2, 2.0);
+        assert_eq!(longer.len(), 16);
+        assert_eq!(&longer[0..2], &[1.0, 10.0]);
+        assert_eq!(&longer[4..6], &[2.0, 20.0]);
+        assert_eq!(&longer[8..10], &[3.0, 30.0]);
+        assert_eq!(&longer[12..14], &[4.0, 40.0]);
+
+        let shorter = tape_stretch_interleaved(&input, 2, 0.5);
+        assert_eq!(shorter.len(), 4);
+        assert_eq!(&shorter[0..2], &[1.0, 10.0]);
+        assert_eq!(&shorter[2..4], &[3.0, 30.0]);
     }
 
     #[test]
@@ -5093,7 +5210,15 @@ mod tests {
         }
         writer.finalize().unwrap();
 
-        render_pitch_stretch(&input, &output, 0.0, 1.5, false).unwrap();
+        render_pitch_stretch(
+            &input,
+            &output,
+            0.0,
+            1.5,
+            false,
+            TimeStretchMode::Elastic,
+        )
+        .unwrap();
         let (frames, _) = wav_file_info(&output).unwrap();
         assert!((frames as f64 - 7_200.0).abs() <= 2.0);
 

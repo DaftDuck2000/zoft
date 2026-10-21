@@ -65,7 +65,7 @@
 - Trash browser in the track panel: deleted clips stay in the project and can be restored
 - Undo/redo (Ctrl+Z, Ctrl+Shift+Z, Ctrl+Y) with merge for continuous slider edits — Phase 1.5 groundwork
 - Playback mixer now slices clips by `source_offset`/`length`
-- Next: the remaining 1.4 processing operations (consolidate, bounce, stretch modes)
+- Next: the remaining 1.4 processing operations (consolidate, bounce)
 
 **1.4 Clip Processing** - `[~]` In Progress
 - Right-click a clip to open a floating **Audio Effects** window: choose an effect from the list (Normalize, LUFS Normalize, Bake into Clip, Reverse, Pitch Shift, Time Stretch, Bit Crusher, Saturation, Filter, Tremolo), adjust its Logic-style knobs (drag vertically, hold Shift for fine control, double-click to reset), then press **Apply**
@@ -74,10 +74,10 @@
 - Bake into Clip bakes the clip's gain and fade envelopes into a new `*_process_<uuid>.wav`, then resets the gain/fades; undo restores them
 - Bit Crusher, Saturation, Filter and Tremolo render creative effects to a new file while preserving clip gain, fades, position and track; all are undoable
 - Reverse renders the clip's visible audio backwards to a new `*_reverse_<uuid>.wav` (original file untouched) and repoints the clip; undoable
-- Pitch shift (±12 semitones) and time stretch (0.5×–2.0×) rendered through Rubber Band R3, with optional formant preservation; clip length follows the rendered audio and undo restores the original source
+- Pitch shift (±12 semitones) and time stretch (0.5×–2.0×) rendered through Rubber Band R3, with optional formant preservation; Time Stretch offers Tape, Elastic and Musical modes. Clip length follows the rendered audio and undo restores the original source
 - The window stays open, so effects can be applied in sequence; the top bar keeps only clip gain, fades and color
 - Rendered files regenerate their waveform overview in the background; stale overviews from a replaced file are ignored
-- Note: pitch/time rendering requires the `rubberband` binary in `PATH`
-- Not yet: stretch mode presets, consolidate, bounce in place
+- Note: pitch/time rendering requires the `rubberband` binary in `PATH` (except Tape mode)
+- Not yet: consolidate, bounce in place
 
 **1.5 Undo/Redo** - Not started (basic undo/redo already available in the arrange view)

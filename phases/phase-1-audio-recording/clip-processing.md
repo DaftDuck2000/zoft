@@ -15,7 +15,7 @@ Offline clip processing: gain, pitch shift, time stretch, reverse, normalize, bi
 - [x] Clip gain: Apply gain to create new rendered file (combined with fades in the Bake into Clip effect)
 - [x] Pitch shift: Semitone slider with optional formant preservation (Rubber Band R3)
 - [x] Time stretch: 0.5×–2.0× via Rubber Band R3
-- [ ] Time-stretch modes: tape / elastic / musical presets
+- [x] Time-stretch modes: tape / elastic / musical presets
 - [x] Reverse: Render the clip backwards to a new file (original preserved)
 - [x] Normalize: Peak to −1 dBFS, per clip
 - [x] LUFS normalize: Integrated loudness target with a sample-peak safety cap
@@ -51,13 +51,18 @@ Offline clip processing: gain, pitch shift, time stretch, reverse, normalize, bi
 - **Pitch shift / time stretch**: the floating Audio Effects window exposes
   separate Pitch Shift and Time Stretch effects. Pitch is −12…+12 semitones
   (0.01 st = 1 cent) with an optional formant-preservation toggle; stretch is
-  0.5×–2.0×. Applying writes the visible source range to a temporary 32-bit
-  float WAV, runs `rubberband --fine --pitch <st> --time <ratio> [--formant]`,
-  and points the clip at a new `<name>_process_<uuid>.wav`. The clip length
-  follows the rendered duration, fades are clamped to it, and undo restores the
-  previous source, offset, length and fades via a `Source` entry. Pitch/stretch
-  controls reset after a successful apply. Rubber Band must be available in
-  `PATH`.
+  0.5×–2.0×. Time Stretch has three modes: **Tape** resamples for classic
+  varispeed (length and pitch change together), **Elastic** uses Rubber Band R3
+  fine mode for smooth sustained material, and **Musical** adds centre focus
+  for mixed material. Applying writes the visible source range to a temporary
+  32-bit float WAV (except Tape, which is resampled directly), runs
+  `rubberband --quiet --fine [--centre-focus] --pitch <st> --time <ratio>
+  [--formant]` for the Rubber Band modes, and points the clip at a new
+  `<name>_process_<uuid>.wav`. The clip length follows the rendered duration,
+  fades are clamped to it, and undo restores the previous source, offset, length
+  and fades via a `Source` entry. Pitch/stretch controls reset after a successful
+  apply. Rubber Band must be available in `PATH` for Pitch Shift, Elastic and
+  Musical; Tape does not need it.
 - **Audio Effects window**: right-click a clip in the arrange view to open a
   floating window with the effect list (Normalize, LUFS Normalize, Bake into
   Clip, Reverse, Pitch Shift, Time Stretch, Bit Crusher, Saturation, Filter,
@@ -151,4 +156,5 @@ enum NormalizeMode {
 - 2026-10-21: Added Bit Crusher, Saturation, Filter and Tremolo effect processors; renamed the gain/fade bake action to Bake into Clip
 - 2026-10-21: Replaced the Audio Effects sliders with Logic-style rotary knobs (vertical drag, Shift fine adjustment, double-click reset)
 - 2026-10-21: Added LUFS Normalize with ITU-R BS.1770 integrated loudness measurement, −30…−6 LUFS target, and a −1 dBFS sample-peak safety cap
-- Remaining: listening tests for pitch/time and creative effects, stretch mode presets, consolidate, bounce in place
+- 2026-10-21: Added Time Stretch modes: Tape varispeed, Elastic (R3 fine), Musical (R3 fine with centre focus)
+- Remaining: listening tests for pitch/time and creative effects, consolidate, bounce in place
