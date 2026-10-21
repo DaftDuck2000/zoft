@@ -279,6 +279,19 @@ fn metronome_config(
     })
 }
 
+/// Average BPM from tap intervals in seconds. Returns `None` when there are no
+/// taps. Extreme values are clamped to a musical range.
+fn bpm_from_tap_intervals(intervals: &[f64]) -> Option<f32> {
+    if intervals.is_empty() {
+        return None;
+    }
+    let average = intervals.iter().sum::<f64>() / intervals.len() as f64;
+    if average <= 0.0 {
+        return None;
+    }
+    Some((60.0 / average).clamp(20.0, 300.0) as f32)
+}
+
 /// Small pre-fader recording meter: a green RMS bar with a peak tick.
 fn draw_input_meter(ui: &mut egui::Ui, peak: f32, rms: f32) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(90.0, 14.0), egui::Sense::hover());
@@ -422,6 +435,8 @@ enum EditAction {
     Detach { track: TrackId, clip_id: ClipId },
     /// Change the project time signature.
     TimeSignature { from: (u8, u8), to: (u8, u8) },
+    /// Change the project tempo (BPM).
+    Tempo { from: f32, to: f32 },
     /// Toggle track mute, solo or record-arm.
     TrackState {
         track_id: TrackId,
@@ -470,6 +485,7 @@ impl EditAction {
             EditAction::TimeSignature { to, .. } => {
                 format!("Time signature {}/{}", to.0, to.1)
             }
+            EditAction::Tempo { to, .. } => format!("Tempo {:.1} BPM", to),
             EditAction::TrackState { from, to, .. } => {
                 if from.mute != to.mute {
                     if to.mute { "Mute track" } else { "Unmute track" }.to_string()
@@ -691,6 +707,11 @@ struct AppUI {
     loop_end_secs: f64,
     /// Metronome click during playback.
     metronome_enabled: bool,
+    /// Recent tap-tempo intervals (seconds) and the last tap time.
+    tap_intervals: VecDeque<f64>,
+    last_tap: Option<std::time::Instant>,
+    /// Tempo before a BPM drag, so one drag is one undo entry.
+    bpm_edit_from: Option<f32>,
     /// Where recording started, so the clip lands at the right spot.
     record_start_secs: Option<f64>,
     /// Armed take waiting for the transport to roll (see `begin_recording`).
@@ -753,6 +774,9 @@ impl AppUI {
             loop_start_secs: 0.0,
             loop_end_secs: 0.0,
             metronome_enabled: false,
+            tap_intervals: VecDeque::new(),
+            last_tap: None,
+            bpm_edit_from: None,
             record_start_secs: None,
             pending_record_track: None,
             last_playhead_update: std::time::Instant::now(),
@@ -1193,6 +1217,11 @@ impl AppUI {
                 self.project
                     .time_signature_map
                     .set_change(0, numerator, denominator);
+            }
+            EditAction::Tempo { from, to } => {
+                self.project
+                    .tempo_map
+                    .set_default_bpm(if forward { *to } else { *from });
             }
             EditAction::TrackState { track_id, from, to } => {
                 if let Some(track) = self.project.tracks.get_mut(track_id) {
@@ -3675,6 +3704,43 @@ impl eframe::App for AppUI {
                 }
                 ui.separator();
 
+                // Tempo: drag or type a BPM, or tap it in.
+                ui.label("Tempo:");
+                let mut bpm = self.project.tempo_map.default_bpm();
+                let bpm_response = ui.add(
+                    egui::DragValue::new(&mut bpm)
+                        .speed(0.1)
+                        .range(20.0..=300.0)
+                        .max_decimals(1)
+                        .suffix(" BPM"),
+                );
+                if bpm_response.changed() {
+                    if self.bpm_edit_from.is_none() {
+                        self.bpm_edit_from = Some(self.project.tempo_map.default_bpm());
+                    }
+                    self.project.tempo_map.set_default_bpm(bpm);
+                    self.sync_playback_metronome();
+                }
+                let finished_edit = bpm_response.drag_stopped()
+                    || (bpm_response.changed() && !bpm_response.dragged());
+                if finished_edit {
+                    if let Some(from) = self.bpm_edit_from.take() {
+                        let to = self.project.tempo_map.default_bpm();
+                        if (to - from).abs() > 1e-4 {
+                            self.push_undo(EditAction::Tempo { from, to }, false);
+                            self.after_edit();
+                        }
+                    }
+                }
+                if ui
+                    .small_button("Tap")
+                    .on_hover_text("Tap four times to set the tempo")
+                    .clicked()
+                {
+                    self.tap_tempo();
+                }
+                ui.separator();
+
                 // Input device selector
                 if !self.input_devices.is_empty() {
                     ui.separator();
@@ -4514,6 +4580,41 @@ impl AppUI {
             denominator,
             out_rate,
         ));
+    }
+
+    /// Register a tap and update the project tempo from the recent intervals.
+    fn tap_tempo(&mut self) {
+        let now = std::time::Instant::now();
+        if let Some(last) = self.last_tap {
+            let delta = now.duration_since(last).as_secs_f64();
+            if (0.05..2.0).contains(&delta) {
+                self.tap_intervals.push_back(delta);
+                while self.tap_intervals.len() > 4 {
+                    self.tap_intervals.pop_front();
+                }
+            } else {
+                // A long pause starts a new tap sequence.
+                self.tap_intervals.clear();
+            }
+        }
+        self.last_tap = Some(now);
+
+        let intervals: Vec<f64> = self.tap_intervals.iter().copied().collect();
+        if let Some(bpm) = bpm_from_tap_intervals(&intervals) {
+            self.commit_tempo(bpm);
+        }
+    }
+
+    /// Set the project tempo and record one undoable entry.
+    fn commit_tempo(&mut self, bpm: f32) {
+        let from = self.project.tempo_map.default_bpm();
+        if (bpm - from).abs() < 1e-4 {
+            return;
+        }
+        self.project.tempo_map.set_default_bpm(bpm);
+        self.push_undo(EditAction::Tempo { from, to: bpm }, false);
+        self.after_edit();
+        self.sync_playback_metronome();
     }
 
     /// Handle an edit to the loop controls: keep the range valid, move the
@@ -5621,13 +5722,14 @@ fn load_wav_interleaved(path: &Path) -> Result<(Vec<f32>, u16, u32)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        audible_track_gain, bit_crush, clip_gain_at, contiguous_clip_span, filter_audio,
-        knob_from_normalized, knob_to_normalized, load_wav_interleaved,
-        load_wav_range_interleaved, loop_range_frames, measure_integrated_loudness,
-        merge_continuous_edit, metronome_config, processed_file_stem, render_pitch_stretch,
-        reverse_interleaved, saturate, tape_stretch_interleaved, tremolo, wav_file_info,
-        wav_peak, write_wav_f32, write_wav_range, write_wav_range_with_envelope, ClipShape,
-        ClipSourceState, EditAction, FilterKind, TrackShape,
+        audible_track_gain, bit_crush, bpm_from_tap_intervals, clip_gain_at,
+        contiguous_clip_span, filter_audio, knob_from_normalized, knob_to_normalized,
+        load_wav_interleaved, load_wav_range_interleaved, loop_range_frames,
+        measure_integrated_loudness, merge_continuous_edit, metronome_config,
+        processed_file_stem, render_pitch_stretch, reverse_interleaved, saturate,
+        tape_stretch_interleaved, tremolo, wav_file_info, wav_peak, write_wav_f32,
+        write_wav_range, write_wav_range_with_envelope, ClipShape, ClipSourceState, EditAction,
+        FilterKind, TrackShape,
     };
     use daw_core::audio_pool::AudioFileRef;
     use daw_core::clip::{AudioClip, ClipId, Fade, FadeCurve, TimeStretchMode, TimelinePos};
@@ -5744,6 +5846,20 @@ mod tests {
             to: louder,
         };
         assert_eq!(action.description(), "Track volume");
+    }
+
+    #[test]
+    fn bpm_from_tap_intervals_averages_and_clamps() {
+        assert_eq!(bpm_from_tap_intervals(&[]), None);
+
+        let bpm = bpm_from_tap_intervals(&[0.5]).unwrap();
+        assert!((bpm - 120.0).abs() < 1e-3);
+
+        let bpm = bpm_from_tap_intervals(&[0.5, 0.5, 0.5]).unwrap();
+        assert!((bpm - 120.0).abs() < 1e-3);
+
+        assert_eq!(bpm_from_tap_intervals(&[0.01]), Some(300.0));
+        assert_eq!(bpm_from_tap_intervals(&[10.0]), Some(20.0));
     }
 
     #[test]
