@@ -112,5 +112,5 @@ Monitor Mix        Recording           Metering
 - 2026-10-21: Input monitoring modes are enforced: track **Mon** cycles Off/Auto/On and the input is mixed into the output; both the input and output streams stay open while armed/On so monitoring is audible before rolling. The mode is undoable
 - 2026-10-21: Punch recording: **Punch** plus **P-In**/**P-Out** set the capture range; an armed take waits for punch-in and ends at punch-out while the transport keeps rolling. The ruler shows the punch region in red
 - 2026-10-23: Low-disk warning: estimated remaining recording time is computed from `statvfs` free space and the project format at take start and once per second while recording; a yellow banner appears below 10 minutes
-- 2026-10-23: Multi-take: a new take that overlaps existing clips on the same track is layered on top while the previous takes are muted; recording is undoable as one "Record take" step, and takes can be re-enabled with the Clip Audio window's **Mute take** checkbox
+- 2026-10-23: Multi-take: previous takes overlapping a new recording are muted as soon as it starts and are dimmed with an **M**; recording is one undoable "Record take" step, and the Clip Audio window's **Mute take** checkbox auditions takes
 - Next: Waveform rendering (1.2), runtime xrun verification

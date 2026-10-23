@@ -890,6 +890,9 @@ struct AppUI {
     /// Pending multi-clip gain/fade/colour edit: label + per-clip shape before
     /// the gesture. Committed on pointer release as one undo step.
     pending_shape_edit: Option<(String, Vec<(ClipId, ClipShape)>)>,
+    /// Mute actions applied when a take starts, rolled into the take's undo
+    /// group when recording stops.
+    pending_take_mutes: Vec<EditAction>,
     /// True while consecutive edits (e.g. a slider drag) belong to one gesture
     /// and should share a single undo entry.
     merge_chain: bool,
@@ -974,6 +977,7 @@ impl AppUI {
             history: History::new(1000),
             undo_group: None,
             pending_shape_edit: None,
+            pending_take_mutes: Vec::new(),
             merge_chain: false,
             history_open: false,
             needs_audio_refresh: false,
@@ -1433,6 +1437,56 @@ impl AppUI {
             self.push_undo(EditAction::Group { actions, label }, false);
         }
         self.after_edit();
+    }
+
+    /// Mute unmuted clips on `track_id` whose span contains `position`, so an
+    /// existing take goes silent as soon as a new one starts recording over it.
+    fn mute_takes_at(&mut self, track_id: TrackId, position: u64) -> Vec<EditAction> {
+        let project_sr = self.project.sample_rate.max(1) as f64;
+        let Some(track) = self.project.tracks.get(&track_id) else {
+            return Vec::new();
+        };
+        let clip_ids = track.clips.clone();
+        let mut actions = Vec::new();
+        for clip_id in clip_ids {
+            let Some(clip) = self.project.audio_clips.get(clip_id) else {
+                continue;
+            };
+            if clip.muted || clip.length == 0 {
+                continue;
+            }
+            let (start, end) = clip_span_samples(clip, project_sr);
+            if start <= position && position < end {
+                let from = ClipShape::of(clip);
+                let mut to = from;
+                to.muted = true;
+                if let Some(clip) = self.project.audio_clips.get_mut(clip_id) {
+                    to.apply(clip);
+                }
+                actions.push(EditAction::Shape {
+                    clip_id,
+                    from,
+                    to,
+                });
+            }
+        }
+        actions
+    }
+
+    /// Push any take-start mutes that never made it into a recording group.
+    fn flush_pending_take_mutes(&mut self) {
+        if self.pending_take_mutes.is_empty() {
+            return;
+        }
+        let actions = std::mem::take(&mut self.pending_take_mutes);
+        let label = if actions.len() == 1 {
+            "Mute take".to_string()
+        } else {
+            format!("Mute {} takes", actions.len())
+        };
+        self.push_undo(EditAction::Group { actions, label }, false);
+        self.after_edit();
+        self.refresh_playback_if_playing();
     }
 
     fn apply_action(&mut self, action: &EditAction, forward: bool) {
@@ -5411,12 +5465,12 @@ impl eframe::App for AppUI {
         self.show_audio_window(ctx);
         self.show_history_window(ctx);
 
-        // Keep the event loop waking regularly even when the window is not
-        // focused: fast while the transport rolls, slower when idle.
+        // Keep the event loop waking regularly, even when the window is not
+        // focused, so the compositor never marks the app unresponsive.
         if self.playing || self.recording {
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
         } else {
-            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            ctx.request_repaint_after(std::time::Duration::from_millis(33));
         }
     }
 }
@@ -5942,7 +5996,19 @@ impl AppUI {
             uuid::Uuid::new_v4()
         ));
         self.disk_warning = self.low_disk_warning();
+        let start_sample =
+            (self.playhead_secs.max(0.0) * self.project.sample_rate.max(1) as f64) as u64;
+        self.pending_take_mutes = self.mute_takes_at(track_id, start_sample);
         if let Err(e) = self.engine.start_recording(track_id, file_path) {
+            // Undo the mutes if the take never started.
+            for action in &self.pending_take_mutes {
+                if let EditAction::Shape { clip_id, from, .. } = action {
+                    if let Some(clip) = self.project.audio_clips.get_mut(*clip_id) {
+                        from.apply(clip);
+                    }
+                }
+            }
+            self.pending_take_mutes.clear();
             self.recording = false;
             self.pending_record_track = None;
             self.error_message = Some(format!("Recording failed: {}", e));
@@ -5950,6 +6016,8 @@ impl AppUI {
             self.recording = true;
             self.record_start_secs = Some(self.playhead_secs);
             self.error_message = None;
+            // Make the previous take silent immediately if playback is rolling.
+            self.refresh_playback_if_playing();
         }
         self.sync_monitoring();
     }
@@ -5969,6 +6037,7 @@ impl AppUI {
             Ok(None) => {}
             Err(e) => self.error_message = Some(format!("Failed to stop recording: {}", e)),
         }
+        self.flush_pending_take_mutes();
         self.sync_monitoring();
     }
 
@@ -6027,7 +6096,7 @@ impl AppUI {
             .get(&track_id)
             .map(|track| track.clips.clone())
             .unwrap_or_default();
-        let mut actions = Vec::new();
+        let mut actions = std::mem::take(&mut self.pending_take_mutes);
         for other_id in track_clips {
             let Some(other) = self.project.audio_clips.get(other_id) else {
                 continue;
@@ -6117,7 +6186,13 @@ fn draw_audio_clip(
         .unwrap_or(track_color);
 
     // Background + border
-    let bg_alpha = if selected { 90 } else { 55 };
+    let bg_alpha = if selected {
+        90
+    } else if clip.muted {
+        25
+    } else {
+        55
+    };
     painter.rect_filled(
         visible_rect,
         2.0,
@@ -6323,6 +6398,21 @@ fn draw_audio_clip(
             format!("{:+.1} dB", 20.0 * clip.gain.max(1e-6).log10()),
             egui::FontId::proportional(8.0),
             egui::Color32::from_gray(200),
+        );
+    }
+
+    if clip.muted {
+        painter.rect_filled(
+            full_rect,
+            3.0,
+            egui::Color32::from_rgba_unmultiplied(15, 15, 20, 140),
+        );
+        painter.text(
+            egui::pos2(visible_rect.left() + 4.0, visible_rect.top() + 2.0),
+            egui::Align2::LEFT_TOP,
+            "M",
+            egui::FontId::proportional(10.0),
+            egui::Color32::from_gray(230),
         );
     }
 

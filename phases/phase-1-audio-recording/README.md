@@ -40,7 +40,7 @@
 - Input monitoring: track **Mon** cycles Off/Auto/On; the input and output streams stay open while armed/On so monitoring is audible before and during a take; the mode is undoable
 - Punch recording: **Punch** enables a capture range set with **P-In**/**P-Out** at the playhead; an armed take waits for punch-in and ends at punch-out while the transport keeps rolling
 - Low-disk warning: estimated remaining recording time (from free space and the project format) is checked at take start and once per second; a yellow banner appears below 10 minutes
-- Multi-take: a new take that overlaps existing clips on the same track is layered on top while previous takes are muted; each recording is one undoable **Record take** step, and **Mute take** in the Clip Audio window auditions takes
+- Multi-take: previous takes overlapping the new one are dimmed with an **M** and mute as soon as recording starts; each recording is one undoable **Record take** step, and **Mute take** in the Clip Audio window auditions takes
 - Remaining: runtime xrun verification
 
 **1.2 Waveform Rendering** - `[~]` In Progress
