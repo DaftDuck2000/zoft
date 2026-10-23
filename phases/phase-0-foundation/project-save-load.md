@@ -17,8 +17,8 @@ Implement project serialization: binary `.zoft` format with versioning, migratio
 - [✓] Versioning: Schema version per section, migration on load
 - [✓] Compression: `lz4` for large sections (automation, clip data)
 - [✓] Save/Open UI wired into the app (File menu and Ctrl+S / Ctrl+Shift+S / Ctrl+O)
-- [ ] Recent projects menu (last 10)
-- [ ] Auto-save: Configurable interval, crash recovery
+- [✓] Recent projects menu (last 10, stored in the user data directory)
+- [✓] Auto-save: every 2 minutes while unsaved changes exist; a newer sibling `.autosave.zoft` is offered when opening the project
 - [ ] Project templates: Empty, Band, Electronic, Scoring
 
 ## Technical Details
@@ -84,7 +84,7 @@ struct AudioFileRef {
 - [✓] Load project → identical state restored (covered by a round-trip test in `serialization.rs`)
 - [✓] Audio files referenced correctly (relative paths)
 - [~] Version migration works (migration framework exists; no old-schema fixture test yet)
-- [ ] Auto-save creates recovery file
+- [x] Auto-save creates a sibling `<name>.autosave.zoft` every 2 minutes while edits are unsaved; opening a project offers a newer recovery copy
 - [ ] Large projects (>100 tracks) save < 2s, load < 3s (not benchmarked)
 - [~] Corrupted file → graceful error, not panic (magic/checksum errors are reported; not exhaustively tested)
 
@@ -97,3 +97,4 @@ struct AudioFileRef {
 - 2026-10-07: Project save/load serializer implemented in `daw-core/src/serialization.rs` (API only; no UI Save/Open yet)
 - 2026-10-21: Status corrected to In Progress: the app launches a new in-memory project and does not yet wire Save/Open, recent projects, auto-save or templates
 - 2026-10-23: Fixed the `.zoft` loader (it previously over-read fixed-size header/section-table blocks and failed); added a round-trip test and wired File → New/Open/Save/Save As plus Ctrl+S / Ctrl+Shift+S / Ctrl+O
+- 2026-10-23: Added a Recent Projects list and a 2-minute autosave; opening a project offers a newer sibling autosave for recovery

@@ -1463,6 +1463,7 @@ dependencies = [
  "crossbeam",
  "daw-core",
  "daw-engine",
+ "dirs",
  "eframe",
  "egui",
  "hound",

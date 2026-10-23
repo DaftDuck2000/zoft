@@ -37,8 +37,7 @@ to reflect incomplete tooling and persistence work as of 2026-10-21:
   hooks, CHANGELOG and wired config/profiling
 - 0.4 still lacks add/remove/reorder track UI, markers, a theme toggle,
   vertical track-list scrolling and window-state persistence
-- 0.5 has the binary format, round-trip test and File menu Save/Open; recent
-  projects, auto-save and templates are still missing
+- 0.5 has the binary format, round-trip test, File menu Save/Open, Recent Projects and a 2-minute autosave with recovery prompt; templates are still missing
 - Post-phase additions now in daily use: ruler seek + loop lane, zoom/scroll,
   metronome, tempo/tap, track M/S/R/Mon/volume, punch recording, recording level
   meter, History panel and the Clip Audio window

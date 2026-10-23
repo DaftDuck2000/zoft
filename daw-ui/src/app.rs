@@ -765,12 +765,14 @@ impl ClipAudioWindow {
 }
 
 /// File-menu actions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 enum FileAction {
     New,
     Open,
+    OpenPath(PathBuf),
     Save,
     SaveAs,
+    ClearRecent,
 }
 
 /// Metadata for one playback clip. The loader thread turns these into
@@ -951,6 +953,12 @@ struct AppUI {
     /// Mute actions applied when a take starts, rolled into the take's undo
     /// group when recording stops.
     pending_take_mutes: Vec<EditAction>,
+    /// Recently opened/saved projects (most recent first).
+    recent_projects: Vec<PathBuf>,
+    /// Newer autosave found when opening a project.
+    recovery_offer: Option<PathBuf>,
+    last_autosave: std::time::Instant,
+    autosave_status: Option<String>,
     /// True while consecutive edits (e.g. a slider drag) belong to one gesture
     /// and should share a single undo entry.
     merge_chain: bool,
@@ -1036,6 +1044,10 @@ impl AppUI {
             undo_group: None,
             pending_shape_edit: None,
             pending_take_mutes: Vec::new(),
+            recent_projects: Self::load_recent_projects(),
+            recovery_offer: None,
+            last_autosave: std::time::Instant::now(),
+            autosave_status: None,
             merge_chain: false,
             history_open: false,
             needs_audio_refresh: false,
@@ -4472,7 +4484,16 @@ impl eframe::App for AppUI {
             self.disk_warning = self.low_disk_warning();
         }
 
+        // Autosave every two minutes while there are unsaved changes.
+        if self.last_autosave.elapsed().as_secs_f64() >= 120.0 {
+            self.last_autosave = std::time::Instant::now();
+            if self.project.modified && !self.recording {
+                self.autosave_project();
+            }
+        }
+
         // File menu
+        let recent_projects = self.recent_projects.clone();
         let mut file_action: Option<FileAction> = None;
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
@@ -4485,6 +4506,28 @@ impl eframe::App for AppUI {
                         file_action = Some(FileAction::Open);
                         ui.close_menu();
                     }
+                    ui.menu_button("Open Recent", |ui| {
+                        if recent_projects.is_empty() {
+                            ui.weak("No recent projects");
+                        }
+                        for path in &recent_projects {
+                            let name = path
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or("project");
+                            if ui.button(name).clicked() {
+                                file_action = Some(FileAction::OpenPath(path.clone()));
+                                ui.close_menu();
+                            }
+                        }
+                        if !recent_projects.is_empty() {
+                            ui.separator();
+                            if ui.button("Clear list").clicked() {
+                                file_action = Some(FileAction::ClearRecent);
+                                ui.close_menu();
+                            }
+                        }
+                    });
                     ui.separator();
                     if ui.button("Save").clicked() {
                         file_action = Some(FileAction::Save);
@@ -4530,6 +4573,28 @@ impl eframe::App for AppUI {
                             self.disk_warning = None;
                         }
                     });
+                });
+            });
+        }
+
+        if let Some(path) = self.recovery_offer.clone() {
+            egui::TopBottomPanel::top("recovery_banner").show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(120, 190, 255),
+                        format!(
+                            "A newer autosave was found: {}",
+                            path.file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or("autosave.zoft")
+                        ),
+                    );
+                    if ui.button("Load recovery").clicked() {
+                        self.load_recovery(&path);
+                    }
+                    if ui.button("Dismiss").clicked() {
+                        self.recovery_offer = None;
+                    }
                 });
             });
         }
@@ -4659,6 +4724,9 @@ impl eframe::App for AppUI {
 
                 ui.separator();
                 ui.label(format!("Project: {}", self.project.name));
+                if let Some(status) = &self.autosave_status {
+                    ui.weak(status);
+                }
                 ui.separator();
                 ui.label(format!("Sample Rate: {} Hz", self.project.sample_rate));
                 ui.separator();
@@ -6105,6 +6173,7 @@ impl AppUI {
                     self.load_project(&path);
                 }
             }
+            FileAction::OpenPath(path) => self.load_project(&path),
             FileAction::Save => {
                 if let Some(path) = self.project.project_path.clone() {
                     self.save_project_to(&path);
@@ -6113,6 +6182,99 @@ impl AppUI {
                 }
             }
             FileAction::SaveAs => self.save_project_as(),
+            FileAction::ClearRecent => {
+                self.recent_projects.clear();
+                self.save_recent_projects();
+            }
+        }
+    }
+
+    fn recent_projects_file() -> Option<PathBuf> {
+        dirs::data_dir().map(|dir| dir.join("zoft").join("recent_projects.txt"))
+    }
+
+    fn load_recent_projects() -> Vec<PathBuf> {
+        let Some(path) = Self::recent_projects_file() else {
+            return Vec::new();
+        };
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return Vec::new();
+        };
+        text.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(PathBuf::from)
+            .filter(|path| path.exists())
+            .take(10)
+            .collect()
+    }
+
+    fn save_recent_projects(&self) {
+        let Some(path) = Self::recent_projects_file() else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let text = self
+            .recent_projects
+            .iter()
+            .map(|path| path.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let _ = std::fs::write(path, text);
+    }
+
+    fn remember_project(&mut self, path: &Path) {
+        self.recent_projects.retain(|existing| existing != path);
+        self.recent_projects.insert(0, path.to_path_buf());
+        self.recent_projects.truncate(10);
+        self.save_recent_projects();
+    }
+
+    fn sibling_autosave(path: &Path) -> PathBuf {
+        let stem = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("project");
+        path.with_file_name(format!("{}.autosave.zoft", stem))
+    }
+
+    fn autosave_path(&self) -> Option<PathBuf> {
+        if let Some(path) = &self.project.project_path {
+            return Some(Self::sibling_autosave(path));
+        }
+        dirs::data_dir().map(|dir| {
+            dir.join("zoft")
+                .join("autosave")
+                .join(format!("{}.zoft", self.project.id))
+        })
+    }
+
+    fn autosave_project(&mut self) {
+        let Some(path) = self.autosave_path() else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match ProjectSerialization::save(&self.project, &path) {
+            Ok(()) => self.autosave_status = Some("Autosaved just now".to_string()),
+            Err(e) => self.autosave_status = Some(format!("Autosave failed: {}", e)),
+        }
+    }
+
+    fn load_recovery(&mut self, path: &Path) {
+        match ProjectSerialization::load(path) {
+            Ok(mut project) => {
+                // Keep the recovered state, but require an explicit Save As
+                // for the original project file.
+                project.project_path = None;
+                self.adopt_project(project);
+                self.recovery_offer = None;
+                self.error_message = None;
+            }
+            Err(e) => self.error_message = Some(format!("Could not load recovery: {}", e)),
         }
     }
 
@@ -6134,6 +6296,10 @@ impl AppUI {
         match ProjectSerialization::save(&self.project, path) {
             Ok(()) => {
                 self.project.project_path = Some(path.to_path_buf());
+                self.remember_project(path);
+                // The project file is now the newest copy; drop its autosave.
+                let _ = std::fs::remove_file(Self::sibling_autosave(path));
+                self.recovery_offer = None;
                 self.error_message = None;
             }
             Err(e) => self.error_message = Some(format!("Could not save project: {}", e)),
@@ -6143,7 +6309,23 @@ impl AppUI {
     fn load_project(&mut self, path: &Path) {
         self.pause_transport();
         match ProjectSerialization::load(path) {
-            Ok(project) => self.adopt_project(project),
+            Ok(project) => {
+                self.adopt_project(project);
+                self.remember_project(path);
+                // Offer a newer autosave for this project, if one exists.
+                let autosave = Self::sibling_autosave(path);
+                let newer = std::fs::metadata(&autosave)
+                    .and_then(|meta| meta.modified())
+                    .ok()
+                    .zip(
+                        std::fs::metadata(path)
+                            .and_then(|meta| meta.modified())
+                            .ok(),
+                    )
+                    .map(|(autosave, project)| autosave > project)
+                    .unwrap_or(false);
+                self.recovery_offer = if newer { Some(autosave) } else { None };
+            }
             Err(e) => self.error_message = Some(format!("Could not open project: {}", e)),
         }
     }
@@ -6162,6 +6344,7 @@ impl AppUI {
         self.audio_window = None;
         self.clipboard = Vec::new();
         self.drag = None;
+        self.recovery_offer = None;
         self.playhead_secs = 0.0;
         self.view_start_secs = 0.0;
         self.needs_fit = true;
@@ -7680,6 +7863,15 @@ mod tests {
         let (ids, start, end) = contiguous_clip_span(&spans, d).unwrap();
         assert_eq!(ids, vec![d]);
         assert_eq!((start, end), (40, 50));
+    }
+
+    #[test]
+    fn autosave_sits_next_to_the_project() {
+        let path = std::path::PathBuf::from("/tmp/song.zoft");
+        assert_eq!(
+            super::AppUI::sibling_autosave(&path),
+            std::path::PathBuf::from("/tmp/song.autosave.zoft")
+        );
     }
 
     #[test]
