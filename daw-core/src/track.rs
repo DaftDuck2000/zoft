@@ -40,6 +40,9 @@ pub struct Track {
     pub inserts: Vec<InsertSlot>,
     pub automation_lanes: HashMap<AutomationLaneId, AutomationLane>,
     pub clips: Vec<ClipId>,
+    /// MIDI clips attached to this track (keys from `Project::midi_clips`).
+    #[serde(default)]
+    pub midi_clips: Vec<ClipId>,
     pub visible: bool,
     pub height: f32,
     pub folder_parent: Option<TrackId>,
@@ -66,6 +69,7 @@ impl Track {
             inserts: Vec::new(),
             automation_lanes: HashMap::new(),
             clips: Vec::new(),
+            midi_clips: Vec::new(),
             visible: true,
             height: 60.0,
             folder_parent: None,
@@ -106,6 +110,21 @@ impl Track {
     pub fn remove_clip(&mut self, clip_id: ClipId) -> bool {
         if let Some(pos) = self.clips.iter().position(|&id| id == clip_id) {
             self.clips.remove(pos);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn add_midi_clip(&mut self, clip_id: ClipId) {
+        if !self.midi_clips.contains(&clip_id) {
+            self.midi_clips.push(clip_id);
+        }
+    }
+
+    pub fn remove_midi_clip(&mut self, clip_id: ClipId) -> bool {
+        if let Some(pos) = self.midi_clips.iter().position(|&id| id == clip_id) {
+            self.midi_clips.remove(pos);
             true
         } else {
             false

@@ -13,9 +13,9 @@ Implement MIDI track: input routing, recording with chase events, loop recording
 ## Requirements
 
 - [x] MIDI keyboard input support: enumerate input ports with `midir`, choose one in the transport bar, and show live note/velocity activity
-- [ ] MIDI track type: extends base track with MIDI-specific fields
+- [x] MIDI track type: extends base track with MIDI-specific fields
 - [ ] Input selection: Hardware MIDI ports, virtual ports, MIDI from other tracks
-- [ ] Record arm: Captures MIDI to new clip on armed track
+- [x] Record arm: Captures MIDI to new clip on armed track
 - [ ] Chase events: Send pending CC/pitch bend/program change on seek/play
 - [ ] Loop recording: Overdub (merge) or new take (lanes)
 - [ ] Metronome count-in: Configurable bars before recording
@@ -110,7 +110,8 @@ MIDI Thru         Record Buffer      Chase Buffer
 ## Acceptance Criteria
 
 - [x] MIDI keyboard input: ports are listed, one can be selected, and live note/velocity activity is shown
-- [ ] Record MIDI → clip appears with correct timing
+- [x] Record MIDI → clip appears with correct timing
+- [x] MIDI clip playback through the built-in sine voice
 - [ ] Chase sends CC/pitch bend on seek
 - [ ] Loop recording: overdub merges, new take creates lane
 - [ ] MIDI thru echoes to output port
@@ -121,4 +122,5 @@ MIDI Thru         Record Buffer      Chase Buffer
 ## Progress Log
 
 - 2026-10-23: MIDI keyboard input support started: `daw-engine/src/midi.rs` lists input ports with `midir`; a dedicated MIDI bar auto-connects the first real keyboard (skipping Midi Through), offers a selector + Refresh, and shows live note/velocity activity. Audio/MIDI tracks can be added from the track list
-- Remaining: MIDI clip recording, playback/instrument, chase events, loop recording modes, MIDI thru/panic, input quantize
+- 2026-10-24: MIDI recording and basic playback. Armed MIDI tracks capture timestamped note-on/off events into a `MidiClip` (ticks at PPQN 960) on stop; notes keep their offset from the playhead. MIDI blocks render in the arrange lane, can be selected/deleted (undoable) and open a read-only piano-roll view on double-click. Playback pairs note events and renders them with a simple built-in sine voice, honoring mute/solo and track volume. Instruments, chase, loop takes and MIDI thru remain
+- Remaining: instrument/plugin output, chase events, loop recording modes, MIDI thru/panic, input quantize

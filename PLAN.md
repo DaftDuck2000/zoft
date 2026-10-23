@@ -57,8 +57,8 @@
 
 | ID | Feature | Status | Est. | Actual | Notes |
 |----|---------|--------|------|--------|-------|
-| 2.1 | MIDI Track Record/Playback | `[~]` | 2w | | Input enumeration + live note monitor done; recording/playback left |
-| 2.2 | Piano Roll Editor | `[ ]` | 4w | | Note entry, velocity, CC lanes |
+| 2.1 | MIDI Track Record/Playback | `[~]` | 2w | | Input enumeration + live monitor, MIDI clip recording/playback (sine voice) |
+| 2.2 | Piano Roll Editor | `[~]` | 4w | | Read-only grid + note view; editing, velocity/CC lanes left |
 | 2.3 | MIDI Editing Tools | `[ ]` | 2w | | Quantize, humanize, transpose |
 | 2.4 | MIDI Effect Plugins | `[ ]` | 2w | | Arpeggiator, chord, velocity |
 | 2.5 | Notation View (Stretch) | `[ ]` | 3w | | Basic score display |

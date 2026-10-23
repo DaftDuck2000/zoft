@@ -2,14 +2,14 @@
 
 use anyhow::Result;
 use daw_core::audio_pool::AudioFileRef;
-use daw_core::clip::{AudioClip, ClipId, Fade, FadeCurve, TimeStretchMode, TimelinePos};
+use daw_core::clip::{AudioClip, ClipId, Fade, FadeCurve, MidiClip, MidiEvent, MidiMessage, TimeStretchMode, TimelinePos};
 use daw_core::project::{BitDepth, Color};
 use daw_core::serialization::ProjectSerialization;
-use daw_core::track::{MonitorMode, Track, TrackId};
+use daw_core::track::{MonitorMode, Track, TrackId, TrackType};
 use daw_core::undo::History;
 use daw_core::Project;
 use daw_core::WaveformOverview;
-use daw_engine::playback::{MetronomeConfig, PlayableClip, PlaybackMixer};
+use daw_engine::playback::{MetronomeConfig, PlayableClip, PlayableNote, PlaybackMixer};
 use daw_engine::AudioEngine;
 use eframe::egui;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
@@ -249,6 +249,76 @@ fn audible_track_gain(track: &daw_core::track::Track, any_solo: bool) -> Option<
     } else {
         Some(track.volume.clamp(0.0, 4.0))
     }
+}
+
+/// Build a playable note from a tick range, scaling velocity by track gain.
+fn playable_note(
+    start_tick: u64,
+    end_tick: u64,
+    note: u8,
+    velocity: u8,
+    track_gain: f32,
+    to_frame: &impl Fn(u64) -> u64,
+) -> PlayableNote {
+    let start_frame = to_frame(start_tick);
+    let end_frame = to_frame(end_tick).max(start_frame + 1);
+    PlayableNote {
+        start_frame,
+        end_frame,
+        note,
+        velocity: (velocity as f32 / 127.0 * track_gain).clamp(0.0, 1.0),
+    }
+}
+
+/// Whether a MIDI pitch is a black key.
+fn is_black_key(pitch: u8) -> bool {
+    matches!(pitch % 12, 1 | 3 | 6 | 8 | 10)
+}
+
+/// Scientific pitch name for a MIDI note number (`C4` = 60).
+fn note_name(pitch: u8) -> String {
+    const NAMES: [&str; 12] = [
+        "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+    ];
+    format!("{}{}", NAMES[(pitch % 12) as usize], pitch as i32 / 12 - 1)
+}
+
+/// Pair note-on/off events in a MIDI clip into `(start_tick, end_tick, note,
+/// velocity)` spans relative to the clip start. Notes still held at the end of
+/// the clip stop at its boundary.
+fn midi_clip_note_spans(clip: &MidiClip) -> Vec<(u64, u64, u8, u8)> {
+    let mut spans = Vec::new();
+    let mut active: HashMap<(u8, u8), (u64, u8)> = HashMap::new();
+    let end_of_clip = clip.length.max(1);
+
+    for event in &clip.events {
+        let tick = event.tick.min(end_of_clip);
+        match &event.message {
+            MidiMessage::NoteOn {
+                channel,
+                note,
+                velocity,
+            } if *velocity > 0 => {
+                if let Some((start_tick, start_velocity)) = active.remove(&(*channel, *note)) {
+                    spans.push((start_tick, tick.max(start_tick + 1), *note, start_velocity));
+                }
+                active.insert((*channel, *note), (tick, *velocity));
+            }
+            MidiMessage::NoteOn { channel, note, .. }
+            | MidiMessage::NoteOff { channel, note, .. } => {
+                if let Some((start_tick, start_velocity)) = active.remove(&(*channel, *note)) {
+                    spans.push((start_tick, tick.max(start_tick + 1), *note, start_velocity));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for ((_channel, note), (start_tick, velocity)) in active {
+        spans.push((start_tick, end_of_clip.max(start_tick + 1), note, velocity));
+    }
+    spans.sort_by_key(|(start, _, note, _)| (*start, *note));
+    spans
 }
 
 /// Convert a loop range in seconds to output-device frames. Returns `None`
@@ -547,6 +617,10 @@ enum EditAction {
     AddTrack { track: Track },
     /// Remove a track, remembering its original order for undo.
     RemoveTrack { track: Track, index: usize },
+    /// Attach a MIDI clip to a track (undo detaches it; data stays in the pool).
+    AttachMidi { track: TrackId, clip_id: ClipId },
+    /// Detach a MIDI clip from its track (undo reattaches).
+    DetachMidi { track: TrackId, clip_id: ClipId },
     /// Several edits applied and undone as one history step.
     Group {
         actions: Vec<EditAction>,
@@ -618,6 +692,8 @@ impl EditAction {
             }
             EditAction::AddTrack { track } => format!("Add track: {}", track.name),
             EditAction::RemoveTrack { track, .. } => format!("Remove track: {}", track.name),
+            EditAction::AttachMidi { .. } => "Add MIDI clip".to_string(),
+            EditAction::DetachMidi { .. } => "Delete MIDI clip".to_string(),
             EditAction::Group { label, .. } => label.clone(),
         }
     }
@@ -771,6 +847,12 @@ impl ClipAudioWindow {
             tremolo_depth: 50.0,
         }
     }
+}
+
+/// State of the floating piano-roll window for one MIDI clip.
+#[derive(Debug, Clone, Copy)]
+struct PianoRollWindow {
+    clip_id: ClipId,
 }
 
 /// File-menu actions.
@@ -978,6 +1060,8 @@ struct AppUI {
     selected_clip: Option<ClipId>,
     /// All selected clips. `selected_clip` is the primary/last-clicked one.
     selected_clips: BTreeSet<ClipId>,
+    /// Selected MIDI clip (mutually exclusive with the audio selection).
+    selected_midi_clip: Option<ClipId>,
 
     // Non-destructive editing
     snap_mode: SnapMode,
@@ -995,6 +1079,8 @@ struct AppUI {
     clipboard: Vec<AudioClip>,
     /// Floating audio-effects editor for the right-clicked clip.
     audio_window: Option<ClipAudioWindow>,
+    /// Floating piano-roll view for the selected MIDI clip.
+    piano_roll: Option<PianoRollWindow>,
     /// Where a trashed clip was last attached, so Restore can put it back.
     deleted_from: HashMap<ClipId, TrackId>,
     history: History<EditAction>,
@@ -1007,6 +1093,13 @@ struct AppUI {
     /// Mute actions applied when a take starts, rolled into the take's undo
     /// group when recording stops.
     pending_take_mutes: Vec<EditAction>,
+    /// MIDI take state.
+    recording_midi: bool,
+    midi_record_track: Option<TrackId>,
+    midi_captured: Vec<daw_engine::MidiInputEvent>,
+    /// Local time when the MIDI take started, so notes keep their offset from
+    /// the playhead even if the first note arrives late.
+    midi_record_started_at: Option<std::time::Instant>,
     /// Recently opened/saved projects (most recent first).
     recent_projects: Vec<PathBuf>,
     /// Newer autosave found when opening a project.
@@ -1089,6 +1182,7 @@ impl AppUI {
             last_timeline_width: 1000.0,
             selected_clip: None,
             selected_clips: BTreeSet::new(),
+            selected_midi_clip: None,
             snap_mode: SnapMode::Beat,
             snap_relative: false,
             ruler_mode: RulerMode::BarsBeats,
@@ -1098,11 +1192,16 @@ impl AppUI {
             marquee_additive: false,
             clipboard: Vec::new(),
             audio_window: None,
+            piano_roll: None,
             deleted_from: HashMap::new(),
             history: History::new(1000),
             undo_group: None,
             pending_shape_edit: None,
             pending_take_mutes: Vec::new(),
+            recording_midi: false,
+            midi_record_track: None,
+            midi_captured: Vec::new(),
+            midi_record_started_at: None,
             recent_projects: Self::load_recent_projects(),
             recovery_offer: None,
             last_autosave: std::time::Instant::now(),
@@ -1421,6 +1520,20 @@ impl AppUI {
             .copied()
     }
 
+    fn midi_clip_track(&self, clip_id: ClipId) -> Option<TrackId> {
+        self.project
+            .track_order
+            .iter()
+            .find(|track_id| {
+                self.project
+                    .tracks
+                    .get(*track_id)
+                    .map(|track| track.midi_clips.contains(&clip_id))
+                    .unwrap_or(false)
+            })
+            .copied()
+    }
+
     /// Find the contiguous run of clips on the selected clip's track. A run
     /// grows while clips touch (`end >= next.start`) or overlap.
     fn consolidation_plan(&self, clip_id: ClipId) -> Option<ConsolidationPlan> {
@@ -1470,11 +1583,12 @@ impl AppUI {
     /// `Auto` while the track is armed or a take is running.
     fn sync_monitoring(&mut self) {
         let enabled = self.project.tracks.values().any(|track| {
-            match track.monitor_mode {
-                MonitorMode::Off => false,
-                MonitorMode::Auto => track.record_arm || self.recording,
-                MonitorMode::On => true,
-            }
+            track.track_type == TrackType::Audio
+                && match track.monitor_mode {
+                    MonitorMode::Off => false,
+                    MonitorMode::Auto => track.record_arm || self.recording,
+                    MonitorMode::On => true,
+                }
         });
         if enabled != self.monitoring_on {
             self.monitoring_on = enabled;
@@ -1485,17 +1599,20 @@ impl AppUI {
     fn clear_selection(&mut self) {
         self.selected_clip = None;
         self.selected_clips.clear();
+        self.selected_midi_clip = None;
     }
 
     fn set_single_selection(&mut self, clip_id: ClipId) {
         self.selected_clips.clear();
         self.selected_clips.insert(clip_id);
         self.selected_clip = Some(clip_id);
+        self.selected_midi_clip = None;
     }
 
     fn add_to_selection(&mut self, clip_id: ClipId) {
         self.selected_clips.insert(clip_id);
         self.selected_clip = Some(clip_id);
+        self.selected_midi_clip = None;
     }
 
     /// Ctrl/Cmd-click: add the clip, or remove it if it was already selected.
@@ -1802,6 +1919,24 @@ impl AppUI {
                     if !self.project.track_order.contains(&track.id) {
                         let position = (*index).min(self.project.track_order.len());
                         self.project.track_order.insert(position, track.id);
+                    }
+                }
+            }
+            EditAction::AttachMidi { track, clip_id } => {
+                if let Some(track) = self.project.tracks.get_mut(track) {
+                    if forward {
+                        track.add_midi_clip(*clip_id);
+                    } else {
+                        track.remove_midi_clip(*clip_id);
+                    }
+                }
+            }
+            EditAction::DetachMidi { track, clip_id } => {
+                if let Some(track) = self.project.tracks.get_mut(track) {
+                    if forward {
+                        track.remove_midi_clip(*clip_id);
+                    } else {
+                        track.add_midi_clip(*clip_id);
                     }
                 }
             }
@@ -2339,6 +2474,19 @@ impl AppUI {
     /// Delete the selected clip from its track. The clip data stays in the
     /// project pool, so the delete is recoverable (trash + undo).
     fn delete_selected_clip(&mut self) {
+        if let Some(midi_id) = self.selected_midi_clip.take() {
+            if let Some(track_id) = self.midi_clip_track(midi_id) {
+                let action = EditAction::DetachMidi {
+                    track: track_id,
+                    clip_id: midi_id,
+                };
+                self.apply_action(&action, true);
+                self.push_undo(action, false);
+                self.after_edit();
+                self.refresh_playback_if_playing();
+            }
+            return;
+        }
         let ids = self.selection_ids();
         if ids.is_empty() {
             return;
@@ -3969,6 +4117,178 @@ impl AppUI {
 
         self.audio_window = Some(window);
     }
+
+    /// Basic piano-roll view: pitch stripes, beat/bar grid and every captured
+    /// note as a rectangle. Editing comes later; this is for inspecting takes.
+    fn show_piano_roll(&mut self, ctx: &egui::Context) {
+        let Some(window) = self.piano_roll else {
+            return;
+        };
+        let Some(clip) = self.project.midi_clips.get(window.clip_id) else {
+            self.piano_roll = None;
+            return;
+        };
+        let spans = midi_clip_note_spans(clip);
+        let length = clip.length.max(1);
+        let note_count = spans.len();
+        let (numerator, _) = self.time_signature();
+        let beats_per_bar = numerator.max(1) as u64;
+        let mut open = true;
+        let mut close = false;
+
+        egui::Window::new("Piano Roll")
+            .id(egui::Id::new(("piano_roll", window.clip_id)))
+            .open(&mut open)
+            .default_size([920.0, 520.0])
+            .min_size([420.0, 260.0])
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(format!("{} notes", note_count));
+                    ui.separator();
+                    ui.weak(format!("{} ticks", length));
+                    ui.separator();
+                    ui.weak("Double-click a MIDI clip to reopen");
+                    if ui.small_button("Close").clicked() {
+                        close = true;
+                    }
+                });
+
+                let (response, painter) =
+                    ui.allocate_painter(ui.available_size(), egui::Sense::hover());
+                let rect = response.rect;
+                if rect.width() < 80.0 || rect.height() < 40.0 {
+                    return;
+                }
+
+                let keyboard_width = 48.0;
+                let keyboard = egui::Rect::from_min_max(
+                    rect.min,
+                    egui::pos2(rect.left() + keyboard_width, rect.bottom()),
+                );
+                let grid = egui::Rect::from_min_max(
+                    egui::pos2(rect.left() + keyboard_width, rect.top()),
+                    rect.max,
+                );
+
+                // Show at least two octaves so sparse takes still have context.
+                let (mut low, mut high) = if spans.is_empty() {
+                    (48u8, 72u8)
+                } else {
+                    (
+                        spans.iter().map(|span| span.2).min().unwrap_or(48),
+                        spans.iter().map(|span| span.2).max().unwrap_or(72),
+                    )
+                };
+                low = low.saturating_sub(2);
+                high = high.saturating_add(2).min(127);
+                while (high - low) < 23 {
+                    if low > 0 {
+                        low -= 1;
+                    }
+                    if high < 127 && (high - low) < 23 {
+                        high += 1;
+                    }
+                }
+                let rows = (high - low + 1) as f32;
+                let row_height = grid.height() / rows;
+
+                painter.rect_filled(grid, 0.0, egui::Color32::from_gray(28));
+                for pitch in low..=high {
+                    let y0 = grid.top() + (high - pitch) as f32 * row_height;
+                    let row = egui::Rect::from_min_max(
+                        egui::pos2(grid.left(), y0),
+                        egui::pos2(grid.right(), y0 + row_height),
+                    );
+                    let black = is_black_key(pitch);
+                    painter.rect_filled(
+                        row,
+                        0.0,
+                        if black {
+                            egui::Color32::from_gray(24)
+                        } else {
+                            egui::Color32::from_gray(36)
+                        },
+                    );
+
+                    let key = egui::Rect::from_min_max(
+                        egui::pos2(keyboard.left(), y0),
+                        egui::pos2(keyboard.right(), y0 + row_height),
+                    );
+                    painter.rect_filled(
+                        key,
+                        0.0,
+                        if black {
+                            egui::Color32::from_gray(18)
+                        } else {
+                            egui::Color32::from_gray(205)
+                        },
+                    );
+                    if pitch % 12 == 0 {
+                        painter.text(
+                            egui::pos2(keyboard.left() + 2.0, y0 + row_height * 0.5),
+                            egui::Align2::LEFT_CENTER,
+                            note_name(pitch),
+                            egui::FontId::monospace(8.0),
+                            if black {
+                                egui::Color32::from_gray(230)
+                            } else {
+                                egui::Color32::from_gray(20)
+                            },
+                        );
+                    }
+                }
+
+                // Beat and bar lines.
+                let beat_ticks = 960u64;
+                let bar_ticks = beat_ticks * beats_per_bar.max(1);
+                let mut tick = 0u64;
+                while tick <= length {
+                    let x = grid.left() + (tick as f32 / length as f32) * grid.width();
+                    let is_bar = tick % bar_ticks == 0;
+                    painter.line_segment(
+                        [egui::pos2(x, grid.top()), egui::pos2(x, grid.bottom())],
+                        egui::Stroke::new(
+                            if is_bar { 1.0_f32 } else { 0.5_f32 },
+                            if is_bar {
+                                egui::Color32::from_gray(78)
+                            } else {
+                                egui::Color32::from_gray(52)
+                            },
+                        ),
+                    );
+                    tick += beat_ticks;
+                }
+
+                // Note rectangles.
+                for (start, end, pitch, velocity) in &spans {
+                    if *pitch < low || *pitch > high {
+                        continue;
+                    }
+                    let x0 = grid.left() + (*start as f32 / length as f32) * grid.width();
+                    let x1 = grid.left() + (*end as f32 / length as f32) * grid.width();
+                    let y0 = grid.top() + (high - *pitch) as f32 * row_height;
+                    let note_rect = egui::Rect::from_min_max(
+                        egui::pos2(x0, y0 + 1.0),
+                        egui::pos2(x1.max(x0 + 2.0), y0 + row_height - 1.0),
+                    );
+                    let level = 120 + (*velocity as u16 * 90 / 127) as u8;
+                    painter.rect_filled(
+                        note_rect,
+                        2.0,
+                        egui::Color32::from_rgb(70, level, 220),
+                    );
+                    painter.rect_stroke(
+                        note_rect,
+                        2.0,
+                        egui::Stroke::new(0.5_f32, egui::Color32::from_gray(230)),
+                    );
+                }
+            });
+
+        if !open || close {
+            self.piano_roll = None;
+        }
+    }
 }
 
 /// Clamp a fade length to a clip's length.
@@ -4570,6 +4890,15 @@ impl eframe::App for AppUI {
         if self.recording && self.last_disk_check.elapsed().as_secs_f64() >= 1.0 {
             self.last_disk_check = std::time::Instant::now();
             self.disk_warning = self.low_disk_warning();
+        }
+
+        if self.recording_midi {
+            if let Some(monitor) = &self.midi_monitor {
+                let events = monitor.drain_events();
+                if !events.is_empty() {
+                    self.midi_captured.extend(events);
+                }
+            }
         }
 
         // Autosave every two minutes while there are unsaved changes.
@@ -5273,9 +5602,19 @@ impl eframe::App for AppUI {
                         self.audio_window = Some(ClipAudioWindow::new(ids));
                     }
                 }
+                if ui
+                    .add_enabled(
+                        self.selected_midi_clip.is_some(),
+                        egui::Button::new("Piano Roll…"),
+                    )
+                    .on_hover_text("Inspect the selected MIDI clip")
+                    .clicked()
+                {
+                    if let Some(clip_id) = self.selected_midi_clip {
+                        self.piano_roll = Some(PianoRollWindow { clip_id });
+                    }
+                }
                 ui.separator();
-
-                // Snap grid for moving/trimming clips (hold Alt to bypass).
                 ui.label("Snap:");
                 egui::ComboBox::from_id_salt("snap_mode")
                     .selected_text(self.snap_mode.label())
@@ -5562,7 +5901,7 @@ impl eframe::App for AppUI {
             }
 
             // ---- Track lanes and clips ----
-            let track_layout: Vec<(egui::Color32, Vec<ClipId>)> = self
+            let track_layout: Vec<(egui::Color32, Vec<ClipId>, Vec<ClipId>)> = self
                 .project
                 .track_order
                 .iter()
@@ -5571,6 +5910,7 @@ impl eframe::App for AppUI {
                         (
                             egui::Color32::from_rgb(track.color.0, track.color.1, track.color.2),
                             track.clips.clone(),
+                            track.midi_clips.clone(),
                         )
                     })
                 })
@@ -5578,8 +5918,9 @@ impl eframe::App for AppUI {
 
             let track_y_start = rect.top() + ruler_height;
             let mut clip_rects: Vec<(ClipId, egui::Rect)> = Vec::new();
+            let mut midi_clip_rects: Vec<(ClipId, egui::Rect)> = Vec::new();
 
-            for (track_idx, (color, clips)) in track_layout.iter().enumerate() {
+            for (track_idx, (color, audio_clips, midi_clips)) in track_layout.iter().enumerate() {
                 let track_rect = egui::Rect::from_min_max(
                     egui::pos2(rect.left(), track_y_start + track_idx as f32 * track_height),
                     egui::pos2(rect.right(), track_y_start + (track_idx + 1) as f32 * track_height),
@@ -5609,8 +5950,8 @@ impl eframe::App for AppUI {
                     );
                 }
 
-                let lane_layout = take_lane_layout(&self.project, clips);
-                for clip_id in clips {
+                let lane_layout = take_lane_layout(&self.project, audio_clips);
+                for clip_id in audio_clips {
                     if let Some(clip) = self.project.audio_clips.get(*clip_id) {
                         let (index, count) =
                             lane_layout.get(clip_id).copied().unwrap_or((0, 1));
@@ -5663,11 +6004,29 @@ impl eframe::App for AppUI {
                     }
                 }
 
+                for clip_id in midi_clips {
+                    if let Some(clip) = self.project.midi_clips.get(*clip_id) {
+                        let clip_rect = draw_midi_clip(
+                            &painter,
+                            clip,
+                            track_rect,
+                            *color,
+                            view,
+                            project_sr,
+                            self.project.tempo_map.default_bpm(),
+                            self.selected_midi_clip == Some(*clip_id),
+                        );
+                        if clip_rect != egui::Rect::NOTHING {
+                            midi_clip_rects.push((*clip_id, clip_rect));
+                        }
+                    }
+                }
+
                 // ---- Automatic crossfade overlay ----
                 // The mixer equal-power crossfades overlapping unmuted clips
                 // on the same track; show where that happens.
                 let mut spans: Vec<(f64, f64)> = Vec::new();
-                for clip_id in clips {
+                for clip_id in audio_clips {
                     if let Some(clip) = self.project.audio_clips.get(*clip_id) {
                         if clip.muted || clip.length == 0 {
                             continue;
@@ -5734,12 +6093,20 @@ impl eframe::App for AppUI {
             let additive = ui.input(|input| input.modifiers.command || input.modifiers.ctrl);
             if primary_clicked && hovered {
                 if let Some(pos) = pointer_pos {
-                    let clicked = clip_rects
+                    let clicked_midi = midi_clip_rects
                         .iter()
                         .rev()
-                        .find(|(_, r)| r.contains(pos))
+                        .find(|(_, rect)| rect.contains(pos))
                         .map(|(id, _)| *id);
-                    if let Some(clip_id) = clicked {
+                    let clicked_audio = clip_rects
+                        .iter()
+                        .rev()
+                        .find(|(_, rect)| rect.contains(pos))
+                        .map(|(id, _)| *id);
+                    if let Some(midi_id) = clicked_midi {
+                        self.clear_selection();
+                        self.selected_midi_clip = Some(midi_id);
+                    } else if let Some(clip_id) = clicked_audio {
                         if additive {
                             self.toggle_selection(clip_id);
                         } else {
@@ -5761,6 +6128,19 @@ impl eframe::App for AppUI {
                 ui.id().with("clip_edit"),
                 egui::Sense::click_and_drag(),
             );
+            if edit_response.double_clicked() {
+                if let Some(pos) = pointer_pos {
+                    if let Some((midi_id, _)) = midi_clip_rects
+                        .iter()
+                        .rev()
+                        .find(|(_, rect)| rect.contains(pos))
+                    {
+                        self.clear_selection();
+                        self.selected_midi_clip = Some(*midi_id);
+                        self.piano_roll = Some(PianoRollWindow { clip_id: *midi_id });
+                    }
+                }
+            }
             if edit_response.drag_started() {
                 // Classify the gesture from where the pointer went down, not
                 // from where it is after egui's drag threshold: otherwise edge
@@ -5934,6 +6314,7 @@ impl eframe::App for AppUI {
         });
 
         self.show_audio_window(ctx);
+        self.show_piano_roll(ctx);
         self.show_history_window(ctx);
 
         // Keep the event loop waking regularly, even when the window is not
@@ -6228,6 +6609,7 @@ impl AppUI {
         self.sync_playback_metronome();
         // Open the output immediately with silence; the worker supplies the
         // clips as soon as they have been read from disk.
+        self.engine.set_playback_notes(Vec::new());
         self.engine.set_playback_clips(Vec::new(), start_frame);
         if let Err(e) = self.engine.start() {
             self.engine.clear_playback();
@@ -6298,6 +6680,52 @@ impl AppUI {
             .send((self.playback_generation, specs));
     }
 
+    /// Pair note-on/off events on every audible MIDI clip into playable notes.
+    /// Clip event ticks are relative to the clip; convert through the tempo map
+    /// into output-device frames.
+    fn collect_playable_notes(&self, out_rate: u32) -> Vec<PlayableNote> {
+        let project_sr = self.project.sample_rate.max(1) as f64;
+        let out_rate = out_rate.max(1) as f64;
+        let any_solo = self.project.tracks.values().any(|track| track.solo);
+        let mut notes = Vec::new();
+
+        let to_frame = |tick: u64| -> u64 {
+            let sample = self.project.tempo_map.tick_to_sample(tick, project_sr);
+            (sample as f64 * out_rate / project_sr).round() as u64
+        };
+
+        for track_id in &self.project.track_order {
+            let Some(track) = self.project.tracks.get(track_id) else {
+                continue;
+            };
+            let Some(track_gain) = audible_track_gain(track, any_solo) else {
+                continue;
+            };
+            for clip_id in &track.midi_clips {
+                let Some(clip) = self.project.midi_clips.get(*clip_id) else {
+                    continue;
+                };
+                if clip.muted || clip.length == 0 {
+                    continue;
+                }
+                let clip_start = clip.timeline_position.tick;
+                for (start, end, note, velocity) in midi_clip_note_spans(clip) {
+                    notes.push(playable_note(
+                        clip_start.saturating_add(start),
+                        clip_start.saturating_add(end),
+                        note,
+                        velocity,
+                        track_gain,
+                        &to_frame,
+                    ));
+                }
+            }
+        }
+
+        notes.sort_by_key(|note| (note.start_frame, note.note));
+        notes
+    }
+
     /// Apply finished background playback reloads. Stale generations are
     /// discarded.
     fn poll_playback_reload(&mut self) {
@@ -6309,6 +6737,8 @@ impl AppUI {
             let start_frame = (self.playhead_secs.max(0.0) * out_rate as f64) as u64;
             self.sync_playback_loop();
             self.sync_playback_metronome();
+            let notes = self.collect_playable_notes(out_rate);
+            self.engine.set_playback_notes(notes);
             self.engine.set_playback_clips(clips, start_frame);
         }
     }
@@ -6659,6 +7089,22 @@ impl AppUI {
 
     /// Open the input device and start capturing a take at the current playhead.
     fn begin_recording(&mut self, track_id: TrackId) {
+        let is_midi = self
+            .project
+            .tracks
+            .get(&track_id)
+            .map(|track| {
+                matches!(
+                    track.track_type,
+                    TrackType::Midi | TrackType::Instrument
+                )
+            })
+            .unwrap_or(false);
+        if is_midi {
+            self.begin_midi_recording(track_id);
+            return;
+        }
+
         // Unique file per take so new recordings never overwrite older ones.
         let file_path = std::path::PathBuf::from(format!(
             "recording_{}.wav",
@@ -6691,9 +7137,100 @@ impl AppUI {
         self.sync_monitoring();
     }
 
+    /// Start capturing note-on/off events from the selected MIDI input.
+    fn begin_midi_recording(&mut self, track_id: TrackId) {
+        if self.midi_monitor.is_none() {
+            self.pending_record_track = None;
+            self.error_message =
+                Some("No MIDI input selected. Choose one in the MIDI bar.".to_string());
+            return;
+        }
+        // Drop any notes that arrived before the take started.
+        if let Some(monitor) = &self.midi_monitor {
+            let _ = monitor.drain_events();
+        }
+        self.recording = true;
+        self.recording_midi = true;
+        self.midi_record_track = Some(track_id);
+        self.record_start_secs = Some(self.playhead_secs);
+        self.midi_captured.clear();
+        self.midi_record_started_at = Some(std::time::Instant::now());
+        self.error_message = None;
+        self.sync_monitoring();
+    }
+
+    /// Finish a MIDI take and attach the captured events to a new MidiClip.
+    fn finalize_midi_recording(&mut self) {
+        self.recording = false;
+        self.recording_midi = false;
+        let Some(track_id) = self.midi_record_track.take() else {
+            return;
+        };
+        if let Some(monitor) = &self.midi_monitor {
+            self.midi_captured.extend(monitor.drain_events());
+        }
+        let events = std::mem::take(&mut self.midi_captured);
+        let started_at = self
+            .midi_record_started_at
+            .take()
+            .unwrap_or_else(std::time::Instant::now);
+        let start_secs = self.record_start_secs.take().unwrap_or(0.0);
+        if events.is_empty() {
+            self.error_message = Some("No MIDI notes were captured.".to_string());
+            return;
+        }
+        let end_secs = self.playhead_secs.max(start_secs + 0.05);
+        let project_sr = self.project.sample_rate.max(1) as f64;
+        let start_sample = (start_secs.max(0.0) * project_sr) as u64;
+        let end_sample = (end_secs.max(0.0) * project_sr) as u64;
+        let start_tick = self.project.tempo_map.sample_to_tick(start_sample, project_sr);
+        let length_ticks = self
+            .project
+            .tempo_map
+            .sample_to_tick(end_sample, project_sr)
+            .saturating_sub(start_tick)
+            .max(1);
+        let mut clip = MidiClip::new(TimelinePos::new(start_tick, start_sample), length_ticks);
+        for event in events {
+            // Use local arrival time so the first note keeps its real offset
+            // from the playhead rather than always starting at tick zero.
+            let offset_secs = event
+                .received_at
+                .saturating_duration_since(started_at)
+                .as_secs_f64();
+            let sample = start_sample + (offset_secs * project_sr) as u64;
+            let tick = self
+                .project
+                .tempo_map
+                .sample_to_tick(sample, project_sr)
+                .saturating_sub(start_tick);
+            clip.add_event(if event.on {
+                MidiEvent::note_on(tick, 0, event.note, event.velocity.max(1))
+            } else {
+                MidiEvent::note_off(tick, 0, event.note, 0)
+            });
+        }
+        let clip_id = self.project.midi_clips.insert(clip);
+        let action = EditAction::AttachMidi {
+            track: track_id,
+            clip_id,
+        };
+        self.apply_action(&action, true);
+        self.push_undo(action, false);
+        self.clear_selection();
+        self.selected_midi_clip = Some(clip_id);
+        self.after_edit();
+        self.refresh_playback_if_playing();
+    }
+
     /// Stop an active recording and add the finished file to the timeline as an
     /// audio clip (which also queues waveform generation).
     fn stop_recording_and_create_clip(&mut self) {
+        if self.recording_midi {
+            self.finalize_midi_recording();
+            self.sync_monitoring();
+            return;
+        }
         self.recording = false;
         self.disk_warning = None;
         match self.engine.stop_recording() {
@@ -6817,6 +7354,82 @@ impl AppUI {
 
         self.spawn_overview(clip_id, file_path);
     }
+}
+
+/// Draw a MIDI clip block in the arrange lane. Returns its screen rectangle.
+fn draw_midi_clip(
+    painter: &egui::Painter,
+    clip: &MidiClip,
+    lane: egui::Rect,
+    color: egui::Color32,
+    view: TimelineView,
+    project_sr: f64,
+    bpm: f32,
+    selected: bool,
+) -> egui::Rect {
+    let ticks_per_sec = (bpm.max(1.0) as f64 / 60.0) * 960.0;
+    let start = clip.timeline_position.sample as f64 / project_sr;
+    let end = start + clip.length as f64 / ticks_per_sec;
+    let x0 = view.x(lane, start);
+    let x1 = view.x(lane, end);
+    if x1 < lane.left() || x0 > lane.right() {
+        return egui::Rect::NOTHING;
+    }
+    let rect = egui::Rect::from_min_max(
+        egui::pos2(x0.max(lane.left()), lane.top() + 2.0),
+        egui::pos2(x1.min(lane.right()), lane.bottom() - 2.0),
+    );
+    let alpha = if clip.muted {
+        35
+    } else if selected {
+        105
+    } else {
+        70
+    };
+    painter.rect_filled(
+        rect,
+        3.0,
+        egui::Color32::from_rgba_unmultiplied(
+            color.r(),
+            color.g(),
+            color.b(),
+            alpha,
+        ),
+    );
+    let stroke = if selected {
+        egui::Stroke::new(2.0_f32, egui::Color32::WHITE)
+    } else {
+        egui::Stroke::new(1.0_f32, color)
+    };
+    painter.rect_stroke(rect, 3.0, stroke);
+
+    let note_count = clip
+        .events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.message,
+                MidiMessage::NoteOn { velocity, .. } if velocity > 0
+            )
+        })
+        .count();
+    painter.text(
+        egui::pos2(rect.left() + 4.0, rect.top() + 2.0),
+        egui::Align2::LEFT_TOP,
+        format!("MIDI · {} notes", note_count),
+        egui::FontId::proportional(9.0),
+        egui::Color32::from_gray(230),
+    );
+    if clip.muted {
+        painter.text(
+            egui::pos2(rect.left() + 4.0, rect.top() + 2.0),
+            egui::Align2::LEFT_TOP,
+            "M",
+            egui::FontId::proportional(10.0),
+            egui::Color32::from_gray(230),
+        );
+    }
+    rect
 }
 
 /// Draw a single audio clip: background, waveform (overview or sample-level),
@@ -7744,14 +8357,17 @@ mod tests {
         clip_span_samples, clips_in_marquee, contiguous_clip_span, filter_audio,
         knob_from_normalized, knob_to_normalized, load_wav_interleaved,
         load_wav_range_interleaved, loop_range_frames, measure_integrated_loudness,
-        merge_continuous_edit, metronome_config, processed_file_stem, punch_waiting,
+        merge_continuous_edit, metronome_config, midi_clip_note_spans, note_name,
+        processed_file_stem, punch_waiting,
         render_pitch_stretch, reverse_interleaved, saturate, take_lane_layout,
         tape_stretch_interleaved, tremolo, wav_file_info, wav_peak, write_wav_f32,
         write_wav_range, write_wav_range_with_envelope, project_from_template, ClipShape,
         ClipSourceState, EditAction, FilterKind, MonitorMode, Template, TrackShape,
     };
     use daw_core::audio_pool::AudioFileRef;
-    use daw_core::clip::{AudioClip, ClipId, Fade, FadeCurve, TimeStretchMode, TimelinePos};
+    use daw_core::clip::{
+        AudioClip, ClipId, Fade, FadeCurve, MidiClip, MidiEvent, TimeStretchMode, TimelinePos,
+    };
     use daw_core::project::BitDepth;
     use daw_core::undo::History;
     use daw_core::Project;
@@ -8547,5 +9163,34 @@ mod tests {
         assert!((peak - 0.9).abs() < 1e-6);
 
         std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn midi_clip_note_spans_pair_note_on_and_off() {
+        let mut clip = MidiClip::new(TimelinePos::default(), 1920);
+        clip.add_event(MidiEvent::note_on(0, 0, 60, 100));
+        clip.add_event(MidiEvent::note_off(480, 0, 60, 0));
+        clip.add_event(MidiEvent::note_on(960, 0, 64, 80));
+        clip.add_event(MidiEvent::note_off(1440, 0, 64, 0));
+
+        let spans = midi_clip_note_spans(&clip);
+        assert_eq!(spans, vec![(0, 480, 60, 100), (960, 1440, 64, 80)]);
+    }
+
+    #[test]
+    fn midi_clip_note_spans_close_held_notes_at_the_clip_end() {
+        let mut clip = MidiClip::new(TimelinePos::default(), 960);
+        clip.add_event(MidiEvent::note_on(480, 0, 67, 90));
+
+        let spans = midi_clip_note_spans(&clip);
+        assert_eq!(spans, vec![(480, 960, 67, 90)]);
+    }
+
+    #[test]
+    fn note_names_use_scientific_pitch_notation() {
+        assert_eq!(note_name(60), "C4");
+        assert_eq!(note_name(61), "C#4");
+        assert_eq!(note_name(69), "A4");
+        assert_eq!(note_name(0), "C-1");
     }
 }

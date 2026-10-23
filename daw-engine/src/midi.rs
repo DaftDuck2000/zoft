@@ -20,6 +20,17 @@ pub struct MidiActivity {
     pub active_notes: u32,
 }
 
+/// One note-on/off captured from a MIDI input.
+#[derive(Debug, Clone, Copy)]
+pub struct MidiInputEvent {
+    pub timestamp_micros: u64,
+    /// Local arrival time, used to place notes relative to the start of a take.
+    pub received_at: std::time::Instant,
+    pub note: u8,
+    pub velocity: u8,
+    pub on: bool,
+}
+
 /// List the MIDI input ports exposed by the system (ALSA/JACK on Linux).
 pub fn list_midi_inputs() -> Result<Vec<MidiInputInfo>> {
     let input = MidiInput::new("Zoft")
@@ -38,6 +49,7 @@ pub fn list_midi_inputs() -> Result<Vec<MidiInputInfo>> {
 /// monitor closes the port.
 pub struct MidiMonitor {
     shared: Arc<Mutex<MidiActivity>>,
+    events: Arc<Mutex<Vec<MidiInputEvent>>>,
     connection: Option<midir::MidiInputConnection<()>>,
 }
 
@@ -52,16 +64,34 @@ impl MidiMonitor {
 
         let shared = Arc::new(Mutex::new(MidiActivity::default()));
         let state = Arc::clone(&shared);
+        let events = Arc::new(Mutex::new(Vec::<MidiInputEvent>::new()));
+        let event_queue = Arc::clone(&events);
         let connection = input.connect(
             port,
             "zoft-monitor",
-            move |_timestamp, message, _| {
+            move |timestamp, message, _| {
                 if message.len() < 3 {
                     return;
                 }
                 let status = message[0] & 0xF0;
                 let note = message[1] & 0x7F;
                 let velocity = message[2] & 0x7F;
+                let is_on = status == 0x90 && velocity > 0;
+                let is_off = status == 0x80 || (status == 0x90 && velocity == 0);
+                if is_on || is_off {
+                    if let Ok(mut queue) = event_queue.lock() {
+                        if queue.len() >= 8192 {
+                            queue.remove(0);
+                        }
+                        queue.push(MidiInputEvent {
+                            timestamp_micros: timestamp,
+                            received_at: std::time::Instant::now(),
+                            note,
+                            velocity,
+                            on: is_on,
+                        });
+                    }
+                }
                 let Ok(mut activity) = state.lock() else {
                     return;
                 };
@@ -86,8 +116,17 @@ impl MidiMonitor {
 
         Ok(Self {
             shared,
+            events,
             connection: Some(connection),
         })
+    }
+
+    /// Drain captured note-on/off events (used while recording a MIDI take).
+    pub fn drain_events(&self) -> Vec<MidiInputEvent> {
+        self.events
+            .lock()
+            .map(|mut events| std::mem::take(&mut *events))
+            .unwrap_or_default()
     }
 
     /// Snapshot the latest note activity.

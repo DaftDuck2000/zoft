@@ -79,6 +79,7 @@ pub struct MidiClip {
     pub id: ClipId,
     pub events: Vec<MidiEvent>,
     pub timeline_position: TimelinePos,
+    /// Clip length in ticks (PPQN 960).
     pub length: u64,
     pub loop_enabled: bool,
     pub loop_range: Option<Range<u64>>,

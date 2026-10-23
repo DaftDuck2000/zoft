@@ -57,6 +57,9 @@ pub struct AudioEngine {
     playback_loop: Arc<Mutex<Option<(u64, u64)>>>,
     /// Metronome settings, applied to every new mixer and live updates.
     playback_metronome: Arc<Mutex<Option<MetronomeConfig>>>,
+    /// MIDI notes for the built-in sine voice, applied to every new mixer and
+    /// live updates.
+    playback_notes: Arc<Mutex<Vec<PlayableNote>>>,
 }
 
 struct RecordingState {
@@ -84,6 +87,7 @@ impl AudioEngine {
             playback_active: AtomicBool::new(false),
             playback_loop: Arc::new(Mutex::new(None)),
             playback_metronome: Arc::new(Mutex::new(None)),
+            playback_notes: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -135,6 +139,12 @@ impl AudioEngine {
         if let Some(metronome) = *self.playback_metronome.lock().unwrap() {
             mixer.set_metronome(Some(metronome));
         }
+        {
+            let notes = self.playback_notes.lock().unwrap();
+            if !notes.is_empty() {
+                mixer.set_midi_notes(notes.clone());
+            }
+        }
         self.backend.set_playback_mixer(Some(mixer));
         self.playback_active.store(true, Ordering::SeqCst);
     }
@@ -152,6 +162,13 @@ impl AudioEngine {
     pub fn set_playback_metronome(&self, config: Option<MetronomeConfig>) {
         *self.playback_metronome.lock().unwrap() = config;
         self.backend.set_playback_metronome(config);
+    }
+
+    /// Set the MIDI notes rendered by the built-in sine voice. Applied to the
+    /// live mixer immediately and to any mixer created later.
+    pub fn set_playback_notes(&self, notes: Vec<PlayableNote>) {
+        *self.playback_notes.lock().unwrap() = notes.clone();
+        self.backend.set_playback_notes(notes);
     }
 
     /// Remove the playback content (output falls silent).

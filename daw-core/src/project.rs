@@ -132,11 +132,11 @@ impl Project {
                     (clip.length as f64 * self.sample_rate as f64 / source_rate).ceil() as u64;
                 clip.timeline_position.sample.saturating_add(length_project)
             })
-            .chain(
-                self.midi_clips
-                    .values()
-                    .map(|clip| clip.timeline_position.sample.saturating_add(clip.length)),
-            )
+            .chain(self.midi_clips.values().map(|clip| {
+                let end_tick = clip.timeline_position.tick.saturating_add(clip.length);
+                self.tempo_map
+                    .tick_to_sample(end_tick, self.sample_rate as f64)
+            }))
             .max()
             .unwrap_or(0);
         tempo_duration.max(audio_duration)

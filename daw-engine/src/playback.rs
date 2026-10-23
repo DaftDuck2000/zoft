@@ -40,6 +40,16 @@ pub struct MetronomeConfig {
     pub gain: f32,
 }
 
+/// One MIDI note prepared for playback by the simple built-in sine voice.
+#[derive(Debug, Clone, Copy)]
+pub struct PlayableNote {
+    pub start_frame: u64,
+    pub end_frame: u64,
+    pub note: u8,
+    /// Normalized velocity (`0.0..=1.0`).
+    pub velocity: f32,
+}
+
 /// Real-time mixer: sums all clips into the output buffer and tracks the
 /// playback position. Lives behind a mutex shared with the audio callback.
 pub struct PlaybackMixer {
@@ -54,6 +64,7 @@ pub struct PlaybackMixer {
     /// Optional repeating range in output-device frames.
     loop_range: Option<(u64, u64)>,
     metronome: Option<MetronomeConfig>,
+    notes: Vec<PlayableNote>,
 }
 
 impl PlaybackMixer {
@@ -129,6 +140,7 @@ impl PlaybackMixer {
             scratch: Vec::new(),
             loop_range: None,
             metronome: None,
+            notes: Vec::new(),
         }
     }
 
@@ -164,6 +176,11 @@ impl PlaybackMixer {
 
     pub fn metronome(&self) -> Option<MetronomeConfig> {
         self.metronome
+    }
+
+    /// Replace the MIDI notes rendered by the built-in sine voice.
+    pub fn set_midi_notes(&mut self, notes: Vec<PlayableNote>) {
+        self.notes = notes;
     }
 
     /// Fill `data` with the mixed output, advancing the playback position.
@@ -298,8 +315,40 @@ impl PlaybackMixer {
                     }
                 }
             }
+
+            for note in &self.notes {
+                if pos >= note.start_frame && pos < note.end_frame {
+                    let sample = midi_note_sample(*note, pos, self.out_sample_rate);
+                    if sample != 0.0 {
+                        for channel in 0..out_ch {
+                            out[frame * out_ch + channel] += sample;
+                        }
+                    }
+                }
+            }
         }
     }
+}
+
+/// One sample from the simple built-in sine voice for a MIDI note.
+fn midi_note_sample(note: PlayableNote, pos: u64, sample_rate: u32) -> f32 {
+    let sample_rate = sample_rate.max(1) as f64;
+    let start = note.start_frame.min(pos);
+    let t = (pos - start) as f64 / sample_rate;
+    let duration = note.end_frame.saturating_sub(note.start_frame) as f64 / sample_rate;
+    let frequency = 440.0 * 2f64.powf((note.note as f64 - 69.0) / 12.0);
+    let attack = 0.005;
+    let release = 0.04;
+    let attack_gain = (t / attack).min(1.0);
+    let release_gain = if duration > 0.0 {
+        ((duration - t) / release).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let envelope = attack_gain * release_gain * 0.18;
+    (std::f64::consts::TAU * frequency * t).sin() as f32
+        * envelope as f32
+        * note.velocity.clamp(0.0, 1.0)
 }
 
 /// One metronome click sample at output frame `pos`. The first beat of each
@@ -475,6 +524,23 @@ mod tests {
         let mut silent = [1.0f32; 50];
         mixer.fill_unclamped(&mut silent);
         assert!(silent.iter().all(|sample| sample.abs() < 1e-6));
+    }
+
+    #[test]
+    fn midi_notes_render_only_between_their_frames() {
+        let mut mixer = PlaybackMixer::new(1000, 1, Vec::new(), 0);
+        mixer.set_midi_notes(vec![PlayableNote {
+            start_frame: 10,
+            end_frame: 30,
+            note: 69,
+            velocity: 1.0,
+        }]);
+
+        let mut out = [0.0f32; 40];
+        mixer.fill_unclamped(&mut out);
+        assert!(out[..10].iter().all(|sample| sample.abs() < 1e-6));
+        assert!(out[10..30].iter().any(|sample| sample.abs() > 1e-4));
+        assert!(out[30..].iter().all(|sample| sample.abs() < 1e-6));
     }
 
     #[test]

@@ -4,7 +4,7 @@
 ## ID: 2.2
 ## Priority: Critical
 ## Estimated: 4 weeks
-## Status: `[ ]` Not Started
+## Status: `[~]` In Progress
 ## Depends On: 2.1
 
 ## Description
@@ -158,7 +158,7 @@ enum CCEditMode {
 
 ## Progress Log
 
-- YYYY-MM-DD: Basic grid + note rendering
+- 2026-10-24: Basic read-only piano roll. Double-click a MIDI clip (or use Arrange → Piano Roll…) to open a window with pitch stripes, a C-labelled keyboard, beat/bar grid lines and note rectangles sized by tick position/duration and coloured by velocity. Editing, zoom/scroll, velocity/CC lanes and the tool palette are still to come
 - YYYY-MM-DD: Pencil/Eraser/Select tools
 - YYYY-MM-DD: Note drag + resize
 - YYYY-MM-DD: Velocity lane

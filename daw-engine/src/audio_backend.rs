@@ -267,6 +267,8 @@ pub trait AudioBackend: Send + Sync {
     fn set_playback_loop(&self, _range: Option<(u64, u64)>) {}
     /// Update the metronome on the current playback mixer, if any.
     fn set_playback_metronome(&self, _config: Option<crate::playback::MetronomeConfig>) {}
+    /// Update the MIDI notes rendered by the current playback mixer, if any.
+    fn set_playback_notes(&self, _notes: Vec<crate::playback::PlayableNote>) {}
     /// Enable or disable live input monitoring.
     fn set_monitoring(&self, _enabled: bool) {}
     /// Whether the input stream is currently open.
@@ -651,6 +653,17 @@ fn stop_input_stream(&self) -> Result<()> {
             .as_mut()
         {
             mixer.set_metronome(config);
+        }
+    }
+
+    fn set_playback_notes(&self, notes: Vec<crate::playback::PlayableNote>) {
+        if let Some(mixer) = self
+            .playback
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
+            mixer.set_midi_notes(notes);
         }
     }
 
