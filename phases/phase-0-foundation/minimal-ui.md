@@ -12,7 +12,7 @@ Build the main application window with egui: track list, transport bar, timeline
 ## Requirements
 
 - [✓] Main window: title bar, menu bar, status bar
-- [~] Track list panel: track headers (name, colour, M/S/R, **Mon**, volume); add/remove/reorder tracks not implemented yet
+- [~] Track list panel: track headers (name, colour, M/S/R, **Mon**, volume) and **+A**/**+M** add buttons; track removal and reordering not implemented yet
 - [✓] Transport bar: play/stop/record, position display, tempo, time sig, metronome toggle
 - [✓] Timeline ruler: bars/beats, timecode, loop range markers, playhead
 - [✓] Clip lanes placeholder: empty track lanes showing clip blocks
@@ -76,7 +76,7 @@ struct UiState {
 ## Acceptance Criteria
 
 - [✓] Window opens, renders at 60 FPS
-- [~] Add/remove tracks works (track headers and controls work; add/remove UI not implemented)
+- [~] Add/remove tracks works (audio and MIDI tracks can be added; removal/reordering not implemented)
 - [✓] Transport controls engine (play/stop/seek)
 - [✓] Position display updates in real-time
 - [✓] Timeline ruler shows correct bars/beats for tempo
@@ -92,6 +92,7 @@ struct UiState {
 - 2026-10-07: Timeline ruler rendering (16 divisions, beat markers)
 - 2026-10-07: Keyboard shortcuts (Space play/stop, R record)
 - 2026-10-21: Post-phase updates: ruler seek and loop lane, zoom/scroll, loop/In/Out, metronome, tempo/tap, track M/S/R/Mon/volume, Clip Audio window, History panel
+- 2026-10-23: Track list rows are height-matched to the arrange lanes; **+A**/**+M** add audio/MIDI tracks (undoable); MIDI input selector added to the transport bar
 
 ## Future Tasks (Post-Phase 0)
 

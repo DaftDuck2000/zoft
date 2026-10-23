@@ -13,6 +13,7 @@ pub mod waveform;
 pub mod playback;
 pub mod monitor;
 pub mod disk;
+pub mod midi;
 
 pub use audio_backend::*;
 pub use process_graph::*;
@@ -27,6 +28,7 @@ pub use waveform::*;
 pub use playback::*;
 pub use monitor::*;
 pub use disk::*;
+pub use midi::*;
 
 use crate::audio_backend::AudioBackend;
 use crate::playback::{MetronomeConfig, PlayableClip, PlaybackMixer};

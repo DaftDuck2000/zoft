@@ -5,7 +5,7 @@ use daw_core::audio_pool::AudioFileRef;
 use daw_core::clip::{AudioClip, ClipId, Fade, FadeCurve, TimeStretchMode, TimelinePos};
 use daw_core::project::{BitDepth, Color};
 use daw_core::serialization::ProjectSerialization;
-use daw_core::track::{MonitorMode, TrackId};
+use daw_core::track::{MonitorMode, Track, TrackId};
 use daw_core::undo::History;
 use daw_core::Project;
 use daw_core::WaveformOverview;
@@ -38,6 +38,10 @@ const FADE_HANDLE_PX: f32 = 16.0;
 const MIN_CLIP_SECS: f64 = 0.02;
 /// Smallest loop range created by dragging the ruler (seconds).
 const MIN_LOOP_SECS: f64 = 0.05;
+/// Height of the timeline ruler, shared by the arrange view and track list.
+const RULER_HEIGHT: f32 = 30.0;
+/// Height of one track lane, shared by the arrange view and track list.
+const TRACK_HEIGHT: f32 = 80.0;
 
 pub struct App {
     project: Project,
@@ -539,6 +543,8 @@ enum EditAction {
         from: TrackShape,
         to: TrackShape,
     },
+    /// Add a new track (undo removes it again).
+    AddTrack { track: Track },
     /// Several edits applied and undone as one history step.
     Group {
         actions: Vec<EditAction>,
@@ -585,8 +591,7 @@ impl EditAction {
             }
             EditAction::Tempo { to, .. } => format!("Tempo {:.1} BPM", to),
             EditAction::TrackState { from, to, .. } => {
-                if from.mute != to.mute {
-                    if to.mute { "Mute track" } else { "Unmute track" }.to_string()
+                if from.mute != to.mute {                    if to.mute { "Mute track" } else { "Unmute track" }.to_string()
                 } else if from.solo != to.solo {
                     if to.solo { "Solo track" } else { "Unsolo track" }.to_string()
                 } else if from.record_arm != to.record_arm {
@@ -609,6 +614,7 @@ impl EditAction {
                     "Track change".to_string()
                 }
             }
+            EditAction::AddTrack { track } => format!("Add track: {}", track.name),
             EditAction::Group { label, .. } => label.clone(),
         }
     }
@@ -952,6 +958,10 @@ struct AppUI {
     dragging_playhead: bool,
     input_devices: Vec<daw_engine::audio_backend::AudioDeviceInfo>,
     selected_input_device: Option<String>,
+    midi_inputs: Vec<daw_engine::MidiInputInfo>,
+    selected_midi_input: Option<String>,
+    midi_monitor: Option<daw_engine::MidiMonitor>,
+    midi_activity: daw_engine::MidiActivity,
     error_message: Option<String>,
     /// Yellow banner shown when free disk space is low during recording.
     disk_warning: Option<String>,
@@ -1021,6 +1031,7 @@ struct AppUI {
 impl AppUI {
     fn new(project: Project, engine: AudioEngine) -> Self {
         let input_devices = engine.input_devices().unwrap_or_default();
+        let midi_inputs = daw_engine::list_midi_inputs().unwrap_or_default();
         let (waveform_tx, waveform_rx) = mpsc::channel();
 
         // Playback reloads read from disk; keep that off the UI thread.
@@ -1062,6 +1073,10 @@ impl AppUI {
             dragging_playhead: false,
             input_devices,
             selected_input_device: None,
+            midi_inputs,
+            selected_midi_input: None,
+            midi_monitor: None,
+            midi_activity: daw_engine::MidiActivity::default(),
             error_message: None,
             disk_warning: None,
             last_disk_check: std::time::Instant::now(),
@@ -1756,6 +1771,13 @@ impl AppUI {
             EditAction::TrackState { track_id, from, to } => {
                 if let Some(track) = self.project.tracks.get_mut(track_id) {
                     (if forward { *to } else { *from }).apply(track);
+                }
+            }
+            EditAction::AddTrack { track } => {
+                if forward {
+                    self.project.add_track(track.clone());
+                } else {
+                    self.project.remove_track(track.id);
                 }
             }
             EditAction::Group { actions, .. } => {
@@ -4887,6 +4909,57 @@ impl eframe::App for AppUI {
                         self.sync_monitoring();
                     }
                 }
+                if !self.midi_inputs.is_empty() {
+                    ui.separator();
+                    ui.label("MIDI:");
+                    let mut selected = self.selected_midi_input.clone();
+                    let mut changed = false;
+                    egui::ComboBox::from_id_salt("midi_input")
+                        .selected_text(selected.as_deref().unwrap_or("None"))
+                        .show_ui(ui, |ui| {
+                            if ui.selectable_value(&mut selected, None, "None").changed() {
+                                changed = true;
+                            }
+                            for device in &self.midi_inputs {
+                                if ui
+                                    .selectable_value(
+                                        &mut selected,
+                                        Some(device.name.clone()),
+                                        &device.name,
+                                    )
+                                    .changed()
+                                {
+                                    changed = true;
+                                }
+                            }
+                        });
+                    if changed {
+                        self.selected_midi_input = selected;
+                        self.restart_midi_monitor();
+                    }
+                    if let Some(activity) = self.midi_monitor.as_ref().map(|m| m.activity()) {
+                        self.midi_activity = activity;
+                    }
+                    let has_note = self.midi_activity.last_note.is_some();
+                    let active = self.midi_activity.active_notes > 0;
+                    let label = match self.midi_activity.last_note {
+                        Some(note) if active => format!(
+                            "{} vel {}",
+                            daw_engine::midi_note_name(note),
+                            self.midi_activity.last_velocity
+                        ),
+                        Some(note) => daw_engine::midi_note_name(note),
+                        None => "--".to_string(),
+                    };
+                    let color = if active {
+                        egui::Color32::GREEN
+                    } else if has_note {
+                        egui::Color32::from_gray(180)
+                    } else {
+                        egui::Color32::GRAY
+                    };
+                    ui.colored_label(color, label);
+                }
                 ui.separator();
                 ui.label(format!("Tracks: {}", self.project.track_order.len()));
             });
@@ -4894,14 +4967,41 @@ impl eframe::App for AppUI {
 
         // Left track list
         egui::SidePanel::left("track_list").show(ctx, |ui| {
-            ui.heading("Tracks");
-            ui.separator();
+            let mut add_audio_track = false;
+            let mut add_midi_track = false;
+            ui.spacing_mut().item_spacing.y = 0.0;
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), RULER_HEIGHT),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.add_space(4.0);
+                    ui.heading("Tracks");
+                    ui.add_space(4.0);
+                    if ui
+                        .small_button("+A")
+                        .on_hover_text("Add audio track")
+                        .clicked()
+                    {
+                        add_audio_track = true;
+                    }
+                    if ui
+                        .small_button("+M")
+                        .on_hover_text("Add MIDI track")
+                        .clicked()
+                    {
+                        add_midi_track = true;
+                    }
+                },
+            );
             let mut track_changes: Vec<(TrackId, TrackShape, TrackShape, bool)> = Vec::new();
             for track_id in &self.project.track_order {
                 if let Some(track) = self.project.tracks.get(track_id) {
                     let before = TrackShape::of(track);
                     let mut after = before;
-                    ui.horizontal(|ui| {
+                    let row = ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), TRACK_HEIGHT),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
                         let color = egui::Color32::from_rgb(track.color.0, track.color.1, track.color.2);
                         ui.colored_label(color, "■");
                         ui.label(&track.name);
@@ -4986,7 +5086,13 @@ impl eframe::App for AppUI {
                         )
                         .on_hover_text(format!("Track volume {:.0}%", after.volume * 100.0));
                         ui.label(format!("{:.0}%", after.volume * 100.0));
-                    });
+                        },
+                    );
+                    ui.painter().hline(
+                        row.response.rect.x_range(),
+                        row.response.rect.bottom(),
+                        egui::Stroke::new(1.0_f32, egui::Color32::from_gray(50)),
+                    );
                     if after != before {
                         let volume_only = after.mute == before.mute
                             && after.solo == before.solo
@@ -5009,6 +5115,12 @@ impl eframe::App for AppUI {
                 } else {
                     self.refresh_playback_if_playing();
                 }
+            }
+            if add_audio_track {
+                self.add_track(false);
+            }
+            if add_midi_track {
+                self.add_track(true);
             }
             self.sync_monitoring();
 
@@ -5211,8 +5323,8 @@ impl eframe::App for AppUI {
             };
             let painter = ui.painter();
             let project_sr = self.project.sample_rate.max(1) as f64;
-            let track_height = 80.0;
-            let ruler_height = 30.0;
+            let track_height = TRACK_HEIGHT;
+            let ruler_height = RULER_HEIGHT;
             // Upper part of the ruler is the loop lane (drag to set the loop,
             // like Logic's cycle area); the lower part seeks the playhead.
             let loop_lane_bottom = rect.top() + ruler_height * 0.4;
@@ -6401,6 +6513,37 @@ impl AppUI {
     fn new_project_from_template(&mut self, template: Template) {
         self.pause_transport();
         self.adopt_project(project_from_template(template));
+    }
+
+    /// Open (or close) the MIDI input monitor for the selected device.
+    fn restart_midi_monitor(&mut self) {
+        self.midi_monitor = None;
+        self.midi_activity = daw_engine::MidiActivity::default();
+        let Some(name) = self.selected_midi_input.clone() else {
+            return;
+        };
+        let Some(device) = self.midi_inputs.iter().find(|device| device.name == name) else {
+            return;
+        };
+        match daw_engine::MidiMonitor::start(device.index) {
+            Ok(monitor) => self.midi_monitor = Some(monitor),
+            Err(e) => self.error_message = Some(format!("Could not open MIDI input: {}", e)),
+        }
+    }
+
+    /// Add a new audio or MIDI track as one undoable step.
+    fn add_track(&mut self, midi: bool) {
+        let index = self.project.track_order.len();
+        let mut track = if midi {
+            Track::new_midi(format!("MIDI {}", index + 1))
+        } else {
+            Track::new_audio(format!("Audio {}", index + 1))
+        };
+        track.color = Color::track_color(index);
+        let action = EditAction::AddTrack { track };
+        self.apply_action(&action, true);
+        self.push_undo(action, false);
+        self.after_edit();
     }
 
     /// Replace the project and reset all UI state that referred to the old one.

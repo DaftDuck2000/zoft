@@ -4,7 +4,7 @@
 ## ID: 2.1
 ## Priority: Critical
 ## Estimated: 2 weeks
-## Status: `[ ]` Not Started
+## Status: `[~]` In Progress
 ## Depends On: 0.2, 0.3, 1.1
 
 ## Description
@@ -12,6 +12,7 @@ Implement MIDI track: input routing, recording with chase events, loop recording
 
 ## Requirements
 
+- [x] MIDI keyboard input support: enumerate input ports with `midir`, choose one in the transport bar, and show live note/velocity activity
 - [ ] MIDI track type: extends base track with MIDI-specific fields
 - [ ] Input selection: Hardware MIDI ports, virtual ports, MIDI from other tracks
 - [ ] Record arm: Captures MIDI to new clip on armed track
@@ -108,6 +109,7 @@ MIDI Thru         Record Buffer      Chase Buffer
 
 ## Acceptance Criteria
 
+- [x] MIDI keyboard input: ports are listed, one can be selected, and live note/velocity activity is shown
 - [ ] Record MIDI → clip appears with correct timing
 - [ ] Chase sends CC/pitch bend on seek
 - [ ] Loop recording: overdub merges, new take creates lane
@@ -118,10 +120,5 @@ MIDI Thru         Record Buffer      Chase Buffer
 
 ## Progress Log
 
-- YYYY-MM-DD: MIDI track model
-- YYYY-MM-DD: Input/output routing
-- YYYY-MM-DD: Recording with timestamping
-- YYYY-MM-DD: Chase events
-- YYYY-MM-DD: Loop recording modes
-- YYYY-MM-DD: MIDI thru + panic
-- YYYY-MM-DD: Input quantize
+- 2026-10-23: MIDI keyboard input support started: `daw-engine/src/midi.rs` lists input ports with `midir`, the transport bar has a MIDI input selector and live note/velocity activity display, and audio/MIDI tracks can be added from the track list
+- Remaining: MIDI clip recording, playback/instrument, chase events, loop recording modes, MIDI thru/panic, input quantize

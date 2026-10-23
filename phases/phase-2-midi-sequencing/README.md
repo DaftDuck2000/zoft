@@ -7,7 +7,7 @@
 
 | ID | Feature | Status | File |
 |----|---------|--------|------|
-| 2.1 | MIDI Track Record/Playback | `[ ]` | `midi-track-record-playback.md` |
+| 2.1 | MIDI Track Record/Playback | `[~]` | `midi-track-record-playback.md` |
 | 2.2 | Piano Roll Editor | `[ ]` | `piano-roll-editor.md` |
 | 2.3 | MIDI Editing Tools | `[ ]` | `midi-editing-tools.md` |
 | 2.4 | MIDI Effect Plugins | `[ ]` | `midi-effects.md` |
@@ -21,9 +21,10 @@
 
 ## Status Notes
 
-Only the `MidiClip` data model and the `TrackType::Midi` track variant exist as
-scaffolding. There is no MIDI I/O, recording, playback, piano roll or notation
-view yet.
+MIDI has started: tracks can be added as MIDI tracks, and MIDI input devices
+are enumerated through `midir` with a transport-bar selector and live
+note/velocity activity. MIDI recording to clips, playback/instruments, the
+piano roll and notation view are not implemented yet.
 
 ## Milestone: M2 — MIDI Sequencing (Week 44)
 
