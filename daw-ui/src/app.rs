@@ -6293,6 +6293,10 @@ impl AppUI {
     }
 
     fn save_project_to(&mut self, path: &Path) {
+        // The project name tracks the file name (without the extension).
+        if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
+            self.project.name = stem.to_string();
+        }
         match ProjectSerialization::save(&self.project, path) {
             Ok(()) => {
                 self.project.project_path = Some(path.to_path_buf());
@@ -6311,6 +6315,10 @@ impl AppUI {
         match ProjectSerialization::load(path) {
             Ok(project) => {
                 self.adopt_project(project);
+                // Show the file name (without .zoft) in the UI.
+                if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
+                    self.project.name = stem.to_string();
+                }
                 self.remember_project(path);
                 // Offer a newer autosave for this project, if one exists.
                 let autosave = Self::sibling_autosave(path);

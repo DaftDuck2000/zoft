@@ -98,3 +98,4 @@ struct AudioFileRef {
 - 2026-10-21: Status corrected to In Progress: the app launches a new in-memory project and does not yet wire Save/Open, recent projects, auto-save or templates
 - 2026-10-23: Fixed the `.zoft` loader (it previously over-read fixed-size header/section-table blocks and failed); added a round-trip test and wired File → New/Open/Save/Save As plus Ctrl+S / Ctrl+Shift+S / Ctrl+O
 - 2026-10-23: Added a Recent Projects list and a 2-minute autosave; opening a project offers a newer sibling autosave for recovery
+- 2026-10-23: The project display name now follows the file name (without `.zoft`) on Save/Save As/Open
