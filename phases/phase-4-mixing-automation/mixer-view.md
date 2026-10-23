@@ -14,7 +14,9 @@ Full mixer console: channel strips, meter bridge, insert/send racks, routing mat
 
 - [ ] Channel strips: Fader, pan, meter, inserts, sends, I/O, name, color
 - [ ] Meter bridge: Peak, RMS, LUFS, true peak, correlation, K-system
-- [ ] Insert rack: 8 slots, drag-reorder, bypass, solo, preset
+- [~] Insert rack: 8 slots, drag-reorder, bypass, solo, preset
+  - [x] Basic per-track insert chain (saturation, filter, bit crusher, tremolo) on every track type
+  - [ ] Mixer insert rack UI, drag-reorder, solo, presets
 - [ ] Send rack: 8 sends, pre/post fader, pan, level, destination
 - [ ] Routing matrix: Visual patchbay for I/O, buses, sidechains
 - [ ] Solo/Mute groups: Exclusive solo, solo safe, mute groups

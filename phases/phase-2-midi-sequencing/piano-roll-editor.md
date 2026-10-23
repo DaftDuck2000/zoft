@@ -159,6 +159,7 @@ enum CCEditMode {
 ## Progress Log
 
 - 2026-10-24: Basic read-only piano roll. Double-click a MIDI clip (or use Arrange → Piano Roll…) to open a window with pitch stripes, a C-labelled keyboard, beat/bar grid lines and note rectangles sized by tick position/duration and coloured by velocity. Editing, zoom/scroll, velocity/CC lanes and the tool palette are still to come
+- 2026-10-24: MIDI clips now show a miniature piano-roll preview directly in the arrange lane, with pitch-normalized note lanes and velocity-based opacity, so takes can be read without opening the full piano-roll window
 - YYYY-MM-DD: Pencil/Eraser/Select tools
 - YYYY-MM-DD: Note drag + resize
 - YYYY-MM-DD: Velocity lane

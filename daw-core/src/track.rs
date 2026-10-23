@@ -157,6 +157,63 @@ pub enum TrackType {
     Folder,
 }
 
+/// Filter response for the built-in track filter effect.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum FilterMode {
+    LowPass,
+    HighPass,
+}
+
+/// Built-in real-time insert effects. These live on a track, so they work for
+/// audio and MIDI/instrument tracks alike and can be targeted by automation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum TrackEffect {
+    BitCrusher { bits: u32, downsample: u32 },
+    Saturation { drive_db: f32, mix: f32 },
+    Filter { mode: FilterMode, cutoff: f32 },
+    Tremolo { rate: f32, depth: f32 },
+}
+
+impl TrackEffect {
+    /// A sensible starting point when adding a new effect slot.
+    pub fn default_saturation() -> Self {
+        Self::Saturation {
+            drive_db: 12.0,
+            mix: 1.0,
+        }
+    }
+
+    pub fn default_bit_crusher() -> Self {
+        Self::BitCrusher {
+            bits: 8,
+            downsample: 4,
+        }
+    }
+
+    pub fn default_filter() -> Self {
+        Self::Filter {
+            mode: FilterMode::LowPass,
+            cutoff: 8_000.0,
+        }
+    }
+
+    pub fn default_tremolo() -> Self {
+        Self::Tremolo {
+            rate: 5.0,
+            depth: 0.5,
+        }
+    }
+
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Self::BitCrusher { .. } => "Bit Crusher",
+            Self::Saturation { .. } => "Saturation",
+            Self::Filter { .. } => "Filter",
+            Self::Tremolo { .. } => "Tremolo",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum MonitorMode {
     Off,
@@ -201,9 +258,12 @@ impl Send {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InsertSlot {
     pub plugin_id: Option<PluginId>,
+    /// Built-in effect processed on the track. `None` leaves the slot empty.
+    #[serde(default)]
+    pub effect: Option<TrackEffect>,
     pub enabled: bool,
     pub input_gain: f32,
     pub output_gain: f32,
@@ -214,10 +274,18 @@ impl InsertSlot {
     pub fn new() -> Self {
         Self {
             plugin_id: None,
+            effect: None,
             enabled: true,
             input_gain: 1.0,
             output_gain: 1.0,
             mix: 1.0,
+        }
+    }
+
+    pub fn with_effect(effect: TrackEffect) -> Self {
+        Self {
+            effect: Some(effect),
+            ..Self::new()
         }
     }
 }
@@ -280,5 +348,47 @@ impl PanLaw {
 impl Default for PanLaw {
     fn default() -> Self {
         Self::center()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn insert_slots_can_hold_builtin_effects() {
+        let slot = InsertSlot::with_effect(TrackEffect::default_saturation());
+        assert!(slot.enabled);
+        assert!(slot.plugin_id.is_none());
+        assert_eq!(slot.mix, 1.0);
+        assert_eq!(
+            slot.effect,
+            Some(TrackEffect::Saturation {
+                drive_db: 12.0,
+                mix: 1.0
+            })
+        );
+    }
+
+    #[test]
+    fn every_builtin_effect_has_a_default_and_label() {
+        let effects = [
+            TrackEffect::default_saturation(),
+            TrackEffect::default_filter(),
+            TrackEffect::default_bit_crusher(),
+            TrackEffect::default_tremolo(),
+        ];
+        for effect in effects {
+            assert!(!effect.kind_name().is_empty());
+        }
+    }
+
+    #[test]
+    fn effect_slots_compare_by_value_for_undo() {
+        let a = InsertSlot::with_effect(TrackEffect::default_tremolo());
+        let mut b = a.clone();
+        assert_eq!(a, b);
+        b.enabled = false;
+        assert_ne!(a, b);
     }
 }

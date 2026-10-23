@@ -21,7 +21,10 @@
 
 Phase 1's playback mixer already provides clip gain, track mute/solo/volume,
 fades and automatic crossfades, and Phase 1.4 has LUFS measurement groundwork.
-There is no mixer view, bus routing, automation or bounce/export UI yet.
+Basic real-time per-track inserts (saturation, filter, bit crusher, tremolo)
+now run before the fader on every track type and are ready to become
+automation targets. There is no mixer view, bus routing, automation or
+bounce/export UI yet.
 
 ## Milestone: M4 — Full Mix & Automate (Week 92)
 

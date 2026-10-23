@@ -3,13 +3,13 @@
 use anyhow::Result;
 use daw_core::audio_pool::AudioFileRef;
 use daw_core::clip::{AudioClip, ClipId, Fade, FadeCurve, MidiClip, MidiEvent, MidiMessage, TimeStretchMode, TimelinePos};
-use daw_core::project::{BitDepth, Color};
+use daw_core::project::{BitDepth, Color, TempoMap};
 use daw_core::serialization::ProjectSerialization;
-use daw_core::track::{MonitorMode, Track, TrackId, TrackType};
+use daw_core::track::{FilterMode, InsertSlot, MonitorMode, Track, TrackId, TrackEffect, TrackType};
 use daw_core::undo::History;
 use daw_core::Project;
 use daw_core::WaveformOverview;
-use daw_engine::playback::{MetronomeConfig, PlayableClip, PlayableNote, PlaybackMixer};
+use daw_engine::playback::{MetronomeConfig, PlayableClip, PlayableEffect, PlayableNote, PlayableTrack, PlaybackMixer};
 use daw_engine::AudioEngine;
 use eframe::egui;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
@@ -257,7 +257,7 @@ fn playable_note(
     end_tick: u64,
     note: u8,
     velocity: u8,
-    track_gain: f32,
+    track: u32,
     to_frame: &impl Fn(u64) -> u64,
 ) -> PlayableNote {
     let start_frame = to_frame(start_tick);
@@ -266,7 +266,8 @@ fn playable_note(
         start_frame,
         end_frame,
         note,
-        velocity: (velocity as f32 / 127.0 * track_gain).clamp(0.0, 1.0),
+        velocity: (velocity as f32 / 127.0).clamp(0.0, 1.0),
+        track,
     }
 }
 
@@ -613,6 +614,12 @@ enum EditAction {
         from: TrackShape,
         to: TrackShape,
     },
+    /// Replace a track's real-time insert chain.
+    TrackInserts {
+        track_id: TrackId,
+        from: Vec<InsertSlot>,
+        to: Vec<InsertSlot>,
+    },
     /// Add a new track (undo removes it again).
     AddTrack { track: Track },
     /// Remove a track, remembering its original order for undo.
@@ -692,6 +699,15 @@ impl EditAction {
             }
             EditAction::AddTrack { track } => format!("Add track: {}", track.name),
             EditAction::RemoveTrack { track, .. } => format!("Remove track: {}", track.name),
+            EditAction::TrackInserts { from, to, .. } => {
+                if to.len() > from.len() {
+                    "Add track effect".to_string()
+                } else if to.len() < from.len() {
+                    "Remove track effect".to_string()
+                } else {
+                    "Track effects".to_string()
+                }
+            }
             EditAction::AttachMidi { .. } => "Add MIDI clip".to_string(),
             EditAction::DetachMidi { .. } => "Delete MIDI clip".to_string(),
             EditAction::Group { label, .. } => label.clone(),
@@ -799,6 +815,57 @@ impl FilterKind {
             Self::HighPass => "High-pass",
         }
     }
+}
+
+/// Kinds of built-in real-time insert available on every track type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InsertEffectKind {
+    Saturation,
+    Filter,
+    BitCrusher,
+    Tremolo,
+}
+
+impl InsertEffectKind {
+    const ALL: [Self; 4] = [
+        Self::Saturation,
+        Self::Filter,
+        Self::BitCrusher,
+        Self::Tremolo,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Saturation => "Saturation",
+            Self::Filter => "Filter",
+            Self::BitCrusher => "Bit Crusher",
+            Self::Tremolo => "Tremolo",
+        }
+    }
+
+    fn default_effect(self) -> TrackEffect {
+        match self {
+            Self::Saturation => TrackEffect::default_saturation(),
+            Self::Filter => TrackEffect::default_filter(),
+            Self::BitCrusher => TrackEffect::default_bit_crusher(),
+            Self::Tremolo => TrackEffect::default_tremolo(),
+        }
+    }
+
+    fn from_effect(effect: &TrackEffect) -> Self {
+        match effect {
+            TrackEffect::Saturation { .. } => Self::Saturation,
+            TrackEffect::Filter { .. } => Self::Filter,
+            TrackEffect::BitCrusher { .. } => Self::BitCrusher,
+            TrackEffect::Tremolo { .. } => Self::Tremolo,
+        }
+    }
+}
+
+/// State of the floating track-effects window.
+#[derive(Debug, Clone, Copy)]
+struct TrackEffectsWindow {
+    track_id: TrackId,
 }
 
 /// State of the floating per-clip audio window: gain/fades/colour plus the
@@ -1047,6 +1114,9 @@ struct AppUI {
     selected_midi_input: Option<String>,
     midi_monitor: Option<daw_engine::MidiMonitor>,
     midi_activity: daw_engine::MidiActivity,
+    /// Whether live MIDI notes are currently being auditioned through the
+    /// output stream's sine synth.
+    midi_audition_on: bool,
     error_message: Option<String>,
     /// Yellow banner shown when free disk space is low during recording.
     disk_warning: Option<String>,
@@ -1077,8 +1147,13 @@ struct AppUI {
     marquee: Option<(egui::Pos2, egui::Pos2)>,
     marquee_additive: bool,
     clipboard: Vec<AudioClip>,
-    /// Floating audio-effects editor for the right-clicked clip.
+    /// Floating clip-audio editor, opened from the Arrange **Audio…** button.
     audio_window: Option<ClipAudioWindow>,
+    /// Floating real-time insert editor for one track.
+    track_effects: Option<TrackEffectsWindow>,
+    /// Original insert chain for the current effect-parameter gesture, pushed
+    /// as one undo entry when the pointer is released.
+    pending_insert_edit: Option<(TrackId, Vec<InsertSlot>)>,
     /// Floating piano-roll view for the selected MIDI clip.
     piano_roll: Option<PianoRollWindow>,
     /// Where a trashed clip was last attached, so Restore can put it back.
@@ -1173,6 +1248,7 @@ impl AppUI {
             selected_midi_input: None,
             midi_monitor: None,
             midi_activity: daw_engine::MidiActivity::default(),
+            midi_audition_on: false,
             error_message: None,
             disk_warning: None,
             last_disk_check: std::time::Instant::now(),
@@ -1192,6 +1268,8 @@ impl AppUI {
             marquee_additive: false,
             clipboard: Vec::new(),
             audio_window: None,
+            track_effects: None,
+            pending_insert_edit: None,
             piano_roll: None,
             deleted_from: HashMap::new(),
             history: History::new(1000),
@@ -1596,6 +1674,20 @@ impl AppUI {
         }
     }
 
+    /// Whether live MIDI input should be auditioned through the built-in sine
+    /// synth. MIDI and instrument tracks follow the same Off/Auto/On monitor
+    /// switch as audio tracks, so an armed track is heard while recording.
+    fn midi_audition_enabled(&self) -> bool {
+        self.project.tracks.values().any(|track| {
+            matches!(track.track_type, TrackType::Midi | TrackType::Instrument)
+                && match track.monitor_mode {
+                    MonitorMode::Off => false,
+                    MonitorMode::Auto => track.record_arm || self.recording_midi,
+                    MonitorMode::On => true,
+                }
+        })
+    }
+
     fn clear_selection(&mut self) {
         self.selected_clip = None;
         self.selected_clips.clear();
@@ -1694,6 +1786,55 @@ impl AppUI {
             self.push_undo(EditAction::Group { actions, label }, false);
         }
         self.after_edit();
+    }
+
+    /// Commit a track-insert parameter gesture as one undo entry.
+    fn commit_pending_insert_edit(&mut self) {
+        let Some((track_id, from)) = self.pending_insert_edit.take() else {
+            return;
+        };
+        let Some(track) = self.project.tracks.get(&track_id) else {
+            return;
+        };
+        let to = track.inserts.clone();
+        if to != from {
+            self.push_undo(EditAction::TrackInserts { track_id, from, to }, false);
+        }
+    }
+
+    /// Apply an edited insert chain and keep the live mixer in step. While a
+    /// slider is dragged the original chain is remembered so the whole gesture
+    /// becomes a single undo step.
+    fn apply_track_inserts(&mut self, track_id: TrackId, inserts: Vec<InsertSlot>) {
+        if self
+            .pending_insert_edit
+            .as_ref()
+            .map_or(false, |(pending, _)| *pending != track_id)
+        {
+            self.commit_pending_insert_edit();
+        }
+        let before = self
+            .pending_insert_edit
+            .as_ref()
+            .filter(|(pending, _)| *pending == track_id)
+            .map(|(_, before)| before.clone())
+            .or_else(|| {
+                self.project
+                    .tracks
+                    .get(&track_id)
+                    .map(|track| track.inserts.clone())
+            })
+            .unwrap_or_default();
+        let Some(track) = self.project.tracks.get_mut(&track_id) else {
+            return;
+        };
+        track.inserts = inserts;
+        if self.pending_insert_edit.is_none() {
+            self.pending_insert_edit = Some((track_id, before));
+        }
+        self.after_edit();
+        let tracks = self.collect_playable_tracks();
+        self.engine.set_playback_tracks(tracks);
     }
 
     /// Mute unmuted clips on `track_id` whose span contains `position`, so an
@@ -1904,6 +2045,15 @@ impl AppUI {
                     (if forward { *to } else { *from }).apply(track);
                 }
             }
+            EditAction::TrackInserts { track_id, from, to } => {
+                if let Some(track) = self.project.tracks.get_mut(track_id) {
+                    track.inserts = if forward {
+                        to.clone()
+                    } else {
+                        from.clone()
+                    };
+                }
+            }
             EditAction::AddTrack { track } => {
                 if forward {
                     self.project.add_track(track.clone());
@@ -1955,6 +2105,7 @@ impl AppUI {
     }
 
     fn undo(&mut self) {
+        self.commit_pending_insert_edit();
         if self.undo_step() {
             self.after_edit();
             self.refresh_playback_if_playing();
@@ -1963,6 +2114,7 @@ impl AppUI {
     }
 
     fn redo(&mut self) {
+        self.commit_pending_insert_edit();
         if self.redo_step() {
             self.after_edit();
             self.refresh_playback_if_playing();
@@ -3554,8 +3706,8 @@ impl AppUI {
     }
 
     /// Floating clip-audio window: gain, fades and colour plus the offline
-    /// effects. Opened by right-clicking a clip or the arrange **Audio…**
-    /// button.
+    /// tools that render into the clip's audio. Opened from the Arrange
+    /// **Audio…** button; real-time effects live on tracks instead.
     fn show_audio_window(&mut self, ctx: &egui::Context) {
         let Some(mut window) = self.audio_window.clone() else {
             return;
@@ -4118,6 +4270,275 @@ impl AppUI {
         self.audio_window = Some(window);
     }
 
+    /// Floating real-time insert editor for one track. Inserts are stored on the
+    /// track, so the same chain works for audio, MIDI and instrument tracks and
+    /// can later be targeted by automation.
+    fn show_track_effects(&mut self, ctx: &egui::Context) {
+        let Some(window) = self.track_effects else {
+            return;
+        };
+        let Some(track) = self.project.tracks.get(&window.track_id) else {
+            self.track_effects = None;
+            return;
+        };
+        let track_name = track.name.clone();
+        let track_type = track.track_type;
+        let mut inserts = track.inserts.clone();
+        let mut open = true;
+        let mut changed = false;
+
+        egui::Window::new(format!("Track Effects — {}", track_name))
+            .id(egui::Id::new(("track_effects", window.track_id)))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(430.0)
+            .min_width(360.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Track:");
+                    ui.label(egui::RichText::new(&track_name).strong());
+                    ui.weak(format!("({})", track_type_label(track_type)));
+                });
+                ui.weak(
+                    "Real-time inserts run before the track fader. They are available on \
+                     every track type, and every parameter can be automated later.",
+                );
+                ui.separator();
+
+                if inserts.is_empty() {
+                    ui.weak("No effects yet. Add one below.");
+                }
+
+                let mut remove = None;
+                let mut move_up = None;
+                let mut move_down = None;
+                let slot_count = inserts.len();
+                for (index, slot) in inserts.iter_mut().enumerate() {
+                    ui.push_id(index, |ui| {
+                        egui::Frame::group(ui.style()).show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new(format!("{}", index + 1)).strong());
+                                let current = slot
+                                    .effect
+                                    .as_ref()
+                                    .map(InsertEffectKind::from_effect);
+                                let mut selected = current;
+                                egui::ComboBox::from_id_salt("kind")
+                                    .selected_text(
+                                        current.map_or("Empty", InsertEffectKind::label),
+                                    )
+                                    .width(130.0)
+                                    .show_ui(ui, |ui| {
+                                        for kind in InsertEffectKind::ALL {
+                                            ui.selectable_value(
+                                                &mut selected,
+                                                Some(kind),
+                                                kind.label(),
+                                            );
+                                        }
+                                    });
+                                if selected != current {
+                                    slot.effect =
+                                        selected.map(InsertEffectKind::default_effect);
+                                    changed = true;
+                                }
+                                changed |= ui.checkbox(&mut slot.enabled, "On").changed();
+                                if ui
+                                    .small_button("↑")
+                                    .on_hover_text("Move effect up")
+                                    .clicked()
+                                    && index > 0
+                                {
+                                    move_up = Some(index);
+                                }
+                                if ui
+                                    .small_button("↓")
+                                    .on_hover_text("Move effect down")
+                                    .clicked()
+                                    && index + 1 < slot_count
+                                {
+                                    move_down = Some(index);
+                                }
+                                if ui.small_button("Remove").clicked() {
+                                    remove = Some(index);
+                                }
+                            });
+
+                            match &mut slot.effect {
+                                Some(TrackEffect::Saturation { drive_db, mix }) => {
+                                    changed |= ui
+                                        .add(
+                                            egui::Slider::new(drive_db, 0.0..=36.0)
+                                                .text("Drive")
+                                                .suffix(" dB"),
+                                        )
+                                        .changed();
+                                    changed |= ui
+                                        .add(
+                                            egui::Slider::new(mix, 0.0..=1.0)
+                                                .text("Effect mix"),
+                                        )
+                                        .changed();
+                                }
+                                Some(TrackEffect::Filter { mode, cutoff }) => {
+                                    ui.horizontal(|ui| {
+                                        ui.label("Type:");
+                                        egui::ComboBox::from_id_salt("filter_mode")
+                                            .selected_text(filter_mode_label(*mode))
+                                            .width(110.0)
+                                            .show_ui(ui, |ui| {
+                                                changed |= ui
+                                                    .selectable_value(
+                                                        mode,
+                                                        FilterMode::LowPass,
+                                                        filter_mode_label(FilterMode::LowPass),
+                                                    )
+                                                    .changed();
+                                                changed |= ui
+                                                    .selectable_value(
+                                                        mode,
+                                                        FilterMode::HighPass,
+                                                        filter_mode_label(FilterMode::HighPass),
+                                                    )
+                                                    .changed();
+                                            });
+                                    });
+                                    changed |= ui
+                                        .add(
+                                            egui::Slider::new(cutoff, 20.0..=20_000.0)
+                                                .logarithmic(true)
+                                                .text("Cutoff")
+                                                .suffix(" Hz"),
+                                        )
+                                        .changed();
+                                }
+                                Some(TrackEffect::BitCrusher {
+                                    bits,
+                                    downsample,
+                                }) => {
+                                    let mut bit_value = *bits as f32;
+                                    if ui
+                                        .add(
+                                            egui::Slider::new(&mut bit_value, 1.0..=24.0)
+                                                .step_by(1.0)
+                                                .text("Bits"),
+                                        )
+                                        .changed()
+                                    {
+                                        *bits = bit_value.round() as u32;
+                                        changed = true;
+                                    }
+                                    let mut hold_value = *downsample as f32;
+                                    if ui
+                                        .add(
+                                            egui::Slider::new(&mut hold_value, 1.0..=64.0)
+                                                .step_by(1.0)
+                                                .text("Sample hold")
+                                                .suffix("×"),
+                                        )
+                                        .changed()
+                                    {
+                                        *downsample = hold_value.round() as u32;
+                                        changed = true;
+                                    }
+                                }
+                                Some(TrackEffect::Tremolo { rate, depth }) => {
+                                    changed |= ui
+                                        .add(
+                                            egui::Slider::new(rate, 0.1..=20.0)
+                                                .logarithmic(true)
+                                                .text("Rate")
+                                                .suffix(" Hz"),
+                                        )
+                                        .changed();
+                                    changed |= ui
+                                        .add(
+                                            egui::Slider::new(depth, 0.0..=1.0)
+                                                .text("Depth"),
+                                        )
+                                        .changed();
+                                }
+                                None => {
+                                    ui.weak("Choose an effect kind above.");
+                                }
+                            }
+
+                            ui.add_space(4.0);
+                            egui::Grid::new("slot_gains")
+                                .num_columns(2)
+                                .spacing([8.0, 4.0])
+                                .show(ui, |ui| {
+                                    ui.label("Input gain");
+                                    changed |= ui
+                                        .add(
+                                            egui::Slider::new(
+                                                &mut slot.input_gain,
+                                                0.0..=2.0,
+                                            )
+                                            .suffix("×"),
+                                        )
+                                        .changed();
+                                    ui.end_row();
+                                    ui.label("Slot mix");
+                                    changed |= ui
+                                        .add(egui::Slider::new(&mut slot.mix, 0.0..=1.0))
+                                        .changed();
+                                    ui.end_row();
+                                    ui.label("Output gain");
+                                    changed |= ui
+                                        .add(
+                                            egui::Slider::new(
+                                                &mut slot.output_gain,
+                                                0.0..=2.0,
+                                            )
+                                            .suffix("×"),
+                                        )
+                                        .changed();
+                                    ui.end_row();
+                                });
+                        });
+                    });
+                    ui.add_space(4.0);
+                }
+
+                if let Some(index) = move_up {
+                    inserts.swap(index, index - 1);
+                    changed = true;
+                }
+                if let Some(index) = move_down {
+                    inserts.swap(index, index + 1);
+                    changed = true;
+                }
+                if let Some(index) = remove {
+                    inserts.remove(index);
+                    changed = true;
+                }
+
+                ui.separator();
+                ui.menu_button("+ Add Effect", |ui| {
+                    for kind in InsertEffectKind::ALL {
+                        if ui.button(kind.label()).clicked() {
+                            inserts.push(InsertSlot::with_effect(kind.default_effect()));
+                            changed = true;
+                            ui.close_menu();
+                        }
+                    }
+                });
+                if !inserts.is_empty() && ui.button("Clear All").clicked() {
+                    inserts.clear();
+                    changed = true;
+                }
+            });
+
+        if !open {
+            self.track_effects = None;
+        }
+        if changed {
+            self.apply_track_inserts(window.track_id, inserts);
+        }
+    }
+
     /// Basic piano-roll view: pitch stripes, beat/bar grid and every captured
     /// note as a rectangle. Editing comes later; this is for inspecting takes.
     fn show_piano_roll(&mut self, ctx: &egui::Context) {
@@ -4541,6 +4962,23 @@ fn stretch_mode_label(mode: TimeStretchMode) -> &'static str {
     }
 }
 
+fn filter_mode_label(mode: FilterMode) -> &'static str {
+    match mode {
+        FilterMode::LowPass => "Low-pass",
+        FilterMode::HighPass => "High-pass",
+    }
+}
+
+fn track_type_label(track_type: TrackType) -> &'static str {
+    match track_type {
+        TrackType::Audio => "Audio",
+        TrackType::Midi => "MIDI",
+        TrackType::Instrument => "Instrument",
+        TrackType::Bus => "Bus",
+        TrackType::Folder => "Folder",
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct LoudnessMeasurement {
     integrated_lufs: f32,
@@ -4826,6 +5264,7 @@ impl eframe::App for AppUI {
         if !ctx.input(|i| i.pointer.any_down()) {
             self.merge_chain = false;
             self.commit_pending_shape_edit();
+            self.commit_pending_insert_edit();
             if self.needs_audio_refresh {
                 self.needs_audio_refresh = false;
                 self.refresh_playback_if_playing();
@@ -4892,11 +5331,37 @@ impl eframe::App for AppUI {
             self.disk_warning = self.low_disk_warning();
         }
 
-        if self.recording_midi {
-            if let Some(monitor) = &self.midi_monitor {
-                let events = monitor.drain_events();
-                if !events.is_empty() {
-                    self.midi_captured.extend(events);
+        // MIDI audition and capture. Events are drained every frame so the
+        // live sine synth can respond even when the transport is stopped.
+        let audition = self.midi_audition_enabled();
+        if audition != self.midi_audition_on {
+            self.midi_audition_on = audition;
+            if !audition {
+                self.engine.all_notes_off();
+            }
+        }
+        if audition && !self.engine.is_running() {
+            let _ = self.engine.start();
+        } else if !audition
+            && !self.playing
+            && !self.recording
+            && !self.monitoring_on
+            && self.engine.is_running()
+        {
+            let _ = self.engine.stop();
+        }
+        if let Some(monitor) = &self.midi_monitor {
+            let events = monitor.drain_events();
+            if self.recording_midi {
+                self.midi_captured.extend(events.iter().copied());
+            }
+            for event in &events {
+                if event.on {
+                    if audition {
+                        self.engine.note_on(event.note, event.velocity.max(1));
+                    }
+                } else {
+                    self.engine.note_off(event.note);
                 }
             }
         }
@@ -5269,10 +5734,14 @@ impl eframe::App for AppUI {
         });
 
         // Left track list
-        egui::SidePanel::left("track_list").show(ctx, |ui| {
+        egui::SidePanel::left("track_list")
+            .default_width(420.0)
+            .min_width(320.0)
+            .show(ctx, |ui| {
             let mut add_audio_track = false;
             let mut add_midi_track = false;
             let mut remove_track = None;
+            let mut open_track_effects = None;
             ui.spacing_mut().item_spacing.y = 0.0;
             ui.allocate_ui_with_layout(
                 egui::vec2(ui.available_width(), RULER_HEIGHT),
@@ -5390,6 +5859,27 @@ impl eframe::App for AppUI {
                         )
                         .on_hover_text(format!("Track volume {:.0}%", after.volume * 100.0));
                         ui.label(format!("{:.0}%", after.volume * 100.0));
+                        let has_effects = track
+                            .inserts
+                            .iter()
+                            .any(|slot| slot.effect.is_some());
+                        let fx_color = if has_effects {
+                            egui::Color32::GREEN
+                        } else {
+                            egui::Color32::GRAY
+                        };
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new("FX").color(fx_color),
+                                )
+                                .min_size([26.0, 20.0].into()),
+                            )
+                            .on_hover_text("Track effects (available on every track type)")
+                            .clicked()
+                        {
+                            open_track_effects = Some(*track_id);
+                        }
                         if ui
                             .small_button("×")
                             .on_hover_text("Remove track")
@@ -5399,6 +5889,17 @@ impl eframe::App for AppUI {
                         }
                         },
                     );
+                    row.response.context_menu(|ui| {
+                        if ui.button("Track Effects…").clicked() {
+                            open_track_effects = Some(*track_id);
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if ui.button("Remove Track").clicked() {
+                            remove_track = Some(*track_id);
+                            ui.close_menu();
+                        }
+                    });
                     ui.painter().hline(
                         row.response.rect.x_range(),
                         row.response.rect.bottom(),
@@ -5435,6 +5936,9 @@ impl eframe::App for AppUI {
             }
             if let Some(track_id) = remove_track {
                 self.remove_track(track_id);
+            }
+            if let Some(track_id) = open_track_effects {
+                self.track_effects = Some(TrackEffectsWindow { track_id });
             }
             self.sync_monitoring();
 
@@ -6013,7 +6517,7 @@ impl eframe::App for AppUI {
                             *color,
                             view,
                             project_sr,
-                            self.project.tempo_map.default_bpm(),
+                            &self.project.tempo_map,
                             self.selected_midi_clip == Some(*clip_id),
                         );
                         if clip_rect != egui::Rect::NOTHING {
@@ -6201,21 +6705,6 @@ impl eframe::App for AppUI {
                 );
             }
 
-            // ---- Right-click opens the floating audio-effects editor ----
-            if edit_response.secondary_clicked() {
-                if let Some(pos) = pointer_pos {
-                    if let Some((clip_id, _)) = Self::clip_hit(&clip_rects, pos) {
-                        if !self.selected_clips.contains(&clip_id) {
-                            self.set_single_selection(clip_id);
-                        } else {
-                            self.selected_clip = Some(clip_id);
-                        }
-                        let ids = self.selection_ids();
-                        self.audio_window = Some(ClipAudioWindow::new(ids));
-                    }
-                }
-            }
-
             // Hover feedback: resize cursor over trim/fade zones, grab over bodies.
             if self.drag.is_none() && !self.dragging_playhead && hovered {
                 if let Some(pos) = pointer_pos {
@@ -6314,6 +6803,7 @@ impl eframe::App for AppUI {
         });
 
         self.show_audio_window(ctx);
+        self.show_track_effects(ctx);
         self.show_piano_roll(ctx);
         self.show_history_window(ctx);
 
@@ -6610,6 +7100,7 @@ impl AppUI {
         // Open the output immediately with silence; the worker supplies the
         // clips as soon as they have been read from disk.
         self.engine.set_playback_notes(Vec::new());
+        self.engine.set_playback_tracks(Vec::new());
         self.engine.set_playback_clips(Vec::new(), start_frame);
         if let Err(e) = self.engine.start() {
             self.engine.clear_playback();
@@ -6635,9 +7126,9 @@ impl AppUI {
             let Some(track) = self.project.tracks.get(track_id) else {
                 continue;
             };
-            let Some(track_gain) = audible_track_gain(track, any_solo) else {
+            if audible_track_gain(track, any_solo).is_none() {
                 continue;
-            };
+            }
             for clip_id in &track.clips {
                 let Some(clip) = self.project.audio_clips.get(*clip_id) else {
                     continue;
@@ -6655,7 +7146,7 @@ impl AppUI {
                     length: clip.length,
                     start_frame,
                     track: track_index as u32,
-                    gain: clip.gain * track_gain,
+                    gain: clip.gain,
                     fade_in: clip.fade_in,
                     fade_out: clip.fade_out,
                 });
@@ -6663,6 +7154,28 @@ impl AppUI {
         }
 
         specs
+    }
+
+    /// Describe every track's fader gain and insert-effect chain. Indices match
+    /// the `track` field on playback clips and MIDI notes.
+    fn collect_playable_tracks(&self) -> Vec<PlayableTrack> {
+        let any_solo = self.project.tracks.values().any(|track| track.solo);
+        self.project
+            .track_order
+            .iter()
+            .enumerate()
+            .filter_map(|(index, track_id)| {
+                self.project.tracks.get(track_id).map(|track| PlayableTrack {
+                    index: index as u32,
+                    gain: audible_track_gain(track, any_solo).unwrap_or(0.0),
+                    effects: track
+                        .inserts
+                        .iter()
+                        .filter_map(PlayableEffect::from_slot)
+                        .collect(),
+                })
+            })
+            .collect()
     }
 
     /// Ask the worker to rebuild the playback clips from disk. Until the
@@ -6694,13 +7207,13 @@ impl AppUI {
             (sample as f64 * out_rate / project_sr).round() as u64
         };
 
-        for track_id in &self.project.track_order {
+        for (track_index, track_id) in self.project.track_order.iter().enumerate() {
             let Some(track) = self.project.tracks.get(track_id) else {
                 continue;
             };
-            let Some(track_gain) = audible_track_gain(track, any_solo) else {
+            if audible_track_gain(track, any_solo).is_none() {
                 continue;
-            };
+            }
             for clip_id in &track.midi_clips {
                 let Some(clip) = self.project.midi_clips.get(*clip_id) else {
                     continue;
@@ -6715,7 +7228,7 @@ impl AppUI {
                         clip_start.saturating_add(end),
                         note,
                         velocity,
-                        track_gain,
+                        track_index as u32,
                         &to_frame,
                     ));
                 }
@@ -6737,6 +7250,8 @@ impl AppUI {
             let start_frame = (self.playhead_secs.max(0.0) * out_rate as f64) as u64;
             self.sync_playback_loop();
             self.sync_playback_metronome();
+            let tracks = self.collect_playable_tracks();
+            self.engine.set_playback_tracks(tracks);
             let notes = self.collect_playable_notes(out_rate);
             self.engine.set_playback_notes(notes);
             self.engine.set_playback_clips(clips, start_frame);
@@ -7067,6 +7582,8 @@ impl AppUI {
         self.clear_selection();
         self.deleted_from.clear();
         self.audio_window = None;
+        self.track_effects = None;
+        self.pending_insert_edit = None;
         self.clipboard = Vec::new();
         self.drag = None;
         self.recovery_offer = None;
@@ -7356,7 +7873,8 @@ impl AppUI {
     }
 }
 
-/// Draw a MIDI clip block in the arrange lane. Returns its screen rectangle.
+/// Draw a MIDI clip block in the arrange lane, including a miniature piano-roll
+/// preview of its notes. Returns its screen rectangle.
 fn draw_midi_clip(
     painter: &egui::Painter,
     clip: &MidiClip,
@@ -7364,14 +7882,18 @@ fn draw_midi_clip(
     color: egui::Color32,
     view: TimelineView,
     project_sr: f64,
-    bpm: f32,
+    tempo_map: &TempoMap,
     selected: bool,
 ) -> egui::Rect {
-    let ticks_per_sec = (bpm.max(1.0) as f64 / 60.0) * 960.0;
-    let start = clip.timeline_position.sample as f64 / project_sr;
-    let end = start + clip.length as f64 / ticks_per_sec;
+    let start_sample = tempo_map.tick_to_sample(clip.timeline_position.tick, project_sr);
+    let end_sample = tempo_map.tick_to_sample(
+        clip.timeline_position.tick.saturating_add(clip.length),
+        project_sr,
+    );
+    let start = start_sample as f64 / project_sr.max(1.0);
+    let end = end_sample as f64 / project_sr.max(1.0);
     let x0 = view.x(lane, start);
-    let x1 = view.x(lane, end);
+    let x1 = view.x(lane, end).max(x0 + 1.0);
     if x1 < lane.left() || x0 > lane.right() {
         return egui::Rect::NOTHING;
     }
@@ -7403,16 +7925,8 @@ fn draw_midi_clip(
     };
     painter.rect_stroke(rect, 3.0, stroke);
 
-    let note_count = clip
-        .events
-        .iter()
-        .filter(|event| {
-            matches!(
-                event.message,
-                MidiMessage::NoteOn { velocity, .. } if velocity > 0
-            )
-        })
-        .count();
+    let spans = midi_clip_note_spans(clip);
+    let note_count = spans.len();
     painter.text(
         egui::pos2(rect.left() + 4.0, rect.top() + 2.0),
         egui::Align2::LEFT_TOP,
@@ -7422,13 +7936,68 @@ fn draw_midi_clip(
     );
     if clip.muted {
         painter.text(
-            egui::pos2(rect.left() + 4.0, rect.top() + 2.0),
-            egui::Align2::LEFT_TOP,
+            egui::pos2(rect.right() - 4.0, rect.top() + 2.0),
+            egui::Align2::RIGHT_TOP,
             "M",
             egui::FontId::proportional(10.0),
             egui::Color32::from_gray(230),
         );
     }
+
+    // Miniature note lanes. The preview uses the clip's actual pitch range so
+    // melodies remain readable at track height.
+    let notes_rect = egui::Rect::from_min_max(
+        egui::pos2(rect.left() + 2.0, rect.top() + 13.0),
+        egui::pos2(rect.right() - 2.0, rect.bottom() - 2.0),
+    );
+    if clip.length > 0 && notes_rect.height() > 2.0 && !spans.is_empty() {
+        let pitch_min = spans.iter().map(|(_, _, note, _)| *note).min().unwrap_or(60);
+        let pitch_max = spans.iter().map(|(_, _, note, _)| *note).max().unwrap_or(60);
+        let mut low = pitch_min.saturating_sub(2);
+        let mut high = pitch_max.saturating_add(2);
+        if high.saturating_sub(low) < 12 {
+            high = low.saturating_add(12).min(127);
+            if high.saturating_sub(low) < 12 {
+                low = high.saturating_sub(12);
+            }
+        }
+        let pitch_span = high.saturating_sub(low).max(1) as f32;
+        let note_height = (notes_rect.height() / pitch_span).clamp(1.5, 4.0);
+        let note_base = egui::Color32::from_rgb(
+            color.r().saturating_add(90),
+            color.g().saturating_add(90),
+            color.b().saturating_add(90),
+        );
+
+        for (start_tick, end_tick, note, velocity) in &spans {
+            let nx0 = x0 + (*start_tick as f32 / clip.length as f32) * (x1 - x0);
+            let nx1 = x0 + (*end_tick as f32 / clip.length as f32) * (x1 - x0);
+            if nx1 < rect.left() || nx0 > rect.right() {
+                continue;
+            }
+            let left = nx0.max(notes_rect.left());
+            let right = nx1.max(left + 1.0).min(notes_rect.right());
+            let y = notes_rect.bottom()
+                - ((note.saturating_sub(low)) as f32 + 0.5) / pitch_span
+                    * notes_rect.height();
+            let note_rect = egui::Rect::from_min_max(
+                egui::pos2(left, y - note_height * 0.5),
+                egui::pos2(right, y + note_height * 0.5),
+            );
+            let alpha = 120 + (*velocity as u32 * 135 / 127) as u8;
+            painter.rect_filled(
+                note_rect,
+                1.0,
+                egui::Color32::from_rgba_unmultiplied(
+                    note_base.r(),
+                    note_base.g(),
+                    note_base.b(),
+                    alpha,
+                ),
+            );
+        }
+    }
+
     rect
 }
 
@@ -8437,6 +9006,37 @@ mod tests {
             to_pos: TimelinePos::default(),
         };
         assert_eq!(moved.description(), "Move clip");
+    }
+
+    #[test]
+    fn track_insert_descriptions_name_the_change() {
+        let track_id = daw_core::track::TrackId::default();
+        let from = Vec::new();
+        let to = vec![daw_core::track::InsertSlot::with_effect(
+            daw_core::track::TrackEffect::default_saturation(),
+        )];
+        let add = EditAction::TrackInserts {
+            track_id,
+            from: from.clone(),
+            to: to.clone(),
+        };
+        assert_eq!(add.description(), "Add track effect");
+
+        let remove = EditAction::TrackInserts {
+            track_id,
+            from: to.clone(),
+            to: from,
+        };
+        assert_eq!(remove.description(), "Remove track effect");
+
+        let mut changed = to.clone();
+        changed[0].mix = 0.5;
+        let edit = EditAction::TrackInserts {
+            track_id,
+            from: to,
+            to: changed,
+        };
+        assert_eq!(edit.description(), "Track effects");
     }
 
     #[test]

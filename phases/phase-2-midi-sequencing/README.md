@@ -25,9 +25,13 @@ MIDI has started: tracks can be added as MIDI tracks, and MIDI input devices
 are enumerated through `midir` with a dedicated MIDI bar (auto-connect,
 selector, Refresh and live note/velocity activity). Armed MIDI tracks record
 timestamped notes into clips that render in the arrange lane and play through
-a basic built-in sine voice; double-clicking a MIDI clip opens a read-only
-piano-roll view. Instruments, chase events, loop takes, MIDI thru and the
-editing tools in the piano roll are not implemented yet.
+a basic built-in sine voice; live input is auditioned through the same voice
+while recording, and MIDI clips show miniature note previews in the arrange
+view. Double-clicking a MIDI clip opens a read-only piano-roll view. Every
+track type now has a real-time insert chain (saturation, filter, bit crusher,
+tremolo) that runs before the track fader. Instruments, chase events, loop
+takes, MIDI thru and the editing tools in the piano roll are not implemented
+yet.
 
 ## Milestone: M2 — MIDI Sequencing (Week 44)
 

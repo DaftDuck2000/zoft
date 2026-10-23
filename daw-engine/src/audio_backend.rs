@@ -269,6 +269,12 @@ pub trait AudioBackend: Send + Sync {
     fn set_playback_metronome(&self, _config: Option<crate::playback::MetronomeConfig>) {}
     /// Update the MIDI notes rendered by the current playback mixer, if any.
     fn set_playback_notes(&self, _notes: Vec<crate::playback::PlayableNote>) {}
+    /// Update per-track fader/effect settings on the current playback mixer.
+    fn set_playback_tracks(&self, _tracks: Vec<crate::playback::PlayableTrack>) {}
+    /// Live MIDI audition through the output stream's sine synth.
+    fn note_on(&self, _note: u8, _velocity: u8) {}
+    fn note_off(&self, _note: u8) {}
+    fn all_notes_off(&self) {}
     /// Enable or disable live input monitoring.
     fn set_monitoring(&self, _enabled: bool) {}
     /// Whether the input stream is currently open.
@@ -314,6 +320,7 @@ pub struct CpalBackend {
     output_stream: Arc<Mutex<SendStream>>,
     input_stream: Arc<Mutex<SendStream>>,
     playback: Arc<Mutex<Option<crate::playback::PlaybackMixer>>>,
+    live_midi: Arc<Mutex<crate::playback::LiveMidiSynth>>,
     input_device_cache: Arc<Mutex<Vec<(String, SendDevice)>>>,
     error_logger: Arc<RateLimitedLogger>,
 }
@@ -339,6 +346,9 @@ impl CpalBackend {
             output_stream: Arc::new(Mutex::new(SendStream(None))),
             input_stream: Arc::new(Mutex::new(SendStream(None))),
             playback: Arc::new(Mutex::new(None)),
+            live_midi: Arc::new(Mutex::new(crate::playback::LiveMidiSynth::new(
+                sample_rate as u32,
+            ))),
             input_device_cache: Arc::new(Mutex::new(Vec::new())),
             error_logger: Arc::new(RateLimitedLogger::new(1000)),
         })
@@ -488,11 +498,12 @@ impl AudioBackend for CpalBackend {
         let error_logger = Arc::clone(&self.error_logger);
         let playback = Arc::clone(&self.playback);
         let monitor = Arc::clone(&self.monitor);
+        let live_midi = Arc::clone(&self.live_midi);
 
         let stream = match config.sample_format() {
-            cpal::SampleFormat::F32 => build_stream::<f32>(&device, &config.into(), &running, &playback, &monitor, &error_logger)?,
-            cpal::SampleFormat::I16 => build_stream::<i16>(&device, &config.into(), &running, &playback, &monitor, &error_logger)?,
-            cpal::SampleFormat::U16 => build_stream::<u16>(&device, &config.into(), &running, &playback, &monitor, &error_logger)?,
+            cpal::SampleFormat::F32 => build_stream::<f32>(&device, &config.into(), &running, &playback, &monitor, &live_midi, &error_logger)?,
+            cpal::SampleFormat::I16 => build_stream::<i16>(&device, &config.into(), &running, &playback, &monitor, &live_midi, &error_logger)?,
+            cpal::SampleFormat::U16 => build_stream::<u16>(&device, &config.into(), &running, &playback, &monitor, &live_midi, &error_logger)?,
             _ => return Err(anyhow::anyhow!("Unsupported sample format")),
         };
 
@@ -667,6 +678,38 @@ fn stop_input_stream(&self) -> Result<()> {
         }
     }
 
+    fn set_playback_tracks(&self, tracks: Vec<crate::playback::PlayableTrack>) {
+        if let Some(mixer) = self
+            .playback
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
+            mixer.set_tracks(tracks);
+        }
+    }
+
+    fn note_on(&self, note: u8, velocity: u8) {
+        self.live_midi
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .note_on(note, velocity);
+    }
+
+    fn note_off(&self, note: u8) {
+        self.live_midi
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .note_off(note);
+    }
+
+    fn all_notes_off(&self) {
+        self.live_midi
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .all_notes_off();
+    }
+
     fn set_monitoring(&self, enabled: bool) {
         self.monitor
             .lock()
@@ -711,6 +754,7 @@ fn build_stream<T>(
     running: &Arc<Mutex<bool>>,
     playback: &Arc<Mutex<Option<crate::playback::PlaybackMixer>>>,
     monitor: &Arc<Mutex<MonitorBuffer>>,
+    live_midi: &Arc<Mutex<crate::playback::LiveMidiSynth>>,
     error_logger: &Arc<RateLimitedLogger>,
 ) -> Result<Stream>
 where
@@ -723,6 +767,7 @@ where
     let running = Arc::clone(running);
     let playback = Arc::clone(playback);
     let monitor = Arc::clone(monitor);
+    let live_midi = Arc::clone(live_midi);
     let out_channels = config.channels as usize;
     let mut scratch: Vec<f32> = Vec::new();
 
@@ -765,6 +810,11 @@ where
                         }
                     }
                 }
+            }
+
+            // Live MIDI audition notes.
+            if let Ok(mut synth) = live_midi.lock() {
+                synth.fill(&mut scratch[..needed], out_channels as u16);
             }
 
             for (index, sample) in data.iter_mut().enumerate() {

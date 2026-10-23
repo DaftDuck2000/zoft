@@ -31,7 +31,7 @@ pub use disk::*;
 pub use midi::*;
 
 use crate::audio_backend::AudioBackend;
-use crate::playback::{MetronomeConfig, PlayableClip, PlaybackMixer};
+use crate::playback::{MetronomeConfig, PlayableClip, PlayableNote, PlayableTrack, PlaybackMixer};
 use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -60,6 +60,9 @@ pub struct AudioEngine {
     /// MIDI notes for the built-in sine voice, applied to every new mixer and
     /// live updates.
     playback_notes: Arc<Mutex<Vec<PlayableNote>>>,
+    /// Per-track fader/effect settings, applied to every new mixer and live
+    /// updates.
+    playback_tracks: Arc<Mutex<Vec<PlayableTrack>>>,
 }
 
 struct RecordingState {
@@ -88,6 +91,7 @@ impl AudioEngine {
             playback_loop: Arc::new(Mutex::new(None)),
             playback_metronome: Arc::new(Mutex::new(None)),
             playback_notes: Arc::new(Mutex::new(Vec::new())),
+            playback_tracks: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -140,6 +144,12 @@ impl AudioEngine {
             mixer.set_metronome(Some(metronome));
         }
         {
+            let tracks = self.playback_tracks.lock().unwrap();
+            if !tracks.is_empty() {
+                mixer.set_tracks(tracks.clone());
+            }
+        }
+        {
             let notes = self.playback_notes.lock().unwrap();
             if !notes.is_empty() {
                 mixer.set_midi_notes(notes.clone());
@@ -169,6 +179,27 @@ impl AudioEngine {
     pub fn set_playback_notes(&self, notes: Vec<PlayableNote>) {
         *self.playback_notes.lock().unwrap() = notes.clone();
         self.backend.set_playback_notes(notes);
+    }
+
+    /// Set per-track fader/effect settings. Applied to the live mixer
+    /// immediately and to any mixer created later.
+    pub fn set_playback_tracks(&self, tracks: Vec<PlayableTrack>) {
+        *self.playback_tracks.lock().unwrap() = tracks.clone();
+        self.backend.set_playback_tracks(tracks);
+    }
+
+    /// Audition a MIDI note through the live sine synth, independent of
+    /// transport playback.
+    pub fn note_on(&self, note: u8, velocity: u8) {
+        self.backend.note_on(note, velocity);
+    }
+
+    pub fn note_off(&self, note: u8) {
+        self.backend.note_off(note);
+    }
+
+    pub fn all_notes_off(&self) {
+        self.backend.all_notes_off();
     }
 
     /// Remove the playback content (output falls silent).

@@ -2,6 +2,7 @@
 
 use cpal::{FromSample, Sample, SizedSample};
 use daw_core::clip::Fade;
+use daw_core::track::{FilterMode, InsertSlot, TrackEffect};
 
 /// A clip prepared for playback: interleaved f32 samples plus timeline
 /// placement and gain/fade settings.
@@ -48,6 +49,64 @@ pub struct PlayableNote {
     pub note: u8,
     /// Normalized velocity (`0.0..=1.0`).
     pub velocity: f32,
+    /// Track index, used to route the note through that track's effects.
+    pub track: u32,
+}
+
+/// One built-in effect in a track's insert chain, prepared for playback.
+#[derive(Clone)]
+pub struct PlayableEffect {
+    pub effect: TrackEffect,
+    pub enabled: bool,
+    pub input_gain: f32,
+    pub output_gain: f32,
+    pub mix: f32,
+}
+
+impl PlayableEffect {
+    pub fn from_slot(slot: &InsertSlot) -> Option<Self> {
+        Some(Self {
+            effect: slot.effect.clone()?,
+            enabled: slot.enabled,
+            input_gain: slot.input_gain,
+            output_gain: slot.output_gain,
+            mix: slot.mix,
+        })
+    }
+}
+
+/// Per-track playback settings: fader gain, pan and insert effects.
+#[derive(Clone)]
+pub struct PlayableTrack {
+    /// Matches `PlayableClip::track` and `PlayableNote::track`.
+    pub index: u32,
+    pub gain: f32,
+    pub effects: Vec<PlayableEffect>,
+}
+
+/// Runtime state for one effect slot. Kept across audio blocks so filters,
+/// bit-crushers and tremolo stay continuous.
+enum EffectState {
+    None,
+    BitCrusher { held: Vec<f32>, counter: u32 },
+    Filter { state: Vec<f32> },
+    Tremolo { phase: f32 },
+}
+
+impl EffectState {
+    fn for_effect(effect: &TrackEffect, channels: usize) -> Self {
+        match effect {
+            TrackEffect::BitCrusher { .. } => Self::BitCrusher {
+                held: vec![0.0; channels.max(1)],
+                counter: 0,
+            },
+            TrackEffect::Filter { .. } => Self::Filter {
+                state: vec![0.0; channels.max(1)],
+            },
+            TrackEffect::Tremolo { .. } => Self::Tremolo { phase: 0.0 },
+            TrackEffect::Saturation { .. } => Self::None,
+        }
+    }
 }
 
 /// Real-time mixer: sums all clips into the output buffer and tracks the
@@ -65,6 +124,16 @@ pub struct PlaybackMixer {
     loop_range: Option<(u64, u64)>,
     metronome: Option<MetronomeConfig>,
     notes: Vec<PlayableNote>,
+    /// Per-track fader/effects settings. Empty means legacy unity-gain direct
+    /// mixing (used by offline tests and callers that don't supply tracks).
+    tracks: Vec<PlayableTrack>,
+    clip_buckets: Vec<Vec<usize>>,
+    note_buckets: Vec<Vec<usize>>,
+    effect_states: Vec<Vec<EffectState>>,
+    /// Scratch buffer for one track's mix before effects are applied.
+    track_scratch: Vec<f32>,
+    /// Scratch buffer holding the dry signal while an effect is blended in.
+    effect_dry: Vec<f32>,
 }
 
 impl PlaybackMixer {
@@ -141,6 +210,12 @@ impl PlaybackMixer {
             loop_range: None,
             metronome: None,
             notes: Vec::new(),
+            tracks: Vec::new(),
+            clip_buckets: Vec::new(),
+            note_buckets: Vec::new(),
+            effect_states: Vec::new(),
+            track_scratch: Vec::new(),
+            effect_dry: Vec::new(),
         }
     }
 
@@ -181,6 +256,49 @@ impl PlaybackMixer {
     /// Replace the MIDI notes rendered by the built-in sine voice.
     pub fn set_midi_notes(&mut self, notes: Vec<PlayableNote>) {
         self.notes = notes;
+        self.rebuild_note_buckets();
+    }
+
+    /// Replace the per-track fader/effect settings. Call before loading clips so
+    /// every track in the arrangement keeps its own insert chain.
+    pub fn set_tracks(&mut self, tracks: Vec<PlayableTrack>) {
+        self.effect_states = tracks
+            .iter()
+            .map(|track| {
+                track
+                    .effects
+                    .iter()
+                    .map(|effect| {
+                        EffectState::for_effect(&effect.effect, self.out_channels as usize)
+                    })
+                    .collect()
+            })
+            .collect();
+        self.tracks = tracks;
+        self.rebuild_clip_buckets();
+        self.rebuild_note_buckets();
+    }
+
+    pub fn tracks(&self) -> &[PlayableTrack] {
+        &self.tracks
+    }
+
+    fn rebuild_clip_buckets(&mut self) {
+        self.clip_buckets = vec![Vec::new(); self.tracks.len()];
+        for (index, clip) in self.clips.iter().enumerate() {
+            if let Some(bucket) = self.clip_buckets.get_mut(clip.track as usize) {
+                bucket.push(index);
+            }
+        }
+    }
+
+    fn rebuild_note_buckets(&mut self) {
+        self.note_buckets = vec![Vec::new(); self.tracks.len()];
+        for (index, note) in self.notes.iter().enumerate() {
+            if let Some(bucket) = self.note_buckets.get_mut(note.track as usize) {
+                bucket.push(index);
+            }
+        }
     }
 
     /// Fill `data` with the mixed output, advancing the playback position.
@@ -275,39 +393,47 @@ impl PlaybackMixer {
         let metronome = self.metronome;
         out.fill(0.0);
 
-        for frame in 0..frames {
-            let pos = self.position + frame as u64;
-            for (idx, clip) in self.clips.iter().enumerate() {
-                let clip_frames =
-                    (clip.samples.len() / clip.channels.max(1) as usize) as u64;
-                if clip_frames == 0 {
-                    continue;
-                }
+        let mut track_buf = std::mem::take(&mut self.track_scratch);
+        track_buf.resize(out.len(), 0.0);
+        let mut dry = std::mem::take(&mut self.effect_dry);
+        dry.resize(out.len(), 0.0);
 
-                // Clip extent on the output timeline.
-                let len_out = self.lengths[idx];
-                if pos < clip.start_frame || pos >= clip.start_frame + len_out {
-                    continue;
-                }
-
-                let src_pos = (pos - clip.start_frame) as f64
-                    * clip.sample_rate.max(1) as f64
-                    / self.out_sample_rate as f64;
-                let gain = clip.gain
-                    * fade_gain(clip, src_pos)
-                    * auto_fade_gain(
-                        self.auto_fades[idx],
-                        pos - clip.start_frame,
-                        len_out,
+        if self.tracks.is_empty() {
+            track_buf.fill(0.0);
+            self.render_bucket(None, &mut track_buf, frames);
+            for (dst, src) in out.iter_mut().zip(track_buf.iter()) {
+                *dst += *src;
+            }
+        } else {
+            // Move the track list and effect state out so rendering a bucket
+            // and updating its effect state don't overlap borrows.
+            let tracks = std::mem::take(&mut self.tracks);
+            let mut states = std::mem::take(&mut self.effect_states);
+            for (slot, track) in tracks.iter().enumerate() {
+                track_buf.fill(0.0);
+                self.render_bucket(Some(slot), &mut track_buf, frames);
+                if let Some(effect_states) = states.get_mut(slot) {
+                    process_effects(
+                        &track.effects,
+                        effect_states,
+                        &mut track_buf,
+                        &mut dry,
+                        out_ch,
+                        self.out_sample_rate,
                     );
-
-                for channel in 0..out_ch {
-                    out[frame * out_ch + channel] +=
-                        sample_at(clip, src_pos, channel) * gain;
+                }
+                let gain = track.gain;
+                for (dst, src) in out.iter_mut().zip(track_buf.iter()) {
+                    *dst += *src * gain;
                 }
             }
+            self.tracks = tracks;
+            self.effect_states = states;
+        }
 
-            if let Some(config) = metronome {
+        if let Some(config) = metronome {
+            for frame in 0..frames {
+                let pos = self.position + frame as u64;
                 let click = metronome_sample(config, pos, self.out_sample_rate);
                 if click != 0.0 {
                     for channel in 0..out_ch {
@@ -315,18 +441,283 @@ impl PlaybackMixer {
                     }
                 }
             }
+        }
 
-            for note in &self.notes {
-                if pos >= note.start_frame && pos < note.end_frame {
-                    let sample = midi_note_sample(*note, pos, self.out_sample_rate);
-                    if sample != 0.0 {
-                        for channel in 0..out_ch {
-                            out[frame * out_ch + channel] += sample;
-                        }
+        self.track_scratch = track_buf;
+        self.effect_dry = dry;
+    }
+
+    /// Mix one track bucket (or every clip/note when `bucket` is `None`) into
+    /// `out` without advancing the mixer position.
+    fn render_bucket(&self, bucket: Option<usize>, out: &mut [f32], frames: usize) {
+        for frame in 0..frames {
+            let pos = self.position + frame as u64;
+            if let Some(slot) = bucket {
+                if let Some(indices) = self.clip_buckets.get(slot) {
+                    for &idx in indices {
+                        self.mix_clip_frame(idx, pos, out, frame);
                     }
+                }
+                if let Some(indices) = self.note_buckets.get(slot) {
+                    for &idx in indices {
+                        self.mix_note_frame(idx, pos, out, frame);
+                    }
+                }
+            } else {
+                for idx in 0..self.clips.len() {
+                    self.mix_clip_frame(idx, pos, out, frame);
+                }
+                for idx in 0..self.notes.len() {
+                    self.mix_note_frame(idx, pos, out, frame);
                 }
             }
         }
+    }
+
+    fn mix_clip_frame(&self, idx: usize, pos: u64, out: &mut [f32], frame: usize) {
+        let out_ch = self.out_channels as usize;
+        let clip = &self.clips[idx];
+        let clip_frames = (clip.samples.len() / clip.channels.max(1) as usize) as u64;
+        if clip_frames == 0 {
+            return;
+        }
+        let len_out = self.lengths[idx];
+        if pos < clip.start_frame || pos >= clip.start_frame + len_out {
+            return;
+        }
+        let src_pos = (pos - clip.start_frame) as f64
+            * clip.sample_rate.max(1) as f64
+            / self.out_sample_rate as f64;
+        let gain = clip.gain
+            * fade_gain(clip, src_pos)
+            * auto_fade_gain(self.auto_fades[idx], pos - clip.start_frame, len_out);
+        for channel in 0..out_ch {
+            out[frame * out_ch + channel] += sample_at(clip, src_pos, channel) * gain;
+        }
+    }
+
+    fn mix_note_frame(&self, idx: usize, pos: u64, out: &mut [f32], frame: usize) {
+        let out_ch = self.out_channels as usize;
+        let note = self.notes[idx];
+        if pos < note.start_frame || pos >= note.end_frame {
+            return;
+        }
+        let sample = midi_note_sample(note, pos, self.out_sample_rate);
+        if sample != 0.0 {
+            for channel in 0..out_ch {
+                out[frame * out_ch + channel] += sample;
+            }
+        }
+    }
+}
+
+/// Apply one track's insert chain to an interleaved buffer.
+fn process_effects(
+    effects: &[PlayableEffect],
+    states: &mut [EffectState],
+    buffer: &mut [f32],
+    dry: &mut [f32],
+    channels: usize,
+    sample_rate: u32,
+) {
+    let channels = channels.max(1);
+    let frames = buffer.len() / channels;
+    let sample_rate = sample_rate.max(1) as f32;
+
+    for (effect, state) in effects.iter().zip(states.iter_mut()) {
+        if !effect.enabled {
+            continue;
+        }
+        let input_gain = effect.input_gain.clamp(0.0, 8.0);
+        if (input_gain - 1.0).abs() > 1e-6 {
+            for sample in buffer.iter_mut() {
+                *sample *= input_gain;
+            }
+        }
+        let needed = buffer.len();
+        dry[..needed].copy_from_slice(buffer);
+
+        match (&effect.effect, state) {
+            (TrackEffect::Saturation { drive_db, mix }, _) => {
+                let drive = 10f32.powf(drive_db.clamp(0.0, 48.0) / 20.0);
+                let norm = if drive > 1e-3 {
+                    drive.tanh().recip()
+                } else {
+                    1.0
+                };
+                let wet = mix.clamp(0.0, 1.0);
+                if wet > 0.0 {
+                    for sample in buffer.iter_mut() {
+                        let clean = *sample;
+                        let driven = (clean * drive).tanh() * norm;
+                        *sample = clean * (1.0 - wet) + driven * wet;
+                    }
+                }
+            }
+            (TrackEffect::BitCrusher { bits, downsample }, EffectState::BitCrusher { held, counter }) => {
+                let steps = 2f32.powi((*bits).clamp(1, 24) as i32 - 1);
+                let factor = (*downsample).max(1);
+                for frame in 0..frames {
+                    let base = frame * channels;
+                    if *counter == 0 {
+                        for channel in 0..channels {
+                            held[channel] = buffer[base + channel];
+                        }
+                    }
+                    for channel in 0..channels {
+                        buffer[base + channel] =
+                            (held[channel].clamp(-1.0, 1.0) * steps).round() / steps;
+                    }
+                    *counter = (*counter + 1) % factor;
+                }
+            }
+            (TrackEffect::Filter { mode, cutoff }, EffectState::Filter { state }) => {
+                let max_cutoff = (sample_rate * 0.475).max(1.0);
+                let cutoff = cutoff.clamp(1.0, max_cutoff);
+                let alpha = 1.0 - (-std::f32::consts::TAU * cutoff / sample_rate).exp();
+                for frame in 0..frames {
+                    let base = frame * channels;
+                    for channel in 0..channels {
+                        let input = buffer[base + channel];
+                        state[channel] += alpha * (input - state[channel]);
+                        buffer[base + channel] = match mode {
+                            FilterMode::LowPass => state[channel],
+                            FilterMode::HighPass => input - state[channel],
+                        };
+                    }
+                }
+            }
+            (TrackEffect::Tremolo { rate, depth }, EffectState::Tremolo { phase }) => {
+                let depth = depth.clamp(0.0, 1.0);
+                let rate = rate.clamp(0.0, sample_rate * 0.5);
+                for frame in 0..frames {
+                    let modulation = 1.0 - depth * 0.5 * (1.0 - phase.cos());
+                    let base = frame * channels;
+                    for channel in 0..channels {
+                        buffer[base + channel] *= modulation;
+                    }
+                    *phase += std::f32::consts::TAU * rate / sample_rate;
+                    if *phase >= std::f32::consts::TAU {
+                        *phase -= std::f32::consts::TAU;
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        let mix = effect.mix.clamp(0.0, 1.0);
+        if mix < 1.0 {
+            for (sample, clean) in buffer.iter_mut().zip(dry.iter()) {
+                *sample = *clean * (1.0 - mix) + *sample * mix;
+            }
+        }
+        let output_gain = effect.output_gain.clamp(0.0, 8.0);
+        if (output_gain - 1.0).abs() > 1e-6 {
+            for sample in buffer.iter_mut() {
+                *sample *= output_gain;
+            }
+        }
+    }
+}
+
+/// Small polyphonic sine synthesizer for live MIDI input audition. It runs in
+/// the output callback independently of transport playback, so notes are heard
+/// while recording or just monitoring an armed instrument track.
+pub struct LiveMidiSynth {
+    sample_rate: u32,
+    voices: Vec<LiveVoice>,
+}
+
+struct LiveVoice {
+    note: u8,
+    velocity: f32,
+    phase: f32,
+    age: u64,
+    release_age: u64,
+    releasing: bool,
+}
+
+impl LiveMidiSynth {
+    pub fn new(sample_rate: u32) -> Self {
+        Self {
+            sample_rate: sample_rate.max(1),
+            voices: Vec::new(),
+        }
+    }
+
+    pub fn note_on(&mut self, note: u8, velocity: u8) {
+        let velocity = (velocity as f32 / 127.0).clamp(0.0, 1.0);
+        if let Some(voice) = self.voices.iter_mut().find(|voice| voice.note == note) {
+            voice.velocity = velocity;
+            voice.phase = 0.0;
+            voice.age = 0;
+            voice.release_age = 0;
+            voice.releasing = false;
+            return;
+        }
+        self.voices.push(LiveVoice {
+            note,
+            velocity,
+            phase: 0.0,
+            age: 0,
+            release_age: 0,
+            releasing: false,
+        });
+    }
+
+    pub fn note_off(&mut self, note: u8) {
+        for voice in &mut self.voices {
+            if voice.note == note && !voice.releasing {
+                voice.releasing = true;
+                voice.release_age = 0;
+            }
+        }
+    }
+
+    pub fn all_notes_off(&mut self) {
+        self.voices.clear();
+    }
+
+    /// Mix active voices into an interleaved output buffer.
+    pub fn fill(&mut self, out: &mut [f32], channels: u16) {
+        let channels = channels.max(1) as usize;
+        if out.is_empty() || self.voices.is_empty() {
+            return;
+        }
+        let frames = out.len() / channels;
+        let sample_rate = self.sample_rate.max(1) as f32;
+        let attack = (0.005 * sample_rate).max(1.0);
+        let release = (0.05 * sample_rate).max(1.0);
+
+        for frame in 0..frames {
+            let base = frame * channels;
+            for voice in &mut self.voices {
+                let attack_gain = (voice.age as f32 / attack).min(1.0);
+                let release_gain = if voice.releasing {
+                    (1.0 - voice.release_age as f32 / release).clamp(0.0, 1.0)
+                } else {
+                    1.0
+                };
+                let gain = attack_gain * release_gain * 0.18 * voice.velocity;
+                let sample = voice.phase.sin() * gain;
+                for channel in 0..channels {
+                    out[base + channel] += sample;
+                }
+                let frequency =
+                    440.0 * 2f32.powf((voice.note as f32 - 69.0) / 12.0);
+                voice.phase += std::f32::consts::TAU * frequency / sample_rate;
+                if voice.phase >= std::f32::consts::TAU {
+                    voice.phase -= std::f32::consts::TAU;
+                }
+                voice.age = voice.age.saturating_add(1);
+                if voice.releasing {
+                    voice.release_age = voice.release_age.saturating_add(1);
+                }
+            }
+        }
+        self.voices.retain(|voice| {
+            !voice.releasing || voice.release_age as f32 / release < 1.0
+        });
     }
 }
 
@@ -534,6 +925,7 @@ mod tests {
             end_frame: 30,
             note: 69,
             velocity: 1.0,
+            track: 0,
         }]);
 
         let mut out = [0.0f32; 40];
@@ -593,5 +985,104 @@ mod tests {
         mixer.fill(&mut out);
 
         assert!((out[7] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn track_fader_gain_scales_the_mixed_track() {
+        let a = clip(vec![1.0; 4], 0, 0);
+        let mut mixer = PlaybackMixer::new(10, 1, vec![a], 0);
+        mixer.set_tracks(vec![PlayableTrack {
+            index: 0,
+            gain: 0.25,
+            effects: Vec::new(),
+        }]);
+
+        let mut out = [0.0f32; 4];
+        mixer.fill_unclamped(&mut out);
+        assert!(out.iter().all(|sample| (sample - 0.25).abs() < 1e-6));
+    }
+
+    #[test]
+    fn track_effects_process_audio_before_the_fader() {
+        let a = clip(vec![1.0; 100], 0, 0);
+        let mut mixer = PlaybackMixer::new(1000, 1, vec![a], 0);
+        mixer.set_tracks(vec![PlayableTrack {
+            index: 0,
+            gain: 1.0,
+            effects: vec![PlayableEffect {
+                effect: TrackEffect::Tremolo {
+                    rate: 10.0,
+                    depth: 1.0,
+                },
+                enabled: true,
+                input_gain: 1.0,
+                output_gain: 1.0,
+                mix: 1.0,
+            }],
+        }]);
+
+        let mut out = [0.0f32; 100];
+        mixer.fill_unclamped(&mut out);
+        assert!((out[0] - 1.0).abs() < 1e-5);
+        assert!(out[50].abs() < 0.05);
+    }
+
+    #[test]
+    fn disabled_track_effects_are_bypassed() {
+        let a = clip(vec![1.0; 32], 0, 0);
+        let mut mixer = PlaybackMixer::new(1000, 1, vec![a], 0);
+        mixer.set_tracks(vec![PlayableTrack {
+            index: 0,
+            gain: 1.0,
+            effects: vec![PlayableEffect {
+                effect: TrackEffect::Tremolo {
+                    rate: 10.0,
+                    depth: 1.0,
+                },
+                enabled: false,
+                input_gain: 1.0,
+                output_gain: 1.0,
+                mix: 1.0,
+            }],
+        }]);
+
+        let mut out = [0.0f32; 32];
+        mixer.fill_unclamped(&mut out);
+        assert!(out.iter().all(|sample| (sample - 1.0).abs() < 1e-6));
+    }
+
+    #[test]
+    fn midi_notes_follow_their_track_fader() {
+        let mut mixer = PlaybackMixer::new(1000, 1, Vec::new(), 0);
+        mixer.set_midi_notes(vec![PlayableNote {
+            start_frame: 0,
+            end_frame: 100,
+            note: 69,
+            velocity: 1.0,
+            track: 0,
+        }]);
+        mixer.set_tracks(vec![PlayableTrack {
+            index: 0,
+            gain: 0.0,
+            effects: Vec::new(),
+        }]);
+
+        let mut out = [0.0f32; 100];
+        mixer.fill_unclamped(&mut out);
+        assert!(out.iter().all(|sample| sample.abs() < 1e-6));
+    }
+
+    #[test]
+    fn live_midi_synth_auditions_notes_without_transport() {
+        let mut synth = LiveMidiSynth::new(1000);
+        synth.note_on(69, 127);
+        let mut out = [0.0f32; 100];
+        synth.fill(&mut out, 1);
+        assert!(out.iter().any(|sample| sample.abs() > 1e-4));
+
+        synth.note_off(69);
+        let mut release = [0.0f32; 200];
+        synth.fill(&mut release, 1);
+        assert!(release[100..].iter().all(|sample| sample.abs() < 1e-6));
     }
 }
