@@ -623,7 +623,13 @@ fn stop_input_stream(&self) -> Result<()> {
     }
 
     fn set_playback_mixer(&self, mixer: Option<crate::playback::PlaybackMixer>) {
-        *self.playback.lock().unwrap_or_else(|e| e.into_inner()) = mixer;
+        // Swap under the lock, but drop the old mixer (and its sample buffers)
+        // outside it so the audio callback isn't blocked while memory is freed.
+        let old = {
+            let mut guard = self.playback.lock().unwrap_or_else(|e| e.into_inner());
+            std::mem::replace(&mut *guard, mixer)
+        };
+        drop(old);
     }
 
     fn set_playback_loop(&self, range: Option<(u64, u64)>) {

@@ -55,6 +55,7 @@
 - Engine API: `set_playback_clips`, `clear_playback`, `playback_position_frames`
 - Track list has per-track volume sliders and M/S buttons; mute, solo and volume are applied by the mixer and recorded in undo history
 - UI loads the project's clips on play; the playhead follows the engine's sample clock
+- Playback refreshes (edits, undo/redo, loop changes) build the next mixer on a background worker, so the UI and playhead never block on WAV I/O; stale results are discarded, and the old mixer is dropped outside the audio-callback lock
 - Playhead and timeline may extend past the last clip; the view auto-follows during playback
 - Click the lower ruler (or drag it) to seek; the playhead follows the current snap grid (hold Alt to bypass), and seeking during playback/recording pauses the transport
 - Timeline ruler defaults to musical bars/beats (labels like `3.2`), switchable to clock time with the Ruler dropdown; the time-signature picker in the transport bar (4/4, 3/4, 6/8, …) drives bar length, ruler labels and the snap grid

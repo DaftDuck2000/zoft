@@ -683,6 +683,54 @@ enum FileAction {
     SaveAs,
 }
 
+/// Metadata for one playback clip. The loader thread turns these into
+/// `PlayableClip`s off the UI thread.
+#[derive(Clone)]
+struct PlaybackClipSpec {
+    path: PathBuf,
+    source_offset: u64,
+    length: u64,
+    start_frame: u64,
+    track: u32,
+    gain: f32,
+    fade_in: Option<Fade>,
+    fade_out: Option<Fade>,
+}
+
+/// Read and trim the sources described by `specs`. Safe to call from a worker
+/// thread; used for asynchronous playback refreshes.
+fn prepare_playable_clips(specs: Vec<PlaybackClipSpec>) -> Vec<PlayableClip> {
+    let mut playable = Vec::with_capacity(specs.len());
+    for spec in specs {
+        match load_wav_interleaved(&spec.path) {
+            Ok((samples, channels, sample_rate)) => {
+                let channel_count = channels.max(1) as usize;
+                let start = (spec.source_offset as usize)
+                    .saturating_mul(channel_count)
+                    .min(samples.len());
+                let end = start
+                    .saturating_add((spec.length as usize).saturating_mul(channel_count))
+                    .min(samples.len());
+                if end <= start {
+                    continue;
+                }
+                playable.push(PlayableClip {
+                    samples: samples[start..end].to_vec(),
+                    channels,
+                    sample_rate,
+                    start_frame: spec.start_frame,
+                    track: spec.track,
+                    gain: spec.gain,
+                    fade_in: spec.fade_in,
+                    fade_out: spec.fade_out,
+                });
+            }
+            Err(e) => eprintln!("Playback: skipping {}: {}", spec.path.display(), e),
+        }
+    }
+    playable
+}
+
 /// In-progress clip drag (move, trim or fade handle).
 struct ClipDrag {
     clip_id: ClipId,
@@ -799,12 +847,30 @@ struct AppUI {
     waveform_tx: mpsc::Sender<(ClipId, PathBuf, Result<WaveformOverview>)>,
     waveform_rx: mpsc::Receiver<(ClipId, PathBuf, Result<WaveformOverview>)>,
     detail_cache: DetailCache,
+    // Asynchronous playback reloads (WAV loading happens off the UI thread)
+    playback_spec_tx: mpsc::Sender<(u64, Vec<PlaybackClipSpec>)>,
+    playback_ready_rx: mpsc::Receiver<(u64, Vec<PlayableClip>)>,
+    playback_generation: u64,
 }
 
 impl AppUI {
     fn new(project: Project, engine: AudioEngine) -> Self {
         let input_devices = engine.input_devices().unwrap_or_default();
         let (waveform_tx, waveform_rx) = mpsc::channel();
+
+        // Playback reloads read from disk; keep that off the UI thread.
+        let (playback_spec_tx, playback_spec_rx) =
+            mpsc::channel::<(u64, Vec<PlaybackClipSpec>)>();
+        let (playback_ready_tx, playback_ready_rx) =
+            mpsc::channel::<(u64, Vec<PlayableClip>)>();
+        std::thread::spawn(move || {
+            while let Ok((generation, specs)) = playback_spec_rx.recv() {
+                let clips = prepare_playable_clips(specs);
+                if playback_ready_tx.send((generation, clips)).is_err() {
+                    break;
+                }
+            }
+        });
 
         let mut app = Self {
             project,
@@ -853,6 +919,9 @@ impl AppUI {
             waveform_tx,
             waveform_rx,
             detail_cache: DetailCache::default(),
+            playback_spec_tx,
+            playback_ready_rx,
+            playback_generation: 0,
         };
 
         // Projects loaded from disk may predate stored overviews; generate any
@@ -1187,14 +1256,9 @@ impl AppUI {
 
     /// Reload the mixer so playback reflects the edited arrangement.
     fn refresh_playback_if_playing(&mut self) {
-        if self.playing {
-            let out_rate = self.engine.output_sample_rate().max(1);
-            let clips = self.collect_playable_clips(out_rate);
-            let start_frame = (self.playhead_secs.max(0.0) * out_rate as f64) as u64;
-            self.sync_playback_loop();
-            self.sync_playback_metronome();
-            self.engine.set_playback_clips(clips, start_frame);
-        }
+        // Rebuilding the mixer reads WAVs; do it on the worker thread so the
+        // UI and playhead keep moving.
+        self.request_playback_reload();
     }
 
     /// Enable live input monitoring when any track asks for it: `On` always,
@@ -3647,6 +3711,9 @@ impl eframe::App for AppUI {
         // Pick up finished waveform overviews
         self.poll_waveforms();
 
+        // Apply finished background playback reloads
+        self.poll_playback_reload();
+
         // Advance the playhead during playback. Prefer the audio engine's
         // sample clock so the playhead matches what is actually being heard,
         // and fall back to wall time when no audio is loaded. Playback is not
@@ -4787,8 +4854,13 @@ impl eframe::App for AppUI {
         self.show_audio_window(ctx);
         self.show_history_window(ctx);
 
-        // Request repaint for smooth playback and async waveform polling
-        ctx.request_repaint();
+        // Keep the event loop waking regularly even when the window is not
+        // focused: fast while the transport rolls, slower when idle.
+        if self.playing || self.recording {
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        } else {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
     }
 }
 
@@ -4966,6 +5038,8 @@ impl AppUI {
     /// only when the record button is toggled off.
     fn pause_transport(&mut self) {
         self.playing = false;
+        // Invalidate any in-flight background reload.
+        self.playback_generation = self.playback_generation.wrapping_add(1);
         self.engine.clear_playback();
         if self.recording {
             self.stop_recording_and_create_clip();
@@ -5051,9 +5125,9 @@ impl AppUI {
 
         self.sync_playback_loop();
         if self.playing {
-            // Rebuild the mixer from the playhead so the new range takes
-            // effect immediately.
-            self.start_playback();
+            // Rebuild the mixer asynchronously so this edit doesn't block the
+            // UI thread while the transport is rolling.
+            self.request_playback_reload();
         }
     }
 
@@ -5061,25 +5135,32 @@ impl AppUI {
     /// from the current playhead position.
     fn start_playback(&mut self) {
         let out_rate = self.engine.output_sample_rate().max(1);
-        let clips = self.collect_playable_clips(out_rate);
         let start_frame = (self.playhead_secs.max(0.0) * out_rate as f64) as u64;
+        self.playback_generation = self.playback_generation.wrapping_add(1);
         self.sync_playback_loop();
         self.sync_playback_metronome();
-        self.engine.set_playback_clips(clips, start_frame);
+        // Open the output immediately with silence; the worker supplies the
+        // clips as soon as they have been read from disk.
+        self.engine.set_playback_clips(Vec::new(), start_frame);
         if let Err(e) = self.engine.start() {
             self.engine.clear_playback();
             self.playing = false;
             self.error_message = Some(format!("Failed to start playback: {}", e));
+            return;
         }
+        self.request_playback_reload();
     }
 
     /// Read the audio clips that are placed on tracks into playable buffers.
     /// Timeline positions are converted from project samples to output-device
     /// frames, and each buffer is sliced to the clip's trimmed source range.
-    fn collect_playable_clips(&self, out_rate: u32) -> Vec<PlayableClip> {
+    /// Describe the audio clips that should feed the mixer. Timeline positions
+    /// are converted from project samples to output-device frames; the sources
+    /// are read on a worker thread.
+    fn collect_playback_specs(&self, out_rate: u32) -> Vec<PlaybackClipSpec> {
         let project_sr = self.project.sample_rate.max(1) as f64;
         let any_solo = self.project.tracks.values().any(|track| track.solo);
-        let mut playable = Vec::new();
+        let mut specs = Vec::new();
 
         for (track_index, track_id) in self.project.track_order.iter().enumerate() {
             let Some(track) = self.project.tracks.get(track_id) else {
@@ -5095,46 +5176,54 @@ impl AppUI {
                 if clip.muted || clip.length == 0 {
                     continue;
                 }
-                match load_wav_interleaved(&clip.source.path) {
-                    Ok((samples, channels, sample_rate)) => {
-                        let channel_count = channels.max(1) as usize;
-                        let start = (clip.source_offset as usize)
-                            .saturating_mul(channel_count)
-                            .min(samples.len());
-                        let end = start
-                            .saturating_add(
-                                (clip.length as usize).saturating_mul(channel_count),
-                            )
-                            .min(samples.len());
-                        if end <= start {
-                            continue;
-                        }
-
-                        let start_frame = (clip.timeline_position.sample as f64
-                            * out_rate as f64
-                            / project_sr)
-                            .round() as u64;
-                        playable.push(PlayableClip {
-                            samples: samples[start..end].to_vec(),
-                            channels,
-                            sample_rate,
-                            start_frame,
-                            track: track_index as u32,
-                            gain: clip.gain * track_gain,
-                            fade_in: clip.fade_in,
-                            fade_out: clip.fade_out,
-                        });
-                    }
-                    Err(e) => eprintln!(
-                        "Playback: skipping {}: {}",
-                        clip.source.path.display(),
-                        e
-                    ),
-                }
+                let start_frame = (clip.timeline_position.sample as f64
+                    * out_rate as f64
+                    / project_sr)
+                    .round() as u64;
+                specs.push(PlaybackClipSpec {
+                    path: clip.source.path.clone(),
+                    source_offset: clip.source_offset,
+                    length: clip.length,
+                    start_frame,
+                    track: track_index as u32,
+                    gain: clip.gain * track_gain,
+                    fade_in: clip.fade_in,
+                    fade_out: clip.fade_out,
+                });
             }
         }
 
-        playable
+        specs
+    }
+
+    /// Ask the worker to rebuild the playback clips from disk. Until the
+    /// result arrives the current mixer keeps playing, so the UI never blocks
+    /// on WAV I/O while the transport is rolling.
+    fn request_playback_reload(&mut self) {
+        if !self.playing {
+            return;
+        }
+        self.playback_generation = self.playback_generation.wrapping_add(1);
+        let out_rate = self.engine.output_sample_rate().max(1);
+        let specs = self.collect_playback_specs(out_rate);
+        let _ = self
+            .playback_spec_tx
+            .send((self.playback_generation, specs));
+    }
+
+    /// Apply finished background playback reloads. Stale generations are
+    /// discarded.
+    fn poll_playback_reload(&mut self) {
+        while let Ok((generation, clips)) = self.playback_ready_rx.try_recv() {
+            if generation != self.playback_generation || !self.playing {
+                continue;
+            }
+            let out_rate = self.engine.output_sample_rate().max(1);
+            let start_frame = (self.playhead_secs.max(0.0) * out_rate as f64) as u64;
+            self.sync_playback_loop();
+            self.sync_playback_metronome();
+            self.engine.set_playback_clips(clips, start_frame);
+        }
     }
 
     fn toggle_recording(&mut self) {
@@ -5278,6 +5367,7 @@ impl AppUI {
         self.disk_warning = None;
         self.recording = false;
         self.pending_record_track = None;
+        self.playback_generation = self.playback_generation.wrapping_add(1);
         self.engine.set_project_format(
             self.project.sample_rate,
             bit_depth_bits(self.project.bit_depth),
