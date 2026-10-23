@@ -5853,12 +5853,6 @@ impl eframe::App for AppUI {
                             };
                         }
 
-                        ui.add_sized(
-                            [80.0, 18.0],
-                            egui::Slider::new(&mut after.volume, 0.0..=1.5).show_value(false),
-                        )
-                        .on_hover_text(format!("Track volume {:.0}%", after.volume * 100.0));
-                        ui.label(format!("{:.0}%", after.volume * 100.0));
                         let has_effects = track
                             .inserts
                             .iter()
@@ -5880,6 +5874,13 @@ impl eframe::App for AppUI {
                         {
                             open_track_effects = Some(*track_id);
                         }
+
+                        ui.add_sized(
+                            [72.0, 18.0],
+                            egui::Slider::new(&mut after.volume, 0.0..=1.5).show_value(false),
+                        )
+                        .on_hover_text(format!("Track volume {:.0}%", after.volume * 100.0));
+                        ui.label(format!("{:.0}%", after.volume * 100.0));
                         if ui
                             .small_button("×")
                             .on_hover_text("Remove track")
