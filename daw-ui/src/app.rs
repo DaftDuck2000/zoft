@@ -1547,6 +1547,28 @@ impl AppUI {
         self.refresh_playback_if_playing();
     }
 
+    /// Mute or unmute every selected clip as one undo step.
+    fn toggle_selected_clips_muted(&mut self) {
+        let ids = self.selection_ids();
+        if ids.is_empty() {
+            return;
+        }
+        let all_muted = ids.iter().all(|id| {
+            self.project
+                .audio_clips
+                .get(*id)
+                .map_or(true, |clip| clip.muted)
+        });
+        let muted = !all_muted;
+        self.begin_undo_group(if muted { "Mute takes" } else { "Unmute takes" });
+        for id in ids {
+            self.set_clip_muted(id, muted);
+        }
+        self.end_undo_group();
+        self.after_edit();
+        self.refresh_playback_if_playing();
+    }
+
     /// Set a clip's mute flag as an undoable Shape action.
     fn set_clip_muted(&mut self, clip_id: ClipId, muted: bool) {
         let Some(clip) = self.project.audio_clips.get(clip_id) else {
@@ -5766,6 +5788,11 @@ impl AppUI {
             self.split_selected_clip();
         }
 
+        // M: mute or unmute the selected clips
+        if ctx.input(|i| i.key_pressed(Key::M)) {
+            self.toggle_selected_clips_muted();
+        }
+
         // Delete/Backspace: remove the selected clip (recoverable via undo)
         if ctx.input(|i| i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace)) {
             self.delete_selected_clip();
@@ -6343,10 +6370,9 @@ fn draw_audio_clip(
     let x_end = view.x(lane, clip_end);
     let width = (x_end - x_start).max(1.0);
 
-    let top_inset = if stacked { 2.0 } else { 18.0 };
-    let bottom_inset = if stacked { 2.0 } else { 6.0 };
-    let top = (lane.top() + top_inset).min(lane.bottom() - 2.0);
-    let bottom = (lane.bottom() - bottom_inset).max(top + 2.0);
+    // Clips fill the track lane; a couple of pixels keep the border visible.
+    let top = (lane.top() + 2.0).min(lane.bottom() - 2.0);
+    let bottom = (lane.bottom() - 2.0).max(top + 2.0);
     let full_rect = egui::Rect::from_min_max(
         egui::pos2(x_start, top),
         egui::pos2(x_start + width, bottom),
@@ -6566,6 +6592,18 @@ fn draw_audio_clip(
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("clip");
+        // A translucent strip keeps the label readable over the waveform.
+        painter.rect_filled(
+            egui::Rect::from_min_max(
+                visible_rect.left_top(),
+                egui::pos2(
+                    (visible_rect.left() + 110.0).min(visible_rect.right()),
+                    visible_rect.top() + 12.0,
+                ),
+            ),
+            2.0,
+            egui::Color32::from_black_alpha(70),
+        );
         painter.text(
             egui::pos2(visible_rect.left() + 4.0, visible_rect.top() + 2.0),
             egui::Align2::LEFT_TOP,

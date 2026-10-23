@@ -73,7 +73,7 @@
 - Edge drags trim non-destructively (adjusts `source_offset`/`length`; the WAV file is never touched)
 - Split at the playhead (S) creates a second clip referencing the same source
 - Copy/paste/cut/duplicate (Ctrl+C / Ctrl+V / Ctrl+X / Ctrl+D); Delete removes the clip from the track (data stays in the pool, undo restores it)
-- Click a clip to select it; **Ctrl/Cmd+click** toggles clips in the selection, and dragging empty track space rubber-bands a multi-selection (hold Ctrl to add)
+- Click a clip to select it; **Ctrl/Cmd+click** toggles clips in the selection, and dragging empty track space rubber-bands a multi-selection (hold Ctrl to add); **M** mutes or unmutes the selection
 - Drag any selected clip body to move the whole selection, preserving relative timing and track offsets; Delete / Ctrl+D / Ctrl+C / Ctrl+V operate on the whole selection
 - Fade handles in the clip's top corners; the **Clip Audio** window has fade curve (linear/exp/log/S/equal-power), fade length, gain and colour controls; multi-clip gain/fades/colour apply to every selected clip
 - Automatic equal-power crossfade where clips overlap on the same track, with an X overlay in the overlap region; contained clips are layered instead
