@@ -5331,6 +5331,7 @@ impl eframe::App for AppUI {
                             view,
                             project_sr,
                             self.selected_clips.contains(clip_id),
+                            count > 1,
                         );
                         if clip_rect != egui::Rect::NOTHING {
                             clip_rects.push((*clip_id, clip_rect));
@@ -6326,6 +6327,7 @@ fn draw_audio_clip(
     view: TimelineView,
     project_sr: f64,
     selected: bool,
+    stacked: bool,
 ) -> egui::Rect {
     if clip.length == 0 {
         return egui::Rect::NOTHING;
@@ -6341,8 +6343,10 @@ fn draw_audio_clip(
     let x_end = view.x(lane, clip_end);
     let width = (x_end - x_start).max(1.0);
 
-    let top = (lane.top() + 18.0).min(lane.bottom() - 4.0);
-    let bottom = (lane.bottom() - 6.0).max(top + 2.0);
+    let top_inset = if stacked { 2.0 } else { 18.0 };
+    let bottom_inset = if stacked { 2.0 } else { 6.0 };
+    let top = (lane.top() + top_inset).min(lane.bottom() - 2.0);
+    let bottom = (lane.bottom() - bottom_inset).max(top + 2.0);
     let full_rect = egui::Rect::from_min_max(
         egui::pos2(x_start, top),
         egui::pos2(x_start + width, bottom),
@@ -6555,28 +6559,29 @@ fn draw_audio_clip(
         ));
     }
 
-    // ---- Labels ----
-    let name = clip
-        .source
-        .path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("clip");
-    painter.text(
-        egui::pos2(visible_rect.left() + 4.0, visible_rect.top() + 2.0),
-        egui::Align2::LEFT_TOP,
-        name,
-        egui::FontId::proportional(9.0),
-        egui::Color32::from_gray(220),
-    );
-    if (clip.gain - 1.0).abs() > 0.001 {
+    if !stacked {
+        let name = clip
+            .source
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("clip");
         painter.text(
-            egui::pos2(visible_rect.left() + 4.0, visible_rect.top() + 12.0),
+            egui::pos2(visible_rect.left() + 4.0, visible_rect.top() + 2.0),
             egui::Align2::LEFT_TOP,
-            format!("{:+.1} dB", 20.0 * clip.gain.max(1e-6).log10()),
-            egui::FontId::proportional(8.0),
-            egui::Color32::from_gray(200),
+            name,
+            egui::FontId::proportional(9.0),
+            egui::Color32::from_gray(220),
         );
+        if (clip.gain - 1.0).abs() > 0.001 {
+            painter.text(
+                egui::pos2(visible_rect.left() + 4.0, visible_rect.top() + 12.0),
+                egui::Align2::LEFT_TOP,
+                format!("{:+.1} dB", 20.0 * clip.gain.max(1e-6).log10()),
+                egui::FontId::proportional(8.0),
+                egui::Color32::from_gray(200),
+            );
+        }
     }
 
     if clip.muted {
