@@ -16,7 +16,7 @@ Implement audio track with record arm, input monitoring, and BWF file writing. S
 - [✓] Input monitoring modes: Off / Auto (monitor when armed/playing) / On
 - [✓] Input selection: Hardware input channels, bus returns, "No Input"
 - [✓] Recording: Write to BWF (Broadcast WAV) with `bext` chunk
-- [x] Multi-take: New clip per take, layered or new lane (overlapping previous takes are muted; use the Clip Audio window's **Mute take** to audition)
+- [x] Multi-take: New clip per take, layered in vertical take lanes; only the overlapped part of older takes is muted, so a short re-take keeps the rest of the original recording audible
 - [x] Disk space warning: Calculate remaining time at current sample rate
 - [x] Recording level meter: Pre-fader, peak + RMS
 - [x] Punch in/out: Set punch points, auto-arm at punch in
@@ -94,7 +94,7 @@ Monitor Mix        Recording           Metering
 - [✓] Punch in/out records only between the punch points while the transport keeps rolling
 - [✓] BWF file readable in other DAWs (Reaper, Logic, Pro Tools)
 - [✓] `bext` chunk contains correct time_reference
-- [x] Multi-take creates separate clips (layered; previous overlapping takes are muted automatically and can be re-enabled from the Clip Audio window)
+- [x] Multi-take creates separate clips (stacked in vertical take lanes; a short re-take only mutes the covered section, and the uncovered remainder of older takes stays audible)
 - [x] Disk warning at < 10 min remaining (free space checked at record start and once per second during a take)
 - [ ] No xruns during recording at 48kHz/256
 
@@ -112,5 +112,5 @@ Monitor Mix        Recording           Metering
 - 2026-10-21: Input monitoring modes are enforced: track **Mon** cycles Off/Auto/On and the input is mixed into the output; both the input and output streams stay open while armed/On so monitoring is audible before rolling. The mode is undoable
 - 2026-10-21: Punch recording: **Punch** plus **P-In**/**P-Out** set the capture range; an armed take waits for punch-in and ends at punch-out while the transport keeps rolling. The ruler shows the punch region in red
 - 2026-10-23: Low-disk warning: estimated remaining recording time is computed from `statvfs` free space and the project format at take start and once per second while recording; a yellow banner appears below 10 minutes
-- 2026-10-23: Multi-take: previous takes overlapping a new recording are muted as soon as it starts and are dimmed with an **M**; recording is one undoable "Record take" step, and the Clip Audio window's **Mute take** checkbox auditions takes
+- 2026-10-23: Multi-take: overlapping takes are shown in vertical sub-lanes so they can be told apart; recording mutes only the covered section of older takes (split into pieces), so a short re-take keeps the rest of the original recording audible. Recording is one undoable "Record take" step
 - Next: Waveform rendering (1.2), runtime xrun verification

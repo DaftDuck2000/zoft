@@ -390,6 +390,64 @@ fn clip_span_samples(clip: &AudioClip, project_sr: f64) -> (u64, u64) {
     (start, start.saturating_add(length))
 }
 
+/// Assign sub-lanes to clips that overlap significantly, so stacked takes can
+/// be told apart. Returns `(index, count)` per clip; clips with no significant
+/// overlap are `(0, 1)`.
+fn take_lane_layout(project: &Project, clips: &[ClipId]) -> HashMap<ClipId, (usize, usize)> {
+    let project_sr = project.sample_rate.max(1) as f64;
+    let mut spans: Vec<(ClipId, u64, u64)> = clips
+        .iter()
+        .filter_map(|id| {
+            let clip = project.audio_clips.get(*id)?;
+            if clip.length == 0 {
+                return None;
+            }
+            let (start, end) = clip_span_samples(clip, project_sr);
+            Some((*id, start, end))
+        })
+        .collect();
+    spans.sort_by_key(|(_, start, end)| (*start, *end));
+
+    fn significant(a: (u64, u64), b: (u64, u64)) -> bool {
+        let start = a.0.max(b.0);
+        let end = a.1.min(b.1);
+        if end <= start {
+            return false;
+        }
+        let overlap = end - start;
+        let min_length = (a.1 - a.0).min(b.1 - b.0).max(1);
+        overlap.saturating_mul(4) >= min_length
+    }
+
+    fn flush(
+        cluster: &mut Vec<(ClipId, u64, u64)>,
+        layout: &mut HashMap<ClipId, (usize, usize)>,
+    ) {
+        if cluster.len() > 1 {
+            let count = cluster.len();
+            for (index, (id, _, _)) in cluster.iter().enumerate() {
+                layout.insert(*id, (index, count));
+            }
+        }
+        cluster.clear();
+    }
+
+    let mut layout = HashMap::new();
+    let mut cluster: Vec<(ClipId, u64, u64)> = Vec::new();
+    for span in spans {
+        if !cluster.is_empty()
+            && !cluster
+                .iter()
+                .any(|member| significant((member.1, member.2), (span.1, span.2)))
+        {
+            flush(&mut cluster, &mut layout);
+        }
+        cluster.push(span);
+    }
+    flush(&mut cluster, &mut layout);
+    layout
+}
+
 /// IDs of clips whose screen rectangles intersect the marquee.
 fn clips_in_marquee(clip_rects: &[(ClipId, egui::Rect)], marquee: egui::Rect) -> Vec<ClipId> {
     clip_rects
@@ -1452,7 +1510,7 @@ impl AppUI {
             let Some(clip) = self.project.audio_clips.get(clip_id) else {
                 continue;
             };
-            if clip.muted || clip.length == 0 {
+            if clip.muted || clip.locked || clip.length == 0 {
                 continue;
             }
             let (start, end) = clip_span_samples(clip, project_sr);
@@ -1487,6 +1545,73 @@ impl AppUI {
         self.push_undo(EditAction::Group { actions, label }, false);
         self.after_edit();
         self.refresh_playback_if_playing();
+    }
+
+    /// Set a clip's mute flag as an undoable Shape action.
+    fn set_clip_muted(&mut self, clip_id: ClipId, muted: bool) {
+        let Some(clip) = self.project.audio_clips.get(clip_id) else {
+            return;
+        };
+        let from = ClipShape::of(clip);
+        if from.muted == muted {
+            return;
+        }
+        let mut to = from;
+        to.muted = muted;
+        let action = EditAction::Shape {
+            clip_id,
+            from,
+            to,
+        };
+        self.apply_action(&action, true);
+        self.push_undo(action, false);
+    }
+
+    /// After a take, keep only the overlapping part of an old take muted:
+    /// split the old clip around the new take's span and leave the outer
+    /// pieces audible.
+    fn carve_old_take_for_span(&mut self, clip_id: ClipId, new_start: u64, new_end: u64) {
+        let project_sr = self.project.sample_rate.max(1) as f64;
+        let Some(clip) = self.project.audio_clips.get(clip_id) else {
+            return;
+        };
+        if clip.locked || clip.length == 0 {
+            return;
+        }
+        let (clip_start, clip_end) = clip_span_samples(clip, project_sr);
+        let overlap_start = clip_start.max(new_start);
+        let overlap_end = clip_end.min(new_end);
+        if overlap_start >= overlap_end {
+            return;
+        }
+
+        if overlap_start <= clip_start && overlap_end >= clip_end {
+            // The whole old take is covered; it stays muted.
+            self.set_clip_muted(clip_id, true);
+        } else if overlap_start <= clip_start {
+            // Covered at the start: unmute the tail after the take.
+            if let Some(right) = self.split_clip_at_sample(clip_id, overlap_end) {
+                self.set_clip_muted(right, false);
+            }
+            self.set_clip_muted(clip_id, true);
+        } else if overlap_end >= clip_end {
+            // Covered at the end: unmute the portion before the take.
+            if let Some(right) = self.split_clip_at_sample(clip_id, overlap_start) {
+                self.set_clip_muted(right, true);
+            }
+            self.set_clip_muted(clip_id, false);
+        } else {
+            // Covered in the middle: split out the covered section.
+            if let Some(middle) = self.split_clip_at_sample(clip_id, overlap_start) {
+                if let Some(tail) = self.split_clip_at_sample(middle, overlap_end) {
+                    self.set_clip_muted(tail, false);
+                }
+                self.set_clip_muted(middle, true);
+                self.set_clip_muted(clip_id, false);
+            } else {
+                self.set_clip_muted(clip_id, true);
+            }
+        }
     }
 
     fn apply_action(&mut self, action: &EditAction, forward: bool) {
@@ -2015,18 +2140,14 @@ impl AppUI {
 
     /// Split `clip_id` at `split_secs` into two clips referencing the same
     /// source file. The audio file itself is never modified.
-    fn split_clip_at(&mut self, clip_id: ClipId, split_secs: f64) {
-        let Some(track_id) = self.clip_track(clip_id) else {
-            return;
-        };
+    fn split_clip_at(&mut self, clip_id: ClipId, split_secs: f64) -> Option<ClipId> {
+        let track_id = self.clip_track(clip_id)?;
 
         let project_sr = self.project.sample_rate.max(1) as f64;
         let bpm = self.project.tempo_map.default_bpm();
-        let Some(clip) = self.project.audio_clips.get(clip_id) else {
-            return;
-        };
+        let clip = self.project.audio_clips.get(clip_id)?;
         if clip.locked {
-            return;
+            return None;
         }
         let src_sr = clip.source.sample_rate.max(1) as f64;
         let clip_start = clip.timeline_position.sample as f64 / project_sr;
@@ -2035,13 +2156,13 @@ impl AppUI {
         if split_secs <= clip_start + MIN_CLIP_SECS || split_secs >= clip_end - MIN_CLIP_SECS {
             self.error_message =
                 Some("The split point must be inside the clip.".to_string());
-            return;
+            return None;
         }
 
         let from_shape = ClipShape::of(clip);
         let offset_frames = ((split_secs - clip_start) * src_sr).round().max(1.0) as u64;
         if clip.length <= offset_frames + 1 {
-            return;
+            return None;
         }
 
         let mut right = clip.clone();
@@ -2084,6 +2205,13 @@ impl AppUI {
         self.push_undo(action, false);
         self.after_edit();
         self.refresh_playback_if_playing();
+        Some(new_id)
+    }
+
+    /// Split at a project-sample position.
+    fn split_clip_at_sample(&mut self, clip_id: ClipId, sample: u64) -> Option<ClipId> {
+        let secs = sample as f64 / self.project.sample_rate.max(1) as f64;
+        self.split_clip_at(clip_id, secs)
     }
 
     /// Delete the selected clip from its track. The clip data stays in the
@@ -5174,13 +5302,31 @@ impl eframe::App for AppUI {
                     );
                 }
 
+                let lane_layout = take_lane_layout(&self.project, clips);
                 for clip_id in clips {
                     if let Some(clip) = self.project.audio_clips.get(*clip_id) {
+                        let (index, count) =
+                            lane_layout.get(clip_id).copied().unwrap_or((0, 1));
+                        let lane = if count <= 1 {
+                            track_rect
+                        } else {
+                            let lane_height = track_rect.height() / count as f32;
+                            egui::Rect::from_min_max(
+                                egui::pos2(
+                                    track_rect.left(),
+                                    track_rect.top() + index as f32 * lane_height,
+                                ),
+                                egui::pos2(
+                                    track_rect.right(),
+                                    track_rect.top() + (index as f32 + 1.0) * lane_height,
+                                ),
+                            )
+                        };
                         let clip_rect = draw_audio_clip(
                             &painter,
                             &mut self.detail_cache,
                             clip,
-                            track_rect,
+                            lane,
                             *color,
                             view,
                             project_sr,
@@ -5188,6 +5334,23 @@ impl eframe::App for AppUI {
                         );
                         if clip_rect != egui::Rect::NOTHING {
                             clip_rects.push((*clip_id, clip_rect));
+                        }
+                    }
+                }
+
+                // Separators between take sub-lanes.
+                if let Some(count) = lane_layout.values().map(|(_, count)| *count).max() {
+                    if count > 1 {
+                        for i in 1..count {
+                            let y = track_rect.top()
+                                + track_rect.height() * i as f32 / count as f32;
+                            painter.line_segment(
+                                [
+                                    egui::pos2(track_rect.left(), y),
+                                    egui::pos2(track_rect.right(), y),
+                                ],
+                                egui::Stroke::new(1.0_f32, egui::Color32::from_gray(62)),
+                            );
                         }
                     }
                 }
@@ -6088,45 +6251,58 @@ impl AppUI {
             .ceil() as u64;
         let new_end = start_sample.saturating_add(new_length_out);
 
-        // Multi-take: previous takes that overlap the new one stay in the
-        // project but are muted, so the latest take is the audible layer.
+        // Multi-take: mute the covered part of previous takes, but keep the
+        // uncovered remainder audible so a short re-take doesn't silence the
+        // rest of an existing recording.
         let track_clips = self
             .project
             .tracks
             .get(&track_id)
             .map(|track| track.clips.clone())
             .unwrap_or_default();
-        let mut actions = std::mem::take(&mut self.pending_take_mutes);
+        let pending_ids: BTreeSet<ClipId> = self
+            .pending_take_mutes
+            .iter()
+            .filter_map(|action| match action {
+                EditAction::Shape { clip_id, .. } => Some(*clip_id),
+                _ => None,
+            })
+            .collect();
+        let mut carve_ids = Vec::new();
         for other_id in track_clips {
             let Some(other) = self.project.audio_clips.get(other_id) else {
                 continue;
             };
-            if other.muted || other.length == 0 {
+            if other.locked || other.length == 0 {
                 continue;
             }
             let (start, end) = clip_span_samples(other, project_sr);
-            if start < new_end && end > start_sample {
-                let from = ClipShape::of(other);
-                let mut to = from;
-                to.muted = true;
-                actions.push(EditAction::Shape {
-                    clip_id: other_id,
-                    from,
-                    to,
-                });
+            if start >= new_end || end <= start_sample {
+                continue;
             }
+            if !pending_ids.contains(&other_id) && other.muted {
+                // Respect mutes the user set themselves.
+                continue;
+            }
+            carve_ids.push(other_id);
+        }
+
+        self.begin_undo_group("Record take");
+        // Record the mutes already applied when the take started.
+        for action in std::mem::take(&mut self.pending_take_mutes) {
+            self.push_undo(action, false);
+        }
+        for other_id in carve_ids {
+            self.carve_old_take_for_span(other_id, start_sample, new_end);
         }
 
         let clip_id = self.project.audio_clips.insert(clip);
-        actions.push(EditAction::Attach {
+        let attach = EditAction::Attach {
             track: track_id,
             clip_id,
-        });
-
-        self.begin_undo_group("Record take");
-        for action in &actions {
-            self.apply_action(action, true);
-        }
+        };
+        self.apply_action(&attach, true);
+        self.push_undo(attach, false);
         self.end_undo_group();
 
         self.set_single_selection(clip_id);
@@ -6165,9 +6341,11 @@ fn draw_audio_clip(
     let x_end = view.x(lane, clip_end);
     let width = (x_end - x_start).max(1.0);
 
+    let top = (lane.top() + 18.0).min(lane.bottom() - 4.0);
+    let bottom = (lane.bottom() - 6.0).max(top + 2.0);
     let full_rect = egui::Rect::from_min_max(
-        egui::pos2(x_start, lane.top() + 18.0),
-        egui::pos2(x_start + width, lane.bottom() - 6.0),
+        egui::pos2(x_start, top),
+        egui::pos2(x_start + width, bottom),
     );
 
     // Cull clips that are completely outside the lane.
@@ -7046,10 +7224,10 @@ mod tests {
         knob_from_normalized, knob_to_normalized, load_wav_interleaved,
         load_wav_range_interleaved, loop_range_frames, measure_integrated_loudness,
         merge_continuous_edit, metronome_config, processed_file_stem, punch_waiting,
-        render_pitch_stretch, reverse_interleaved, saturate, tape_stretch_interleaved, tremolo,
-        wav_file_info, wav_peak, write_wav_f32, write_wav_range,
-        write_wav_range_with_envelope, ClipShape, ClipSourceState, EditAction, FilterKind,
-        MonitorMode, TrackShape,
+        render_pitch_stretch, reverse_interleaved, saturate, take_lane_layout,
+        tape_stretch_interleaved, tremolo, wav_file_info, wav_peak, write_wav_f32,
+        write_wav_range, write_wav_range_with_envelope, ClipShape, ClipSourceState, EditAction,
+        FilterKind, MonitorMode, TrackShape,
     };
     use daw_core::audio_pool::AudioFileRef;
     use daw_core::clip::{AudioClip, ClipId, Fade, FadeCurve, TimeStretchMode, TimelinePos};
@@ -7499,6 +7677,36 @@ mod tests {
             96_000,
         );
         assert_eq!(clip_span_samples(&clip, 48_000.0), (1_000, 49_000));
+    }
+
+    #[test]
+    fn take_lane_layout_stacks_significant_overlaps() {
+        let mut project = Project::new("takes");
+        let sample_rate = 48_000u32;
+        let source = AudioFileRef::new(
+            std::path::PathBuf::from("take.wav"),
+            48_000,
+            sample_rate,
+            2,
+            BitDepth::Float32,
+        );
+        let mut make = |project: &mut Project, sample: u64| {
+            let clip = AudioClip::new(
+                source.clone(),
+                TimelinePos::from_sample(sample, sample_rate as f64, 120.0),
+                4_800,
+            );
+            project.audio_clips.insert(clip)
+        };
+        let first = make(&mut project, 0);
+        let second = make(&mut project, 2_400); // 50% overlap
+        let third = make(&mut project, 100_000); // separate
+        let ids = vec![first, second, third];
+        let layout = take_lane_layout(&project, &ids);
+
+        assert_eq!(layout.get(&first), Some(&(0, 2)));
+        assert_eq!(layout.get(&second), Some(&(1, 2)));
+        assert_eq!(layout.get(&third).copied().unwrap_or((0, 1)), (0, 1));
     }
 
     #[test]
