@@ -373,6 +373,11 @@ impl ClipSourceState {
     }
 }
 
+/// Clamp a group move so the earliest clip cannot pass the timeline start.
+fn clamp_group_delta(min_start: u64, raw_delta: i64) -> i64 {
+    raw_delta.max(-(min_start as i64))
+}
+
 /// IDs of clips whose screen rectangles intersect the marquee.
 fn clips_in_marquee(clip_rects: &[(ClipId, egui::Rect)], marquee: egui::Rect) -> Vec<ClipId> {
     clip_rects
@@ -1698,18 +1703,73 @@ impl AppUI {
                     project_sr,
                     bpm,
                 );
-                if let Some(track_id) = self.track_at_y(pos.y, track_y_start, track_height) {
-                    if track_id != drag.last_track {
-                        self.detach_clip(drag.last_track, drag.clip_id);
-                        self.attach_clip(track_id, drag.clip_id);
-                        drag.last_track = track_id;
+                let from_index = self
+                    .project
+                    .track_order
+                    .iter()
+                    .position(|id| *id == drag.from_track);
+                let raw_target_index = self
+                    .track_at_y(pos.y, track_y_start, track_height)
+                    .and_then(|track_id| {
+                        self.project
+                            .track_order
+                            .iter()
+                            .position(|id| *id == track_id)
+                    });
+                if let (Some(from_index), Some(raw_target_index)) =
+                    (from_index, raw_target_index)
+                {
+                    // Clamp the vertical delta so the whole group stays inside
+                    // the track list instead of piling up at the edges.
+                    let last_index = self.project.track_order.len().saturating_sub(1) as i64;
+                    let mut min_index = from_index as i64;
+                    let mut max_index = from_index as i64;
+                    for member in &drag.members {
+                        if let Some(index) = self
+                            .project
+                            .track_order
+                            .iter()
+                            .position(|id| *id == member.from_track)
+                        {
+                            min_index = min_index.min(index as i64);
+                            max_index = max_index.max(index as i64);
+                        }
+                    }
+                    let raw_delta = raw_target_index as i64 - from_index as i64;
+                    let track_delta = raw_delta.clamp(-min_index, last_index - max_index);
+                    let target_index = (from_index as i64 + track_delta) as usize;
+                    if let Some(target_track) = self.project.track_order.get(target_index).copied()
+                    {
+                        if target_track != drag.last_track {
+                            self.detach_clip(drag.last_track, drag.clip_id);
+                            self.attach_clip(target_track, drag.clip_id);
+                            drag.last_track = target_track;
+                        }
                     }
                 }
 
                 // Move every other selected clip by the same time delta,
-                // preserving their relative track offsets.
-                let delta_samples = shape.position.sample as i64
+                // preserving their relative track offsets. Clamp the delta so
+                // that the earliest clip in the group stops at the timeline
+                // start instead of later clips compressing into it.
+                let min_start = drag
+                    .members
+                    .iter()
+                    .map(|member| member.from_shape.position.sample)
+                    .chain(std::iter::once(drag.from_shape.position.sample))
+                    .min()
+                    .unwrap_or(0);
+                let raw_delta = shape.position.sample as i64
                     - drag.from_shape.position.sample as i64;
+                let delta_samples = clamp_group_delta(min_start, raw_delta);
+                if delta_samples != raw_delta {
+                    shape.position = TimelinePos::from_sample(
+                        (drag.from_shape.position.sample as i64 + delta_samples).max(0)
+                            as u64,
+                        project_sr,
+                        bpm,
+                    );
+                }
                 let from_index = self
                     .project
                     .track_order
@@ -6824,7 +6884,7 @@ fn load_wav_interleaved(path: &Path) -> Result<(Vec<f32>, u16, u32)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        audible_track_gain, bit_crush, bpm_from_tap_intervals, clip_gain_at,
+        audible_track_gain, bit_crush, bpm_from_tap_intervals, clamp_group_delta, clip_gain_at,
         clips_in_marquee, contiguous_clip_span, filter_audio, knob_from_normalized,
         knob_to_normalized, load_wav_interleaved, load_wav_range_interleaved,
         loop_range_frames, measure_integrated_loudness, merge_continuous_edit,
@@ -7231,6 +7291,14 @@ mod tests {
         let (ids, start, end) = contiguous_clip_span(&spans, d).unwrap();
         assert_eq!(ids, vec![d]);
         assert_eq!((start, end), (40, 50));
+    }
+
+    #[test]
+    fn group_move_stops_at_the_timeline_start() {
+        assert_eq!(clamp_group_delta(100, -20), -20);
+        assert_eq!(clamp_group_delta(100, -150), -100);
+        assert_eq!(clamp_group_delta(100, 50), 50);
+        assert_eq!(clamp_group_delta(0, -10), 0);
     }
 
     #[test]
