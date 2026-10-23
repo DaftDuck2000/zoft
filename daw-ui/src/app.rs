@@ -178,6 +178,7 @@ struct ClipShape {
     fade_in: Option<Fade>,
     fade_out: Option<Fade>,
     color: Option<Color>,
+    muted: bool,
 }
 
 impl ClipShape {
@@ -190,6 +191,7 @@ impl ClipShape {
             fade_in: clip.fade_in,
             fade_out: clip.fade_out,
             color: clip.color,
+            muted: clip.muted,
         }
     }
 
@@ -201,6 +203,7 @@ impl ClipShape {
         clip.fade_in = self.fade_in;
         clip.fade_out = self.fade_out;
         clip.color = self.color;
+        clip.muted = self.muted;
     }
 }
 
@@ -378,6 +381,15 @@ fn clamp_group_delta(min_start: u64, raw_delta: i64) -> i64 {
     raw_delta.max(-(min_start as i64))
 }
 
+/// Project-sample span `(start, end)` of a clip's audible range.
+fn clip_span_samples(clip: &AudioClip, project_sr: f64) -> (u64, u64) {
+    let start = clip.timeline_position.sample;
+    let length = (clip.length as f64 * project_sr.max(1.0)
+        / clip.source.sample_rate.max(1) as f64)
+        .ceil() as u64;
+    (start, start.saturating_add(length))
+}
+
 /// IDs of clips whose screen rectangles intersect the marquee.
 fn clips_in_marquee(clip_rects: &[(ClipId, egui::Rect)], marquee: egui::Rect) -> Vec<ClipId> {
     clip_rects
@@ -482,7 +494,9 @@ impl EditAction {
         match self {
             EditAction::Move { .. } => "Move clip".to_string(),
             EditAction::Shape { from, to, .. } => {
-                if from.gain != to.gain {
+                if from.muted != to.muted {
+                    if to.muted { "Mute take" } else { "Unmute take" }.to_string()
+                } else if from.gain != to.gain {
                     "Clip gain".to_string()
                 } else if from.fade_in != to.fade_in {
                     "Fade in".to_string()
@@ -2925,6 +2939,12 @@ impl AppUI {
             after.color = None;
         }
 
+        ui.separator();
+        let mut muted = before.muted;
+        if ui.checkbox(&mut muted, "Mute take").changed() {
+            after.muted = muted;
+        }
+
         if after != before {
             if self.selected_clips.len() > 1 {
                 // Multi-selection: apply the edited fields to every clip and
@@ -2967,6 +2987,9 @@ impl AppUI {
                     }
                     if after.color != before.color {
                         clip.color = after.color;
+                    }
+                    if after.muted != before.muted {
+                        clip.muted = after.muted;
                     }
                 }
                 self.after_edit();
@@ -5990,12 +6013,56 @@ impl AppUI {
             duration_samples,
         );
 
-        let clip_id = self.project.audio_clips.insert(clip);
-        if let Some(track) = self.project.tracks.get_mut(&track_id) {
-            track.add_clip(clip_id);
+        let project_sr = self.project.sample_rate.max(1) as f64;
+        let new_length_out = (duration_samples as f64 * project_sr
+            / spec.sample_rate.max(1) as f64)
+            .ceil() as u64;
+        let new_end = start_sample.saturating_add(new_length_out);
+
+        // Multi-take: previous takes that overlap the new one stay in the
+        // project but are muted, so the latest take is the audible layer.
+        let track_clips = self
+            .project
+            .tracks
+            .get(&track_id)
+            .map(|track| track.clips.clone())
+            .unwrap_or_default();
+        let mut actions = Vec::new();
+        for other_id in track_clips {
+            let Some(other) = self.project.audio_clips.get(other_id) else {
+                continue;
+            };
+            if other.muted || other.length == 0 {
+                continue;
+            }
+            let (start, end) = clip_span_samples(other, project_sr);
+            if start < new_end && end > start_sample {
+                let from = ClipShape::of(other);
+                let mut to = from;
+                to.muted = true;
+                actions.push(EditAction::Shape {
+                    clip_id: other_id,
+                    from,
+                    to,
+                });
+            }
         }
 
+        let clip_id = self.project.audio_clips.insert(clip);
+        actions.push(EditAction::Attach {
+            track: track_id,
+            clip_id,
+        });
+
+        self.begin_undo_group("Record take");
+        for action in &actions {
+            self.apply_action(action, true);
+        }
+        self.end_undo_group();
+
         self.set_single_selection(clip_id);
+        self.after_edit();
+        self.refresh_playback_if_playing();
 
         self.spawn_overview(clip_id, file_path);
     }
@@ -6885,13 +6952,14 @@ fn load_wav_interleaved(path: &Path) -> Result<(Vec<f32>, u16, u32)> {
 mod tests {
     use super::{
         audible_track_gain, bit_crush, bpm_from_tap_intervals, clamp_group_delta, clip_gain_at,
-        clips_in_marquee, contiguous_clip_span, filter_audio, knob_from_normalized,
-        knob_to_normalized, load_wav_interleaved, load_wav_range_interleaved,
-        loop_range_frames, measure_integrated_loudness, merge_continuous_edit,
-        metronome_config, processed_file_stem, punch_waiting, render_pitch_stretch,
-        reverse_interleaved, saturate, tape_stretch_interleaved, tremolo, wav_file_info,
-        wav_peak, write_wav_f32, write_wav_range, write_wav_range_with_envelope, ClipShape,
-        ClipSourceState, EditAction, FilterKind, MonitorMode, TrackShape,
+        clip_span_samples, clips_in_marquee, contiguous_clip_span, filter_audio,
+        knob_from_normalized, knob_to_normalized, load_wav_interleaved,
+        load_wav_range_interleaved, loop_range_frames, measure_integrated_loudness,
+        merge_continuous_edit, metronome_config, processed_file_stem, punch_waiting,
+        render_pitch_stretch, reverse_interleaved, saturate, tape_stretch_interleaved, tremolo,
+        wav_file_info, wav_peak, write_wav_f32, write_wav_range,
+        write_wav_range_with_envelope, ClipShape, ClipSourceState, EditAction, FilterKind,
+        MonitorMode, TrackShape,
     };
     use daw_core::audio_pool::AudioFileRef;
     use daw_core::clip::{AudioClip, ClipId, Fade, FadeCurve, TimeStretchMode, TimelinePos};
@@ -6908,6 +6976,7 @@ mod tests {
             fade_in: None,
             fade_out: None,
             color: None,
+            muted: false,
         }
     }
 
@@ -6945,6 +7014,15 @@ mod tests {
             label: "Split clip".to_string(),
         };
         assert_eq!(group.description(), "Split clip");
+
+        let mut muted_to = shape(1.0);
+        muted_to.muted = true;
+        let muted = EditAction::Shape {
+            clip_id,
+            from: shape(1.0),
+            to: muted_to,
+        };
+        assert_eq!(muted.description(), "Mute take");
 
         let moved = EditAction::Move {
             clip_id,
@@ -7299,6 +7377,38 @@ mod tests {
         assert_eq!(clamp_group_delta(100, -150), -100);
         assert_eq!(clamp_group_delta(100, 50), 50);
         assert_eq!(clamp_group_delta(0, -10), 0);
+    }
+
+    #[test]
+    fn clip_span_converts_to_project_frames() {
+        let source = AudioFileRef::new(
+            std::path::PathBuf::from("a.wav"),
+            48_000,
+            48_000,
+            2,
+            BitDepth::Float32,
+        );
+        let clip = AudioClip::new(
+            source,
+            TimelinePos::from_sample(1_000, 48_000.0, 120.0),
+            24_000,
+        );
+        assert_eq!(clip_span_samples(&clip, 48_000.0), (1_000, 25_000));
+
+        // A 96 kHz source is half as long in 48 kHz project frames.
+        let source = AudioFileRef::new(
+            std::path::PathBuf::from("b.wav"),
+            96_000,
+            96_000,
+            2,
+            BitDepth::Float32,
+        );
+        let clip = AudioClip::new(
+            source,
+            TimelinePos::from_sample(1_000, 48_000.0, 120.0),
+            96_000,
+        );
+        assert_eq!(clip_span_samples(&clip, 48_000.0), (1_000, 49_000));
     }
 
     #[test]
