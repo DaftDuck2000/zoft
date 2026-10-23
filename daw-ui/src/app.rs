@@ -765,9 +765,50 @@ impl ClipAudioWindow {
 }
 
 /// File-menu actions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Template {
+    Empty,
+    Band,
+    Electronic,
+    Scoring,
+}
+
+impl Template {
+    fn label(self) -> &'static str {
+        match self {
+            Template::Empty => "Empty",
+            Template::Band => "Band",
+            Template::Electronic => "Electronic",
+            Template::Scoring => "Scoring",
+        }
+    }
+}
+
+/// Build a fresh project with a small set of named tracks for the chosen
+/// starter template.
+fn project_from_template(template: Template) -> Project {
+    let mut project = Project::new("Untitled");
+    project.tracks.clear();
+    project.track_order.clear();
+
+    let names: &[&str] = match template {
+        Template::Empty => &["Audio 1"],
+        Template::Band => &["Drums", "Bass", "Guitar", "Keys", "Vocals"],
+        Template::Electronic => &["Kick", "Bass", "Synth", "FX"],
+        Template::Scoring => &["Strings", "Brass", "Woodwinds", "Percussion"],
+    };
+    for (index, name) in names.iter().enumerate() {
+        let mut track = daw_core::track::Track::new_audio(*name);
+        track.color = Color::track_color(index);
+        project.add_track(track);
+    }
+    project
+}
+
 #[derive(Debug, Clone)]
 enum FileAction {
     New,
+    NewTemplate(Template),
     Open,
     OpenPath(PathBuf),
     Save,
@@ -4502,6 +4543,19 @@ impl eframe::App for AppUI {
                         file_action = Some(FileAction::New);
                         ui.close_menu();
                     }
+                    ui.menu_button("New from Template", |ui| {
+                        for template in [
+                            Template::Empty,
+                            Template::Band,
+                            Template::Electronic,
+                            Template::Scoring,
+                        ] {
+                            if ui.button(template.label()).clicked() {
+                                file_action = Some(FileAction::NewTemplate(template));
+                                ui.close_menu();
+                            }
+                        }
+                    });
                     if ui.button("Open…").clicked() {
                         file_action = Some(FileAction::Open);
                         ui.close_menu();
@@ -6165,6 +6219,7 @@ impl AppUI {
     fn handle_file_action(&mut self, action: FileAction) {
         match action {
             FileAction::New => self.new_project(),
+            FileAction::NewTemplate(template) => self.new_project_from_template(template),
             FileAction::Open => {
                 if let Some(path) = rfd::FileDialog::new()
                     .add_filter("Zoft project", &["zoft"])
@@ -6341,6 +6396,11 @@ impl AppUI {
     fn new_project(&mut self) {
         self.pause_transport();
         self.adopt_project(Project::new("Untitled"));
+    }
+
+    fn new_project_from_template(&mut self, template: Template) {
+        self.pause_transport();
+        self.adopt_project(project_from_template(template));
     }
 
     /// Replace the project and reset all UI state that referred to the old one.
@@ -7460,8 +7520,8 @@ mod tests {
         merge_continuous_edit, metronome_config, processed_file_stem, punch_waiting,
         render_pitch_stretch, reverse_interleaved, saturate, take_lane_layout,
         tape_stretch_interleaved, tremolo, wav_file_info, wav_peak, write_wav_f32,
-        write_wav_range, write_wav_range_with_envelope, ClipShape, ClipSourceState, EditAction,
-        FilterKind, MonitorMode, TrackShape,
+        write_wav_range, write_wav_range_with_envelope, project_from_template, ClipShape,
+        ClipSourceState, EditAction, FilterKind, MonitorMode, Template, TrackShape,
     };
     use daw_core::audio_pool::AudioFileRef;
     use daw_core::clip::{AudioClip, ClipId, Fade, FadeCurve, TimeStretchMode, TimelinePos};
@@ -7871,6 +7931,23 @@ mod tests {
         let (ids, start, end) = contiguous_clip_span(&spans, d).unwrap();
         assert_eq!(ids, vec![d]);
         assert_eq!((start, end), (40, 50));
+    }
+
+    #[test]
+    fn templates_create_expected_tracks() {
+        let band = project_from_template(Template::Band);
+        let names: Vec<&str> = band
+            .track_order
+            .iter()
+            .filter_map(|id| band.tracks.get(id).map(|track| track.name.as_str()))
+            .collect();
+        assert_eq!(names, vec!["Drums", "Bass", "Guitar", "Keys", "Vocals"]);
+
+        let scoring = project_from_template(Template::Scoring);
+        assert_eq!(scoring.track_order.len(), 4);
+
+        let empty = project_from_template(Template::Empty);
+        assert_eq!(empty.track_order.len(), 1);
     }
 
     #[test]

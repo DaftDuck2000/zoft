@@ -19,7 +19,7 @@ Implement project serialization: binary `.zoft` format with versioning, migratio
 - [✓] Save/Open UI wired into the app (File menu and Ctrl+S / Ctrl+Shift+S / Ctrl+O)
 - [✓] Recent projects menu (last 10, stored in the user data directory)
 - [✓] Auto-save: every 2 minutes while unsaved changes exist; a newer sibling `.autosave.zoft` is offered when opening the project
-- [ ] Project templates: Empty, Band, Electronic, Scoring
+- [x] Project templates: Empty (1 audio track), Band (Drums/Bass/Guitar/Keys/Vocals), Electronic (Kick/Bass/Synth/FX), Scoring (Strings/Brass/Woodwinds/Percussion); File → New from Template
 
 ## Technical Details
 
@@ -99,3 +99,4 @@ struct AudioFileRef {
 - 2026-10-23: Fixed the `.zoft` loader (it previously over-read fixed-size header/section-table blocks and failed); added a round-trip test and wired File → New/Open/Save/Save As plus Ctrl+S / Ctrl+Shift+S / Ctrl+O
 - 2026-10-23: Added a Recent Projects list and a 2-minute autosave; opening a project offers a newer sibling autosave for recovery
 - 2026-10-23: The project display name now follows the file name (without `.zoft`) on Save/Save As/Open
+- 2026-10-23: Added File → New from Template with Empty, Band, Electronic and Scoring track setups

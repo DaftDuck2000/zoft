@@ -28,7 +28,7 @@
 | 0.2 | Audio Engine Skeleton | `[~]` | 2w | | CPAL output/input + mixer; graph/scheduler placeholders |
 | 0.3 | Basic Transport | `[✓]` | 1w | 1w | Play/Stop, tempo, time sig, loop, metronome, tap |
 | 0.4 | Minimal UI Shell | `[~]` | 2w | | egui, track list, transport; no markers/theme/persistence |
-| 0.5 | Project Save/Load | `[~]` | 1w | | Binary .zoft + File menu + recent + autosave; templates left |
+| 0.5 | Project Save/Load | `[~]` | 1w | | Binary .zoft + File menu + recent + autosave + templates; benchmarks left |
 
 ---
 
