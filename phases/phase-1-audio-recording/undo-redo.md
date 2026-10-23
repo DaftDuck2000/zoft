@@ -44,13 +44,15 @@ Comprehensive undo/redo system using Command pattern with history compression, s
 The arrange view uses `History<EditAction>` directly. `EditAction` describes
 clip moves, shape edits (trim/fade/gain/color), source replacements, track
 attach/detach, track mute/solo/record-arm/volume changes, time-signature and
-tempo changes and grouped edits. Every action produces a label for the History
-panel, for example:
+tempo changes and grouped edits. Multi-clip moves, deletes, duplicates, pastes
+and effect applications become labelled groups and undo as one step. Every
+action produces a label for the History panel, for example:
 
-- Move clip
+- Move clip / Move clips
 - Clip gain / Fade in / Fade out / Clip color / Trim clip
 - Process clip / Edit clip source
-- Add clip / Delete clip
+- Add clip / Delete clip / Delete N clips / Duplicate clips / Paste clips
+- Apply Normalize (N clips)
 - Mute track / Solo track / Arm track / Track volume
 - Time signature 3/4 / Tempo 128.0 BPM
 - Split clip / Consolidate clips

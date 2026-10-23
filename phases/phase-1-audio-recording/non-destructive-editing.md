@@ -17,6 +17,7 @@ Implement non-destructive audio clip editing: split, trim, move, copy, delete, f
 - [x] Move clips: drag between tracks, snap to grid
 - [x] Copy/paste/duplicate clips (Ctrl+C / Ctrl+V / Ctrl+X / Ctrl+D)
 - [x] Delete clips (removed from track but kept in the project pool; undo restores)
+- [x] Multi-selection: Ctrl/Cmd+click toggles clips, dragging empty track space rubber-bands a selection (Ctrl adds); move/delete/duplicate/copy/paste and Clip Audio effects apply to the whole selection
 - [x] Fade in/out: drag fade handles, curve types (linear, exp, log, S, equal power)
 - [x] Crossfade: Overlap two clips → automatic equal-power crossfade (mixer + visual overlay)
 - [x] Snap modes: Grid (bar/beat/1/8/1/16), Off (hold Alt to bypass)
@@ -111,6 +112,7 @@ fn snap_position(pos: TimelinePos, grid: SnapGrid, relative: bool) -> TimelinePo
 - 2026-10-21: Copy/paste/duplicate (Ctrl+C/V/D), delete (Delete) with recoverable clip data
 - 2026-10-21: Fade handles on clip corners + inspector curve/length editors (5 curve types)
 - 2026-10-21: Clip gain, fades and per-clip colour moved into the **Clip** section of the Clip Audio window
+- 2026-10-23: Multi-selection (Ctrl/Cmd+click, rubber-band marquee) with group move/delete/duplicate/copy/paste and grouped undo steps
 - Remaining (post-phase polish): editable crossfade boundary/curve dragging; crossfades are currently automatic only
 - 2026-10-21: Undo/redo (Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y) with merged continuous property edits
 - 2026-10-21: Playback mixer slices clips by source_offset/length so edits are audible

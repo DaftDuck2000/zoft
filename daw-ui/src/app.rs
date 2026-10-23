@@ -12,7 +12,7 @@ use daw_core::WaveformOverview;
 use daw_engine::playback::{MetronomeConfig, PlayableClip, PlaybackMixer};
 use daw_engine::AudioEngine;
 use eframe::egui;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
@@ -373,6 +373,15 @@ impl ClipSourceState {
     }
 }
 
+/// IDs of clips whose screen rectangles intersect the marquee.
+fn clips_in_marquee(clip_rects: &[(ClipId, egui::Rect)], marquee: egui::Rect) -> Vec<ClipId> {
+    clip_rects
+        .iter()
+        .filter(|(_, rect)| rect.intersects(marquee))
+        .map(|(id, _)| *id)
+        .collect()
+}
+
 /// Clips on one track that touch or overlap the selected clip. Consolidation
 /// renders this whole chain into one file.
 #[derive(Debug, Clone)]
@@ -635,6 +644,8 @@ impl FilterKind {
 #[derive(Debug, Clone)]
 struct ClipAudioWindow {
     clip_id: ClipId,
+    /// Every clip the next effect Apply should process (primary first).
+    clip_ids: Vec<ClipId>,
     /// Selected effect; `None` shows the clip's gain, fades and colour.
     selected: Option<EffectKind>,
     pitch: f32,
@@ -653,9 +664,11 @@ struct ClipAudioWindow {
 }
 
 impl ClipAudioWindow {
-    fn new(clip_id: ClipId) -> Self {
+    fn new(clip_ids: Vec<ClipId>) -> Self {
+        let clip_id = clip_ids.first().copied().unwrap_or_default();
         Self {
             clip_id,
+            clip_ids,
             selected: None,
             pitch: 0.0,
             stretch: 1.0,
@@ -731,6 +744,13 @@ fn prepare_playable_clips(specs: Vec<PlaybackClipSpec>) -> Vec<PlayableClip> {
     playable
 }
 
+struct ClipDragMember {
+    clip_id: ClipId,
+    from_shape: ClipShape,
+    from_track: TrackId,
+    last_track: TrackId,
+}
+
 /// In-progress clip drag (move, trim or fade handle).
 struct ClipDrag {
     clip_id: ClipId,
@@ -739,6 +759,8 @@ struct ClipDrag {
     from_track: TrackId,
     last_track: TrackId,
     grab_offset_secs: f64,
+    /// Other selected clips moved together when `mode` is `Move`.
+    members: Vec<ClipDragMember>,
 }
 
 /// Decoded mono windows used for sample-accurate rendering at high zoom.
@@ -821,6 +843,8 @@ struct AppUI {
     needs_fit: bool,
     last_timeline_width: f32,
     selected_clip: Option<ClipId>,
+    /// All selected clips. `selected_clip` is the primary/last-clicked one.
+    selected_clips: BTreeSet<ClipId>,
 
     // Non-destructive editing
     snap_mode: SnapMode,
@@ -832,12 +856,21 @@ struct AppUI {
     /// Alt bypasses snapping while held.
     snap_suspended: bool,
     drag: Option<ClipDrag>,
-    clipboard: Option<AudioClip>,
+    /// Rubber-band selection while dragging empty track space.
+    marquee: Option<(egui::Pos2, egui::Pos2)>,
+    marquee_additive: bool,
+    clipboard: Vec<AudioClip>,
     /// Floating audio-effects editor for the right-clicked clip.
     audio_window: Option<ClipAudioWindow>,
     /// Where a trashed clip was last attached, so Restore can put it back.
     deleted_from: HashMap<ClipId, TrackId>,
     history: History<EditAction>,
+    /// While set, `push_undo` collects actions into one labelled history
+    /// entry instead of pushing each one separately.
+    undo_group: Option<(String, Vec<EditAction>)>,
+    /// Pending multi-clip gain/fade/colour edit: label + per-clip shape before
+    /// the gesture. Committed on pointer release as one undo step.
+    pending_shape_edit: Option<(String, Vec<(ClipId, ClipShape)>)>,
     /// True while consecutive edits (e.g. a slider drag) belong to one gesture
     /// and should share a single undo entry.
     merge_chain: bool,
@@ -908,15 +941,20 @@ impl AppUI {
             needs_fit: true,
             last_timeline_width: 1000.0,
             selected_clip: None,
+            selected_clips: BTreeSet::new(),
             snap_mode: SnapMode::Beat,
             snap_relative: false,
             ruler_mode: RulerMode::BarsBeats,
             snap_suspended: false,
             drag: None,
-            clipboard: None,
+            marquee: None,
+            marquee_additive: false,
+            clipboard: Vec::new(),
             audio_window: None,
             deleted_from: HashMap::new(),
             history: History::new(1000),
+            undo_group: None,
+            pending_shape_edit: None,
             merge_chain: false,
             history_open: false,
             needs_audio_refresh: false,
@@ -1281,7 +1319,44 @@ impl AppUI {
         }
     }
 
+    fn clear_selection(&mut self) {
+        self.selected_clip = None;
+        self.selected_clips.clear();
+    }
+
+    fn set_single_selection(&mut self, clip_id: ClipId) {
+        self.selected_clips.clear();
+        self.selected_clips.insert(clip_id);
+        self.selected_clip = Some(clip_id);
+    }
+
+    fn add_to_selection(&mut self, clip_id: ClipId) {
+        self.selected_clips.insert(clip_id);
+        self.selected_clip = Some(clip_id);
+    }
+
+    /// Ctrl/Cmd-click: add the clip, or remove it if it was already selected.
+    fn toggle_selection(&mut self, clip_id: ClipId) {
+        if self.selected_clips.remove(&clip_id) {
+            if self.selected_clip == Some(clip_id) {
+                self.selected_clip = self.selected_clips.iter().next().copied();
+            }
+        } else {
+            self.selected_clips.insert(clip_id);
+            self.selected_clip = Some(clip_id);
+        }
+    }
+
+    fn selection_ids(&self) -> Vec<ClipId> {
+        self.selected_clips.iter().copied().collect()
+    }
+
     fn push_undo(&mut self, action: EditAction, merge: bool) {
+        if let Some((_, actions)) = &mut self.undo_group {
+            actions.push(action);
+            return;
+        }
+
         // Merge continuous edits of the same clip (e.g. dragging a gain slider)
         // into a single history entry while the pointer stays down.
         if merge && self.merge_chain && merge_continuous_edit(&mut self.history, &action) {
@@ -1291,6 +1366,54 @@ impl AppUI {
         let description = action.description();
         self.history.push(action, description);
         self.merge_chain = merge;
+    }
+
+    /// Start collecting undo entries into one labelled history step.
+    fn begin_undo_group(&mut self, label: impl Into<String>) {
+        self.undo_group = Some((label.into(), Vec::new()));
+    }
+
+    /// Finish the active undo group. A single action is pushed directly; several
+    /// are wrapped in a labelled `Group`.
+    fn end_undo_group(&mut self) {
+        let Some((label, actions)) = self.undo_group.take() else {
+            return;
+        };
+        match actions.len() {
+            0 => {}
+            1 => self.push_undo(actions.into_iter().next().unwrap(), false),
+            _ => self.push_undo(EditAction::Group { actions, label }, false),
+        }
+    }
+
+    /// Commit a multi-clip gain/fade/colour gesture as one history entry.
+    fn commit_pending_shape_edit(&mut self) {
+        let Some((label, before)) = self.pending_shape_edit.take() else {
+            return;
+        };
+        let mut actions = Vec::new();
+        for (clip_id, from) in before {
+            let Some(clip) = self.project.audio_clips.get(clip_id) else {
+                continue;
+            };
+            let to = ClipShape::of(clip);
+            if to != from {
+                actions.push(EditAction::Shape {
+                    clip_id,
+                    from,
+                    to,
+                });
+            }
+        }
+        if actions.is_empty() {
+            return;
+        }
+        if actions.len() == 1 {
+            self.push_undo(actions.pop().unwrap(), false);
+        } else {
+            self.push_undo(EditAction::Group { actions, label }, false);
+        }
+        self.after_edit();
     }
 
     fn apply_action(&mut self, action: &EditAction, forward: bool) {
@@ -1489,15 +1612,47 @@ impl AppUI {
         }
         let project_sr = self.project.sample_rate.max(1) as f64;
         let clip_start = clip.timeline_position.sample as f64 / project_sr;
+        let from_shape = ClipShape::of(clip);
 
-        self.selected_clip = Some(clip_id);
+        if self.selected_clips.contains(&clip_id) {
+            self.selected_clip = Some(clip_id);
+        } else {
+            self.set_single_selection(clip_id);
+        }
+
+        // Body drags move the whole selection; edge/fade drags stay on one clip.
+        let mut members = Vec::new();
+        if mode == DragMode::Move {
+            for other in self.selected_clips.iter().copied() {
+                if other == clip_id {
+                    continue;
+                }
+                let Some(other_clip) = self.project.audio_clips.get(other) else {
+                    continue;
+                };
+                if other_clip.locked {
+                    continue;
+                }
+                let Some(other_track) = self.clip_track(other) else {
+                    continue;
+                };
+                members.push(ClipDragMember {
+                    clip_id: other,
+                    from_shape: ClipShape::of(other_clip),
+                    from_track: other_track,
+                    last_track: other_track,
+                });
+            }
+        }
+
         self.drag = Some(ClipDrag {
             clip_id,
             mode,
-            from_shape: ClipShape::of(clip),
+            from_shape,
             from_track: track_id,
             last_track: track_id,
             grab_offset_secs: (view.t(rect, pos.x) - clip_start).max(0.0),
+            members,
         });
     }
 
@@ -1548,6 +1703,54 @@ impl AppUI {
                         self.detach_clip(drag.last_track, drag.clip_id);
                         self.attach_clip(track_id, drag.clip_id);
                         drag.last_track = track_id;
+                    }
+                }
+
+                // Move every other selected clip by the same time delta,
+                // preserving their relative track offsets.
+                let delta_samples = shape.position.sample as i64
+                    - drag.from_shape.position.sample as i64;
+                let from_index = self
+                    .project
+                    .track_order
+                    .iter()
+                    .position(|id| *id == drag.from_track);
+                let to_index = self
+                    .project
+                    .track_order
+                    .iter()
+                    .position(|id| *id == drag.last_track);
+                let track_delta = match (from_index, to_index) {
+                    (Some(from), Some(to)) => to as i64 - from as i64,
+                    _ => 0,
+                };
+
+                for member in drag.members.iter_mut() {
+                    let new_sample =
+                        (member.from_shape.position.sample as i64 + delta_samples).max(0) as u64;
+                    if let Some(clip) = self.project.audio_clips.get_mut(member.clip_id) {
+                        clip.timeline_position =
+                            TimelinePos::from_sample(new_sample, project_sr, bpm);
+                    }
+                    if let Some(member_from_index) = self
+                        .project
+                        .track_order
+                        .iter()
+                        .position(|id| *id == member.from_track)
+                    {
+                        let last_index = self.project.track_order.len().saturating_sub(1) as i64;
+                        let target_index =
+                            (member_from_index as i64 + track_delta).clamp(0, last_index)
+                                as usize;
+                        if let Some(target_track) =
+                            self.project.track_order.get(target_index).copied()
+                        {
+                            if target_track != member.last_track {
+                                self.detach_clip(member.last_track, member.clip_id);
+                                self.attach_clip(target_track, member.clip_id);
+                                member.last_track = target_track;
+                            }
+                        }
                     }
                 }
             }
@@ -1613,19 +1816,46 @@ impl AppUI {
 
         match drag.mode {
             DragMode::Move => {
+                let mut actions = Vec::new();
                 if drag.last_track != drag.from_track
                     || current.position != drag.from_shape.position
                 {
-                    self.push_undo(
-                        EditAction::Move {
-                            clip_id: drag.clip_id,
-                            from_track: drag.from_track,
-                            from_pos: drag.from_shape.position,
-                            to_track: drag.last_track,
-                            to_pos: current.position,
-                        },
-                        false,
-                    );
+                    actions.push(EditAction::Move {
+                        clip_id: drag.clip_id,
+                        from_track: drag.from_track,
+                        from_pos: drag.from_shape.position,
+                        to_track: drag.last_track,
+                        to_pos: current.position,
+                    });
+                }
+                for member in &drag.members {
+                    let Some(clip) = self.project.audio_clips.get(member.clip_id) else {
+                        continue;
+                    };
+                    if member.last_track != member.from_track
+                        || clip.timeline_position != member.from_shape.position
+                    {
+                        actions.push(EditAction::Move {
+                            clip_id: member.clip_id,
+                            from_track: member.from_track,
+                            from_pos: member.from_shape.position,
+                            to_track: member.last_track,
+                            to_pos: clip.timeline_position,
+                        });
+                    }
+                }
+                if !actions.is_empty() {
+                    if actions.len() == 1 {
+                        self.push_undo(actions.pop().unwrap(), false);
+                    } else {
+                        self.push_undo(
+                            EditAction::Group {
+                                actions,
+                                label: "Move clips".to_string(),
+                            },
+                            false,
+                        );
+                    }
                     self.after_edit();
                     self.refresh_playback_if_playing();
                 }
@@ -1731,25 +1961,41 @@ impl AppUI {
     /// Delete the selected clip from its track. The clip data stays in the
     /// project pool, so the delete is recoverable (trash + undo).
     fn delete_selected_clip(&mut self) {
-        let Some(clip_id) = self.selected_clip else {
-            return;
-        };
-        let Some(track_id) = self.clip_track(clip_id) else {
-            return;
-        };
-        if self
-            .project
-            .audio_clips
-            .get(clip_id)
-            .map(|clip| clip.locked)
-            .unwrap_or(false)
-        {
+        let ids = self.selection_ids();
+        if ids.is_empty() {
             return;
         }
-        let action = EditAction::Detach { track: track_id, clip_id };
+        let mut actions = Vec::new();
+        for clip_id in ids {
+            let Some(track_id) = self.clip_track(clip_id) else {
+                continue;
+            };
+            if self
+                .project
+                .audio_clips
+                .get(clip_id)
+                .map(|clip| clip.locked)
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            actions.push(EditAction::Detach {
+                track: track_id,
+                clip_id,
+            });
+        }
+        if actions.is_empty() {
+            return;
+        }
+        let label = if actions.len() == 1 {
+            "Delete clip".to_string()
+        } else {
+            format!("Delete {} clips", actions.len())
+        };
+        let action = EditAction::Group { actions, label };
         self.apply_action(&action, true);
         self.push_undo(action, false);
-        self.selected_clip = None;
+        self.clear_selection();
         self.after_edit();
         self.refresh_playback_if_playing();
     }
@@ -1770,7 +2016,7 @@ impl AppUI {
         let action = EditAction::Attach { track: track_id, clip_id };
         self.apply_action(&action, true);
         self.push_undo(action, false);
-        self.selected_clip = Some(clip_id);
+        self.set_single_selection(clip_id);
         self.after_edit();
         self.refresh_playback_if_playing();
     }
@@ -2332,7 +2578,7 @@ impl AppUI {
         };
         self.apply_action(&action, true);
         self.push_undo(action, false);
-        self.selected_clip = Some(new_id);
+        self.set_single_selection(new_id);
         self.error_message = None;
         self.after_edit();
         self.refresh_playback_if_playing();
@@ -2422,18 +2668,21 @@ impl AppUI {
     }
 
     fn copy_selected_clip(&mut self) {
-        if let Some(clip) = self
-            .selected_clip
-            .and_then(|id| self.project.audio_clips.get(id))
-        {
-            self.clipboard = Some(clip.clone());
-        }
+        let mut clips: Vec<AudioClip> = self
+            .selection_ids()
+            .into_iter()
+            .filter_map(|id| self.project.audio_clips.get(id).cloned())
+            .filter(|clip| !clip.locked)
+            .collect();
+        // Keep a stable left-to-right order so paste preserves the layout.
+        clips.sort_by_key(|clip| clip.timeline_position.sample);
+        self.clipboard = clips;
     }
 
     fn paste_clip(&mut self) {
-        let Some(template) = self.clipboard.clone() else {
+        if self.clipboard.is_empty() {
             return;
-        };
+        }
         let track_id = self
             .selected_clip
             .and_then(|id| self.clip_track(id))
@@ -2445,64 +2694,109 @@ impl AppUI {
 
         let project_sr = self.project.sample_rate.max(1) as f64;
         let bpm = self.project.tempo_map.default_bpm();
-        let mut clip = template;
-        clip.id = ClipId::default();
-        clip.timeline_position = TimelinePos::from_sample(
-            (self.playhead_secs.max(0.0) * project_sr).round() as u64,
-            project_sr,
-            bpm,
-        );
+        // Paste the group with its earliest clip at the playhead.
+        let earliest = self
+            .clipboard
+            .iter()
+            .map(|clip| clip.timeline_position.sample)
+            .min()
+            .unwrap_or(0);
+        let target_start = (self.playhead_secs.max(0.0) * project_sr).round() as u64;
+        let delta = target_start.saturating_sub(earliest);
 
-        let new_id = self.project.audio_clips.insert(clip);
-        let action = EditAction::Attach {
-            track: track_id,
-            clip_id: new_id,
-        };
-        self.apply_action(&action, true);
-        self.push_undo(action, false);
-        self.selected_clip = Some(new_id);
-        self.after_edit();
-        self.refresh_playback_if_playing();
+        let mut new_ids = Vec::new();
+        self.begin_undo_group("Paste clips");
+        for template in self.clipboard.clone() {
+            let mut clip = template;
+            clip.id = ClipId::default();
+            clip.timeline_position = TimelinePos::from_sample(
+                clip.timeline_position.sample.saturating_add(delta),
+                project_sr,
+                bpm,
+            );
+            let new_id = self.project.audio_clips.insert(clip);
+            let action = EditAction::Attach {
+                track: track_id,
+                clip_id: new_id,
+            };
+            self.apply_action(&action, true);
+            self.push_undo(action, false);
+            new_ids.push(new_id);
+        }
+        self.end_undo_group();
+
+        if !new_ids.is_empty() {
+            self.selected_clips = new_ids.iter().copied().collect();
+            self.selected_clip = new_ids.last().copied();
+            self.after_edit();
+            self.refresh_playback_if_playing();
+        }
     }
 
     fn duplicate_selected_clip(&mut self) {
-        let Some(clip_id) = self.selected_clip else {
-            return;
-        };
-        let Some(track_id) = self.clip_track(clip_id) else {
-            return;
-        };
-        let Some(clip) = self.project.audio_clips.get(clip_id) else {
-            return;
-        };
-        if clip.locked {
+        let ids = self.selection_ids();
+        if ids.is_empty() {
             return;
         }
-
         let project_sr = self.project.sample_rate.max(1) as f64;
-        let src_sr = clip.source.sample_rate.max(1) as f64;
         let bpm = self.project.tempo_map.default_bpm();
-        let end_secs =
-            clip.timeline_position.sample as f64 / project_sr + clip.length as f64 / src_sr;
 
-        let mut copy = clip.clone();
-        copy.id = ClipId::default();
-        copy.timeline_position = TimelinePos::from_sample(
-            (end_secs * project_sr).round() as u64,
-            project_sr,
-            bpm,
-        );
+        // Duplicate the selection as a group, shifted by its total span.
+        let mut span_start = f64::MAX;
+        let mut span_end = f64::MIN;
+        for clip_id in &ids {
+            let Some(clip) = self.project.audio_clips.get(*clip_id) else {
+                continue;
+            };
+            let start = clip.timeline_position.sample as f64 / project_sr;
+            let end = start + clip.length as f64 / clip.source.sample_rate.max(1) as f64;
+            span_start = span_start.min(start);
+            span_end = span_end.max(end);
+        }
+        if !span_start.is_finite() || !span_end.is_finite() {
+            return;
+        }
+        let offset_secs = (span_end - span_start).max(MIN_CLIP_SECS);
 
-        let new_id = self.project.audio_clips.insert(copy);
-        let action = EditAction::Attach {
-            track: track_id,
-            clip_id: new_id,
-        };
-        self.apply_action(&action, true);
-        self.push_undo(action, false);
-        self.selected_clip = Some(new_id);
-        self.after_edit();
-        self.refresh_playback_if_playing();
+        let mut new_ids = Vec::new();
+        self.begin_undo_group("Duplicate clips");
+        for clip_id in ids {
+            let Some(track_id) = self.clip_track(clip_id) else {
+                continue;
+            };
+            let Some(clip) = self.project.audio_clips.get(clip_id) else {
+                continue;
+            };
+            if clip.locked {
+                continue;
+            }
+
+            let mut copy = clip.clone();
+            copy.id = ClipId::default();
+            copy.timeline_position = TimelinePos::from_sample(
+                copy.timeline_position.sample
+                    + (offset_secs * project_sr).round() as u64,
+                project_sr,
+                bpm,
+            );
+
+            let new_id = self.project.audio_clips.insert(copy);
+            let action = EditAction::Attach {
+                track: track_id,
+                clip_id: new_id,
+            };
+            self.apply_action(&action, true);
+            self.push_undo(action, false);
+            new_ids.push(new_id);
+        }
+        self.end_undo_group();
+
+        if !new_ids.is_empty() {
+            self.selected_clips = new_ids.iter().copied().collect();
+            self.selected_clip = new_ids.last().copied();
+            self.after_edit();
+            self.refresh_playback_if_playing();
+        }
     }
 
     /// Clip gain, fade and colour controls shown in the Clip Audio window.
@@ -2572,25 +2866,73 @@ impl AppUI {
         }
 
         if after != before {
-            if let Some(clip) = self.project.audio_clips.get_mut(clip_id) {
-                after.apply(clip);
-            }
-            self.push_undo(
-                EditAction::Shape {
-                    clip_id,
-                    from: before,
-                    to: after,
-                },
-                true,
-            );
-            self.after_edit();
-            // Discrete changes (curve/color) should be heard immediately; while
-            // a slider is being dragged we wait for release to avoid glitching.
-            let using_pointer = ui.ctx().is_using_pointer();
-            if !using_pointer || in_changed || out_changed {
-                self.refresh_playback_if_playing();
-            } else {
+            if self.selected_clips.len() > 1 {
+                // Multi-selection: apply the edited fields to every clip and
+                // commit one grouped undo entry when the pointer is released.
+                if self.pending_shape_edit.is_none() {
+                    let label = if after.gain != before.gain {
+                        "Clip gain"
+                    } else if after.fade_in != before.fade_in || after.fade_out != before.fade_out {
+                        "Clip fades"
+                    } else if after.color != before.color {
+                        "Clip colour"
+                    } else {
+                        "Clip edit"
+                    }
+                    .to_string();
+                    let snapshots: Vec<(ClipId, ClipShape)> = self
+                        .selection_ids()
+                        .into_iter()
+                        .filter_map(|id| {
+                            self.project
+                                .audio_clips
+                                .get(id)
+                                .map(|clip| (id, ClipShape::of(clip)))
+                        })
+                        .collect();
+                    self.pending_shape_edit = Some((label, snapshots));
+                }
+                for id in self.selection_ids() {
+                    let Some(clip) = self.project.audio_clips.get_mut(id) else {
+                        continue;
+                    };
+                    if after.gain != before.gain {
+                        clip.gain = after.gain;
+                    }
+                    if after.fade_in != before.fade_in {
+                        clip.fade_in = clamp_fade(after.fade_in, clip.length);
+                    }
+                    if after.fade_out != before.fade_out {
+                        clip.fade_out = clamp_fade(after.fade_out, clip.length);
+                    }
+                    if after.color != before.color {
+                        clip.color = after.color;
+                    }
+                }
+                self.after_edit();
                 self.needs_audio_refresh = true;
+            } else {
+                if let Some(clip) = self.project.audio_clips.get_mut(clip_id) {
+                    after.apply(clip);
+                }
+                self.push_undo(
+                    EditAction::Shape {
+                        clip_id,
+                        from: before,
+                        to: after,
+                    },
+                    true,
+                );
+                self.after_edit();
+                // Discrete changes (curve/color) should be heard immediately;
+                // while a slider is being dragged we wait for release to avoid
+                // glitching.
+                let using_pointer = ui.ctx().is_using_pointer();
+                if !using_pointer || in_changed || out_changed {
+                    self.refresh_playback_if_playing();
+                } else {
+                    self.needs_audio_refresh = true;
+                }
             }
         }
 
@@ -2683,6 +3025,12 @@ impl AppUI {
         let Some(mut window) = self.audio_window.clone() else {
             return;
         };
+        // Keep the window in step with the current clip selection.
+        let live_ids = self.selection_ids();
+        if !live_ids.is_empty() {
+            window.clip_id = live_ids[0];
+            window.clip_ids = live_ids;
+        }
         let clip = self.project.audio_clips.get(window.clip_id);
         let clip_present = clip.is_some();
         let clip_name = clip
@@ -2714,10 +3062,15 @@ impl AppUI {
             .and_then(|clip| clip.fade_out)
             .map(|fade| fade.length as f64 / clip_sr)
             .unwrap_or(0.0);
-        let has_gain_fades = clip.map_or(false, |clip| {
-            (clip.gain - 1.0).abs() > 1e-4
-                || clip.fade_in.is_some()
-                || clip.fade_out.is_some()
+        let has_gain_fades = window.clip_ids.iter().any(|id| {
+            self.project
+                .audio_clips
+                .get(*id)
+                .map_or(false, |clip| {
+                    (clip.gain - 1.0).abs() > 1e-4
+                        || clip.fade_in.is_some()
+                        || clip.fade_out.is_some()
+                })
         });
         let consolidation = self.consolidation_plan(window.clip_id);
         let consolidation_count = consolidation
@@ -2747,9 +3100,14 @@ impl AppUI {
             .max_width(460.0)
             .show(ctx, |ui| {
                 ui.set_max_width(400.0);
+                let title = if window.clip_ids.len() > 1 {
+                    format!("{} clips", window.clip_ids.len())
+                } else {
+                    clip_name.clone()
+                };
                 ui.horizontal(|ui| {
                     ui.label("Clip:");
-                    ui.label(egui::RichText::new(clip_name).strong());
+                    ui.label(egui::RichText::new(title).strong());
                 });
                 if let Some(seconds) = clip_seconds {
                     ui.weak(format!("Length: {:.2} s", seconds));
@@ -3051,6 +3409,13 @@ impl AppUI {
 
                         ui.add_space(10.0);
                         if let Some(effect) = window.selected {
+                            if window.clip_ids.len() > 1 {
+                                ui.weak(format!(
+                                    "Applies to {} selected clips.",
+                                    window.clip_ids.len()
+                                ));
+                                ui.add_space(4.0);
+                            }
                             let can_apply = match effect {
                                 EffectKind::Normalize
                                 | EffectKind::LufsNormalize
@@ -3064,7 +3429,9 @@ impl AppUI {
                                 EffectKind::Saturation => window.saturation_mix > 0.0,
                                 EffectKind::Tremolo => window.tremolo_depth > 0.0,
                                 EffectKind::Consolidate => {
-                                    consolidation_count >= 2 && !consolidation_locked
+                                    window.clip_ids.len() == 1
+                                        && consolidation_count >= 2
+                                        && !consolidation_locked
                                 }
                             };
                             if ui
@@ -3089,92 +3456,137 @@ impl AppUI {
 
         if apply {
             if let Some(effect) = window.selected {
-                match effect {
-                EffectKind::Normalize => self.normalize_clip(window.clip_id),
-                EffectKind::LufsNormalize => {
-                    self.lufs_normalize_clip(window.clip_id, window.lufs_target);
-                }
-                EffectKind::BakeIntoClip => {
-                    self.bake_into_clip(window.clip_id);
-                }
-                EffectKind::Reverse => self.reverse_clip(window.clip_id),
-                EffectKind::PitchShift => {
-                    if self.apply_pitch_stretch(
-                        window.clip_id,
-                        window.pitch,
-                        1.0,
-                        window.formants,
-                        TimeStretchMode::Elastic,
-                    ) {
-                        window.pitch = 0.0;
+                let ids = window.clip_ids.clone();
+                if !ids.is_empty() {
+                    self.begin_undo_group(format!("Apply {}", effect.label()));
+                    let mut consolidated = false;
+                    match effect {
+                        EffectKind::Normalize => {
+                            for id in &ids {
+                                self.normalize_clip(*id);
+                            }
+                        }
+                        EffectKind::LufsNormalize => {
+                            for id in &ids {
+                                self.lufs_normalize_clip(*id, window.lufs_target);
+                            }
+                        }
+                        EffectKind::BakeIntoClip => {
+                            for id in &ids {
+                                self.bake_into_clip(*id);
+                            }
+                        }
+                        EffectKind::Reverse => {
+                            for id in &ids {
+                                self.reverse_clip(*id);
+                            }
+                        }
+                        EffectKind::PitchShift => {
+                            let mut changed = false;
+                            for id in &ids {
+                                changed |= self.apply_pitch_stretch(
+                                    *id,
+                                    window.pitch,
+                                    1.0,
+                                    window.formants,
+                                    TimeStretchMode::Elastic,
+                                );
+                            }
+                            if changed {
+                                window.pitch = 0.0;
+                            }
+                        }
+                        EffectKind::TimeStretch => {
+                            let mut changed = false;
+                            for id in &ids {
+                                changed |= self.apply_pitch_stretch(
+                                    *id,
+                                    0.0,
+                                    window.stretch,
+                                    false,
+                                    window.stretch_mode,
+                                );
+                            }
+                            if changed {
+                                window.stretch = 1.0;
+                            }
+                        }
+                        EffectKind::BitCrusher => {
+                            let bits = window.crush_bits.round() as u32;
+                            let downsample = window.crush_downsample.round() as u32;
+                            for id in &ids {
+                                self.render_clip_effect(
+                                    *id,
+                                    move |samples, channels, _sample_rate| {
+                                        bit_crush(samples, channels, bits, downsample);
+                                    },
+                                );
+                            }
+                        }
+                        EffectKind::Saturation => {
+                            let drive_db = window.drive_db;
+                            let mix = window.saturation_mix / 100.0;
+                            for id in &ids {
+                                self.render_clip_effect(
+                                    *id,
+                                    move |samples, _channels, _sample_rate| {
+                                        saturate(samples, drive_db, mix);
+                                    },
+                                );
+                            }
+                        }
+                        EffectKind::Filter => {
+                            let kind = window.filter_kind;
+                            let cutoff = window.filter_cutoff;
+                            for id in &ids {
+                                self.render_clip_effect(
+                                    *id,
+                                    move |samples, channels, sample_rate| {
+                                        filter_audio(samples, channels, sample_rate, cutoff, kind);
+                                    },
+                                );
+                            }
+                        }
+                        EffectKind::Tremolo => {
+                            let rate = window.tremolo_rate;
+                            let depth = window.tremolo_depth / 100.0;
+                            for id in &ids {
+                                self.render_clip_effect(
+                                    *id,
+                                    move |samples, channels, sample_rate| {
+                                        tremolo(samples, channels, sample_rate, rate, depth);
+                                    },
+                                );
+                            }
+                        }
+                        EffectKind::Consolidate => {
+                            if ids.len() == 1 {
+                                let previous = ids[0];
+                                self.consolidate_clip(previous);
+                                consolidated = true;
+                                if self.selected_clip != Some(previous) {
+                                    // The clip was replaced by the consolidated result.
+                                    self.end_undo_group();
+                                    self.audio_window = None;
+                                    return;
+                                }
+                            }
+                        }
                     }
-                }
-                EffectKind::TimeStretch => {
-                    if self.apply_pitch_stretch(
-                        window.clip_id,
-                        0.0,
-                        window.stretch,
-                        false,
-                        window.stretch_mode,
-                    ) {
-                        window.stretch = 1.0;
+                    if !consolidated {
+                        self.end_undo_group();
                     }
-                }
-                EffectKind::BitCrusher => {
-                    let bits = window.crush_bits.round() as u32;
-                    let downsample = window.crush_downsample.round() as u32;
-                    self.render_clip_effect(
-                        window.clip_id,
-                        move |samples, channels, _sample_rate| {
-                            bit_crush(samples, channels, bits, downsample);
-                        },
-                    );
-                }
-                EffectKind::Saturation => {
-                    let drive_db = window.drive_db;
-                    let mix = window.saturation_mix / 100.0;
-                    self.render_clip_effect(
-                        window.clip_id,
-                        move |samples, _channels, _sample_rate| {
-                            saturate(samples, drive_db, mix);
-                        },
-                    );
-                }
-                EffectKind::Filter => {
-                    let kind = window.filter_kind;
-                    let cutoff = window.filter_cutoff;
-                    self.render_clip_effect(
-                        window.clip_id,
-                        move |samples, channels, sample_rate| {
-                            filter_audio(samples, channels, sample_rate, cutoff, kind);
-                        },
-                    );
-                }
-                EffectKind::Tremolo => {
-                    let rate = window.tremolo_rate;
-                    let depth = window.tremolo_depth / 100.0;
-                    self.render_clip_effect(
-                        window.clip_id,
-                        move |samples, channels, sample_rate| {
-                            tremolo(samples, channels, sample_rate, rate, depth);
-                        },
-                    );
-                }
-                EffectKind::Consolidate => {
-                    let previous = window.clip_id;
-                    self.consolidate_clip(previous);
-                    if self.selected_clip != Some(previous) {
-                        // The clip was replaced by the consolidated result.
-                        self.audio_window = None;
-                        return;
-                    }
-                }
                 }
             }
         }
 
         self.audio_window = Some(window);
     }
+}
+
+/// Clamp a fade length to a clip's length.
+fn clamp_fade(fade: Option<Fade>, clip_length: u64) -> Option<Fade> {
+    fade.map(|fade| Fade::new(fade.length.min(clip_length), fade.curve))
 }
 
 /// Build a fade from a dragged length, keeping the existing curve. Very short
@@ -3706,6 +4118,7 @@ impl eframe::App for AppUI {
         // A released pointer ends the current undo-merge gesture.
         if !ctx.input(|i| i.pointer.any_down()) {
             self.merge_chain = false;
+            self.commit_pending_shape_edit();
             if self.needs_audio_refresh {
                 self.needs_audio_refresh = false;
                 self.refresh_playback_if_playing();
@@ -4279,14 +4692,15 @@ impl eframe::App for AppUI {
                 }
                 if ui
                     .add_enabled(
-                        self.selected_clip.is_some(),
+                        !self.selected_clips.is_empty(),
                         egui::Button::new("Audio…"),
                     )
                     .on_hover_text("Clip gain, fades, colour and effects")
                     .clicked()
                 {
-                    if let Some(clip_id) = self.selected_clip {
-                        self.audio_window = Some(ClipAudioWindow::new(clip_id));
+                    let ids = self.selection_ids();
+                    if !ids.is_empty() {
+                        self.audio_window = Some(ClipAudioWindow::new(ids));
                     }
                 }
                 ui.separator();
@@ -4633,7 +5047,7 @@ impl eframe::App for AppUI {
                             *color,
                             view,
                             project_sr,
-                            self.selected_clip == Some(*clip_id),
+                            self.selected_clips.contains(clip_id),
                         );
                         if clip_rect != egui::Rect::NOTHING {
                             clip_rects.push((*clip_id, clip_rect));
@@ -4709,6 +5123,7 @@ impl eframe::App for AppUI {
                     i.pointer.press_origin(),
                 )
             });
+            let additive = ui.input(|input| input.modifiers.command || input.modifiers.ctrl);
             if primary_clicked && hovered {
                 if let Some(pos) = pointer_pos {
                     let clicked = clip_rects
@@ -4716,10 +5131,14 @@ impl eframe::App for AppUI {
                         .rev()
                         .find(|(_, r)| r.contains(pos))
                         .map(|(id, _)| *id);
-                    if clicked.is_some() {
-                        self.selected_clip = clicked;
-                    } else if pos.y > rect.top() + ruler_height {
-                        self.selected_clip = None;
+                    if let Some(clip_id) = clicked {
+                        if additive {
+                            self.toggle_selection(clip_id);
+                        } else {
+                            self.set_single_selection(clip_id);
+                        }
+                    } else if pos.y > rect.top() + ruler_height && !additive {
+                        self.clear_selection();
                     }
                 }
             }
@@ -4739,24 +5158,72 @@ impl eframe::App for AppUI {
                 // from where it is after egui's drag threshold: otherwise edge
                 // grabs would already be inside the body and become moves.
                 if let Some(pos) = press_origin.or(pointer_pos) {
-                    self.begin_clip_drag(pos, &clip_rects, rect, view);
+                    if Self::clip_hit(&clip_rects, pos).is_some() {
+                        self.begin_clip_drag(pos, &clip_rects, rect, view);
+                    } else if pos.y > rect.top() + ruler_height {
+                        // Empty track space: rubber-band selection.
+                        self.marquee = Some((pos, pos));
+                        self.marquee_additive = additive;
+                        if !additive {
+                            self.clear_selection();
+                        }
+                    }
                 }
             }
             if edit_response.dragged() {
-                if let Some(pos) = pointer_pos {
+                if let Some((start, _)) = self.marquee {
+                    if let Some(pos) = pointer_pos {
+                        self.marquee = Some((start, pos));
+                    }
+                } else if let Some(pos) = pointer_pos {
                     self.update_clip_drag(pos, rect, track_y_start, track_height, view);
                 }
             }
             if edit_response.drag_stopped() {
-                self.finish_clip_drag();
+                if let Some((start, end)) = self.marquee.take() {
+                    let marquee = egui::Rect::from_two_pos(start, end);
+                    let hits = clips_in_marquee(&clip_rects, marquee);
+                    if self.marquee_additive {
+                        for clip_id in hits {
+                            self.add_to_selection(clip_id);
+                        }
+                    } else {
+                        self.selected_clips = hits.iter().copied().collect();
+                        self.selected_clip = hits.last().copied();
+                    }
+                    self.marquee_additive = false;
+                } else {
+                    self.finish_clip_drag();
+                }
+            }
+
+            // Marquee overlay
+            if let Some((start, end)) = self.marquee {
+                let painter = ui.painter();
+                let marquee = egui::Rect::from_two_pos(start, end);
+                painter.rect_filled(
+                    marquee,
+                    0.0,
+                    egui::Color32::from_rgba_unmultiplied(80, 140, 220, 36),
+                );
+                painter.rect_stroke(
+                    marquee,
+                    0.0,
+                    egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(120, 170, 240)),
+                );
             }
 
             // ---- Right-click opens the floating audio-effects editor ----
             if edit_response.secondary_clicked() {
                 if let Some(pos) = pointer_pos {
                     if let Some((clip_id, _)) = Self::clip_hit(&clip_rects, pos) {
-                        self.selected_clip = Some(clip_id);
-                        self.audio_window = Some(ClipAudioWindow::new(clip_id));
+                        if !self.selected_clips.contains(&clip_id) {
+                            self.set_single_selection(clip_id);
+                        } else {
+                            self.selected_clip = Some(clip_id);
+                        }
+                        let ids = self.selection_ids();
+                        self.audio_window = Some(ClipAudioWindow::new(ids));
                     }
                 }
             }
@@ -5362,10 +5829,10 @@ impl AppUI {
     fn adopt_project(&mut self, project: Project) {
         self.project = project;
         self.history.clear();
-        self.selected_clip = None;
+        self.clear_selection();
         self.deleted_from.clear();
         self.audio_window = None;
-        self.clipboard = None;
+        self.clipboard = Vec::new();
         self.drag = None;
         self.playhead_secs = 0.0;
         self.view_start_secs = 0.0;
@@ -5468,7 +5935,7 @@ impl AppUI {
             track.add_clip(clip_id);
         }
 
-        self.selected_clip = Some(clip_id);
+        self.set_single_selection(clip_id);
 
         self.spawn_overview(clip_id, file_path);
     }
@@ -6358,13 +6825,13 @@ fn load_wav_interleaved(path: &Path) -> Result<(Vec<f32>, u16, u32)> {
 mod tests {
     use super::{
         audible_track_gain, bit_crush, bpm_from_tap_intervals, clip_gain_at,
-        contiguous_clip_span, filter_audio, knob_from_normalized, knob_to_normalized,
-        load_wav_interleaved, load_wav_range_interleaved, loop_range_frames,
-        measure_integrated_loudness, merge_continuous_edit, metronome_config,
-        processed_file_stem, punch_waiting, render_pitch_stretch, reverse_interleaved,
-        saturate, tape_stretch_interleaved, tremolo, wav_file_info, wav_peak, write_wav_f32,
-        write_wav_range, write_wav_range_with_envelope, ClipShape, ClipSourceState, EditAction,
-        FilterKind, MonitorMode, TrackShape,
+        clips_in_marquee, contiguous_clip_span, filter_audio, knob_from_normalized,
+        knob_to_normalized, load_wav_interleaved, load_wav_range_interleaved,
+        loop_range_frames, measure_integrated_loudness, merge_continuous_edit,
+        metronome_config, processed_file_stem, punch_waiting, render_pitch_stretch,
+        reverse_interleaved, saturate, tape_stretch_interleaved, tremolo, wav_file_info,
+        wav_peak, write_wav_f32, write_wav_range, write_wav_range_with_envelope, ClipShape,
+        ClipSourceState, EditAction, FilterKind, MonitorMode, TrackShape,
     };
     use daw_core::audio_pool::AudioFileRef;
     use daw_core::clip::{AudioClip, ClipId, Fade, FadeCurve, TimeStretchMode, TimelinePos};
@@ -6764,6 +7231,44 @@ mod tests {
         let (ids, start, end) = contiguous_clip_span(&spans, d).unwrap();
         assert_eq!(ids, vec![d]);
         assert_eq!((start, end), (40, 50));
+    }
+
+    #[test]
+    fn marquee_selects_intersecting_clips() {
+        let mut project = Project::new("marquee");
+        let source = AudioFileRef::new(
+            std::path::PathBuf::from("source.wav"),
+            100,
+            48_000,
+            1,
+            BitDepth::Float32,
+        );
+        let template = AudioClip::new(source, TimelinePos::default(), 1);
+        let a = project.audio_clips.insert(template.clone());
+        let b = project.audio_clips.insert(template.clone());
+
+        let rects = [
+            (
+                a,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(10.0, 10.0)),
+            ),
+            (
+                b,
+                egui::Rect::from_min_max(egui::pos2(20.0, 0.0), egui::pos2(30.0, 10.0)),
+            ),
+        ];
+
+        let hits = clips_in_marquee(
+            &rects,
+            egui::Rect::from_min_max(egui::pos2(5.0, 0.0), egui::pos2(25.0, 10.0)),
+        );
+        assert_eq!(hits, vec![a, b]);
+
+        let hits = clips_in_marquee(
+            &rects,
+            egui::Rect::from_min_max(egui::pos2(-5.0, -5.0), egui::pos2(1.0, 1.0)),
+        );
+        assert_eq!(hits, vec![a]);
     }
 
     #[test]

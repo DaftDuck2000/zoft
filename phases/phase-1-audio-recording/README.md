@@ -72,7 +72,9 @@
 - Edge drags trim non-destructively (adjusts `source_offset`/`length`; the WAV file is never touched)
 - Split at the playhead (S) creates a second clip referencing the same source
 - Copy/paste/cut/duplicate (Ctrl+C / Ctrl+V / Ctrl+X / Ctrl+D); Delete removes the clip from the track (data stays in the pool, undo restores it)
-- Fade handles in the clip's top corners; the **Clip Audio** window has fade curve (linear/exp/log/S/equal-power), fade length, gain and colour controls
+- Click a clip to select it; **Ctrl/Cmd+click** toggles clips in the selection, and dragging empty track space rubber-bands a multi-selection (hold Ctrl to add)
+- Drag any selected clip body to move the whole selection, preserving relative timing and track offsets; Delete / Ctrl+D / Ctrl+C / Ctrl+V operate on the whole selection
+- Fade handles in the clip's top corners; the **Clip Audio** window has fade curve (linear/exp/log/S/equal-power), fade length, gain and colour controls; multi-clip gain/fades/colour apply to every selected clip
 - Automatic equal-power crossfade where clips overlap on the same track, with an X overlay in the overlap region; contained clips are layered instead
 - Snap: Off / Bar / Beat (default) / 1/8 / 1/16, optional Relative mode, Alt bypass; the grid follows the chosen time signature
 - Trash browser in the track panel: deleted clips stay in the project and can be restored
@@ -81,7 +83,7 @@
 - Next: bounce in place (remaining 1.4 processing operation)
 
 **1.4 Clip Processing** - `[~]` In Progress
-- Right-click a clip (or use the arrange **Audio…** button) to open the floating **Clip Audio** window. Its **Clip** section has gain, fade in/out and colour controls that apply immediately and are undoable; the effect list (Normalize, LUFS Normalize, Bake into Clip, Reverse, Pitch Shift, Time Stretch, Bit Crusher, Saturation, Filter, Tremolo, Consolidate) shows Logic-style knobs (drag vertically, hold Shift for fine control, double-click to reset) with a single **Apply** button
+- Right-click a clip (or use the arrange **Audio…** button) to open the floating **Clip Audio** window. Its **Clip** section has gain, fade in/out and colour controls that apply immediately and are undoable; the effect list (Normalize, LUFS Normalize, Bake into Clip, Reverse, Pitch Shift, Time Stretch, Bit Crusher, Saturation, Filter, Tremolo, Consolidate) shows Logic-style knobs (drag vertically, hold Shift for fine control, double-click to reset) with a single **Apply** button. When several clips are selected, effect Apply processes all of them and records one undo step
 - Peak Normalize (to −1 dBFS) is a gain edit and fully undoable
 - LUFS Normalize measures BS.1770 integrated loudness and sets gain to a −30…−6 LUFS target (default −14), capped so sample peaks stay at or below −1 dBFS
 - Consolidate merges the selected clip with touching/overlapping clips on its track into one file, baking in gain, fades and automatic crossfades; undo restores the original clips

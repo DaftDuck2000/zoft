@@ -42,7 +42,7 @@
 |----|---------|--------|------|--------|-------|
 | 1.1 | Audio Track & Recording | `[~]` | 2w | | Arm, monitor, BWF, level meter, punch, disk warning; multi-take left |
 | 1.2 | Waveform Rendering | `[~]` | 2w | | Overview + detail views; benchmarks/GPU atlas left |
-| 1.3 | Non-Destructive Clip Editing | `[✓]` | 3w | | Split, trim, move, fades, crossfades, undo |
+| 1.3 | Non-Destructive Clip Editing | `[✓]` | 3w | | Split, trim, move, fades, crossfades, multi-select, undo |
 | 1.4 | Clip Processing | `[~]` | 2w | | Normalize, LUFS, pitch/time, creative effects, consolidate; bounce left |
 | 1.5 | Undo/Redo System | `[~]` | 1w | | History + panel + labels; snapshots left |
 | 1.6 | Audio Device Enumeration | `[~]` | 2w | | Clean names/raw_name in use; enumerator scaffolding not wired |

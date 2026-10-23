@@ -73,6 +73,9 @@ Offline clip processing: gain, pitch shift, time stretch, reverse, normalize, bi
   Shift for fine control, or double-click to restore its default. The window
   stays open, so several operations can be applied in sequence. New per-clip
   controls live here instead of the arrange toolbar.
+  With several clips selected, **Apply** runs the chosen effect on every
+  selected clip and records a single undo step (Consolidate requires a single
+  clip).
 - **Bake into Clip**: renders the visible source range with the clip gain and
   fade-in/fade-out envelopes applied, matching the playback mixer's envelope.
   The output is a new `<name>_process_<uuid>.wav`; the clip then points at it
