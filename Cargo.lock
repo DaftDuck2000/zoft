@@ -1415,6 +1415,7 @@ dependencies = [
  "daw-core",
  "fundsp",
  "hound",
+ "libc",
  "libudev",
  "midir",
  "midly",

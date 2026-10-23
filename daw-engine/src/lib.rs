@@ -12,6 +12,7 @@ pub mod bwf_writer;
 pub mod waveform;
 pub mod playback;
 pub mod monitor;
+pub mod disk;
 
 pub use audio_backend::*;
 pub use process_graph::*;
@@ -25,6 +26,7 @@ pub use bwf_writer::*;
 pub use waveform::*;
 pub use playback::*;
 pub use monitor::*;
+pub use disk::*;
 
 use crate::audio_backend::AudioBackend;
 use crate::playback::{MetronomeConfig, PlayableClip, PlaybackMixer};
@@ -279,6 +281,17 @@ impl AudioEngine {
         self.project_sample_rate = sample_rate;
         self.project_bit_depth = bit_depth;
         self.project_channels = channels;
+    }
+
+    /// Estimated seconds of recording available on the filesystem containing
+    /// `path`, given the current project format.
+    pub fn available_recording_seconds(&self, path: &std::path::Path) -> Option<f64> {
+        crate::disk::recording_seconds_available(
+            path,
+            self.project_sample_rate,
+            self.project_channels,
+            self.project_bit_depth,
+        )
     }
 
     pub fn input_devices(&self) -> Result<Vec<crate::audio_backend::AudioDeviceInfo>> {

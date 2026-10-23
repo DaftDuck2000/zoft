@@ -39,7 +39,8 @@
 - Recording level meter in the transport bar (pre-fader peak + RMS from the input stream)
 - Input monitoring: track **Mon** cycles Off/Auto/On; the input and output streams stay open while armed/On so monitoring is audible before and during a take; the mode is undoable
 - Punch recording: **Punch** enables a capture range set with **P-In**/**P-Out** at the playhead; an armed take waits for punch-in and ends at punch-out while the transport keeps rolling
-- Not yet: multi-take, disk-space warning, input monitoring mode details beyond the armed/recording heuristic
+- Low-disk warning: estimated remaining recording time (from free space and the project format) is checked at take start and once per second; a yellow banner appears below 10 minutes
+- Not yet: multi-take
 
 **1.2 Waveform Rendering** - `[~]` In Progress
 - Overview (min/max + RMS) pre-computed per audio file, stored and serialized with the project

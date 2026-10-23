@@ -750,6 +750,9 @@ struct AppUI {
     input_devices: Vec<daw_engine::audio_backend::AudioDeviceInfo>,
     selected_input_device: Option<String>,
     error_message: Option<String>,
+    /// Yellow banner shown when free disk space is low during recording.
+    disk_warning: Option<String>,
+    last_disk_check: std::time::Instant,
 
     // Timeline view state
     view_start_secs: f64,
@@ -818,6 +821,8 @@ impl AppUI {
             input_devices,
             selected_input_device: None,
             error_message: None,
+            disk_warning: None,
+            last_disk_check: std::time::Instant::now(),
             view_start_secs: 0.0,
             pixels_per_sec: 100.0,
             needs_fit: true,
@@ -3677,6 +3682,12 @@ impl eframe::App for AppUI {
             }
         }
 
+        // Periodic disk-space check while recording.
+        if self.recording && self.last_disk_check.elapsed().as_secs_f64() >= 1.0 {
+            self.last_disk_check = std::time::Instant::now();
+            self.disk_warning = self.low_disk_warning();
+        }
+
         // Error banner (shown when an operation, e.g. recording, fails)
         if let Some(message) = self.error_message.clone() {
             egui::TopBottomPanel::top("error_banner").show(ctx, |ui| {
@@ -3688,6 +3699,22 @@ impl eframe::App for AppUI {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button("Dismiss").clicked() {
                             self.error_message = None;
+                        }
+                    });
+                });
+            });
+        }
+
+        if let Some(message) = self.disk_warning.clone() {
+            egui::TopBottomPanel::top("disk_warning_banner").show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(240, 200, 80),
+                        format!("Warning: {}", message),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Dismiss").clicked() {
+                            self.disk_warning = None;
                         }
                     });
                 });
@@ -5106,6 +5133,20 @@ impl AppUI {
         }
     }
 
+    /// Check free space for the recording directory and build a warning string
+    /// when less than 10 minutes remain.
+    fn low_disk_warning(&self) -> Option<String> {
+        let seconds = self.engine.available_recording_seconds(Path::new("."))?;
+        if seconds < 600.0 {
+            Some(format!(
+                "Low disk space: about {:.0} min of recording left.",
+                seconds / 60.0
+            ))
+        } else {
+            None
+        }
+    }
+
     /// Open the input device and start capturing a take at the current playhead.
     fn begin_recording(&mut self, track_id: TrackId) {
         // Unique file per take so new recordings never overwrite older ones.
@@ -5113,6 +5154,7 @@ impl AppUI {
             "recording_{}.wav",
             uuid::Uuid::new_v4()
         ));
+        self.disk_warning = self.low_disk_warning();
         if let Err(e) = self.engine.start_recording(track_id, file_path) {
             self.recording = false;
             self.pending_record_track = None;
@@ -5129,6 +5171,7 @@ impl AppUI {
     /// audio clip (which also queues waveform generation).
     fn stop_recording_and_create_clip(&mut self) {
         self.recording = false;
+        self.disk_warning = None;
         match self.engine.stop_recording() {
             Ok(Some((track_id, file_path))) => {
                 let start_secs = self.record_start_secs.take().unwrap_or(0.0);

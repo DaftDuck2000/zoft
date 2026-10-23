@@ -40,7 +40,7 @@
 
 | ID | Feature | Status | Est. | Actual | Notes |
 |----|---------|--------|------|--------|-------|
-| 1.1 | Audio Track & Recording | `[~]` | 2w | | Arm, monitor, BWF, level meter, punch; multi-take/disk warning left |
+| 1.1 | Audio Track & Recording | `[~]` | 2w | | Arm, monitor, BWF, level meter, punch, disk warning; multi-take left |
 | 1.2 | Waveform Rendering | `[~]` | 2w | | Overview + detail views; benchmarks/GPU atlas left |
 | 1.3 | Non-Destructive Clip Editing | `[✓]` | 3w | | Split, trim, move, fades, crossfades, undo |
 | 1.4 | Clip Processing | `[~]` | 2w | | Normalize, LUFS, pitch/time, creative effects, consolidate; bounce left |

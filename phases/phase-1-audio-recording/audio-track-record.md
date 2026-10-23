@@ -17,7 +17,7 @@ Implement audio track with record arm, input monitoring, and BWF file writing. S
 - [✓] Input selection: Hardware input channels, bus returns, "No Input"
 - [✓] Recording: Write to BWF (Broadcast WAV) with `bext` chunk
 - [ ] Multi-take: New clip per take, layered or new lane
-- [ ] Disk space warning: Calculate remaining time at current sample rate
+- [x] Disk space warning: Calculate remaining time at current sample rate
 - [x] Recording level meter: Pre-fader, peak + RMS
 - [x] Punch in/out: Set punch points, auto-arm at punch in
 
@@ -95,7 +95,7 @@ Monitor Mix        Recording           Metering
 - [✓] BWF file readable in other DAWs (Reaper, Logic, Pro Tools)
 - [✓] `bext` chunk contains correct time_reference
 - [ ] Multi-take creates separate clips
-- [ ] Disk warning at < 10 min remaining
+- [x] Disk warning at < 10 min remaining (free space checked at record start and once per second during a take)
 - [ ] No xruns during recording at 48kHz/256
 
 ## Progress Log
@@ -111,4 +111,5 @@ Monitor Mix        Recording           Metering
 - 2026-10-21: Recording level meter (pre-fader peak + RMS in the transport bar) fed by the input callback
 - 2026-10-21: Input monitoring modes are enforced: track **Mon** cycles Off/Auto/On and the input is mixed into the output; both the input and output streams stay open while armed/On so monitoring is audible before rolling. The mode is undoable
 - 2026-10-21: Punch recording: **Punch** plus **P-In**/**P-Out** set the capture range; an armed take waits for punch-in and ends at punch-out while the transport keeps rolling. The ruler shows the punch region in red
-- Next: Waveform rendering (1.2), Multi-take support, Disk space warning
+- 2026-10-23: Low-disk warning: estimated remaining recording time is computed from `statvfs` free space and the project format at take start and once per second while recording; a yellow banner appears below 10 minutes
+- Next: Waveform rendering (1.2), Multi-take support
