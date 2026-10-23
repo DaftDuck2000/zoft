@@ -7,7 +7,7 @@
 ## Status: `[~]` In Progress
 
 ## Description
-Implement project serialization: binary `.zoft` format with versioning, migration, and fast load/save. Support for audio file references (not embedded). The binary format and serializer exist, but the app does not expose Save/Open UI yet.
+Implement project serialization: binary `.zoft` format with versioning, migration, and fast load/save. Support for audio file references (not embedded). The app exposes File → New/Open/Save/Save As (Ctrl+S / Ctrl+Shift+S / Ctrl+O); recent projects, auto-save and templates are still pending.
 
 ## Requirements
 
@@ -16,7 +16,7 @@ Implement project serialization: binary `.zoft` format with versioning, migratio
 - [✓] Audio files: Referenced by relative path, not embedded
 - [✓] Versioning: Schema version per section, migration on load
 - [✓] Compression: `lz4` for large sections (automation, clip data)
-- [ ] Save/Open UI wired into the app (only the serializer API exists)
+- [✓] Save/Open UI wired into the app (File menu and Ctrl+S / Ctrl+Shift+S / Ctrl+O)
 - [ ] Recent projects menu (last 10)
 - [ ] Auto-save: Configurable interval, crash recovery
 - [ ] Project templates: Empty, Band, Electronic, Scoring
@@ -81,12 +81,12 @@ struct AudioFileRef {
 ## Acceptance Criteria
 
 - [✓] Save project → `.zoft` file created
-- [✓] Load project → identical state restored
+- [✓] Load project → identical state restored (covered by a round-trip test in `serialization.rs`)
 - [✓] Audio files referenced correctly (relative paths)
-- [✓] Version migration works (test with old schema)
-- [✓] Auto-save creates recovery file
-- [✓] Large projects (>100 tracks) save < 2s, load < 3s
-- [✓] Corrupted file → graceful error, not panic
+- [~] Version migration works (migration framework exists; no old-schema fixture test yet)
+- [ ] Auto-save creates recovery file
+- [ ] Large projects (>100 tracks) save < 2s, load < 3s (not benchmarked)
+- [~] Corrupted file → graceful error, not panic (magic/checksum errors are reported; not exhaustively tested)
 
 ## Progress Log
 
@@ -96,3 +96,4 @@ struct AudioFileRef {
 - 2026-10-07: Audio pool references (relative paths)
 - 2026-10-07: Project save/load serializer implemented in `daw-core/src/serialization.rs` (API only; no UI Save/Open yet)
 - 2026-10-21: Status corrected to In Progress: the app launches a new in-memory project and does not yet wire Save/Open, recent projects, auto-save or templates
+- 2026-10-23: Fixed the `.zoft` loader (it previously over-read fixed-size header/section-table blocks and failed); added a round-trip test and wired File → New/Open/Save/Save As plus Ctrl+S / Ctrl+Shift+S / Ctrl+O

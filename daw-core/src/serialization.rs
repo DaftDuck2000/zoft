@@ -112,9 +112,9 @@ impl ProjectSerialization {
     pub fn load(path: &Path) -> Result<Project> {
         let mut file = std::fs::File::open(path)?;
 
-        // Read header
-        let header_bytes = Self::read_exact(&mut file, 128)?; // Header is small
-        let header: ProjectFileHeader = bincode::deserialize(&header_bytes)?;
+        // Header (bincode reads exactly the serialized struct; no fixed-size
+        // block, which would over-read into the section data).
+        let header: ProjectFileHeader = bincode::deserialize_from(&mut file)?;
 
         // Verify magic
         if header.magic != MAGIC {
@@ -126,14 +126,17 @@ impl ProjectSerialization {
             anyhow::bail!("File version {} is newer than supported version {}", header.file_version, FILE_VERSION);
         }
 
-        // Read section table
+        // Read the section table sequentially; deserialize_from advances by
+        // exactly the serialized size of each entry.
         file.seek(SeekFrom::Start(header.section_table_offset))?;
-        let mut sections = HashMap::new();
-
+        let mut entries = Vec::with_capacity(header.section_count as usize);
         for _ in 0..header.section_count {
-            let entry_bytes = Self::read_exact(&mut file, 40)?; // SectionEntry size
-            let entry: SectionEntry = bincode::deserialize(&entry_bytes)?;
+            let entry: SectionEntry = bincode::deserialize_from(&mut file)?;
+            entries.push(entry);
+        }
 
+        let mut sections = HashMap::new();
+        for entry in entries {
             // Read section data
             file.seek(SeekFrom::Start(entry.offset))?;
             let compressed = Self::read_exact(&mut file, entry.compressed_size as usize)?;
@@ -150,7 +153,8 @@ impl ProjectSerialization {
         }
 
         // Deserialize project
-        let project = Self::deserialize_sections(&sections, header.project_id)?;
+        let mut project = Self::deserialize_sections(&sections, header.project_id)?;
+        project.project_path = Some(path.to_path_buf());
         Ok(project)
     }
 
@@ -306,4 +310,59 @@ struct ProjectMeta {
 struct TracksData {
     tracks: std::collections::HashMap<crate::track::TrackId, crate::track::Track>,
     track_order: Vec<crate::track::TrackId>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audio_pool::AudioFileRef;
+    use crate::clip::{AudioClip, TimelinePos};
+    use crate::project::BitDepth;
+    use crate::track::Track;
+
+    #[test]
+    fn project_round_trips_through_the_zoft_file() {
+        let mut project = Project::new("Round trip");
+        project.add_track(Track::new_audio("Take lane"));
+
+        // Add a clip on the first track so the audio-pool and clip sections
+        // are exercised.
+        let source = AudioFileRef::new(
+            std::path::PathBuf::from("test.wav"),
+            1_000,
+            48_000,
+            2,
+            BitDepth::Float32,
+        );
+        let clip = AudioClip::new(source, TimelinePos::default(), 1_000);
+        let clip_id = project.audio_clips.insert(clip);
+        let first_track = project.track_order[0];
+        if let Some(track) = project.get_track_mut(first_track) {
+            track.add_clip(clip_id);
+        }
+
+        let path = std::env::temp_dir().join(format!(
+            "zoft_round_trip_{}.zoft",
+            uuid::Uuid::new_v4()
+        ));
+        ProjectSerialization::save(&project, &path).expect("save");
+        let loaded = ProjectSerialization::load(&path).expect("load");
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(loaded.name, project.name);
+        assert_eq!(loaded.sample_rate, project.sample_rate);
+        assert_eq!(loaded.track_order.len(), project.track_order.len());
+        assert_eq!(loaded.audio_clips.len(), 1);
+
+        let loaded_id = loaded.audio_clips.keys().next().unwrap();
+        let loaded_clip = loaded.audio_clips.get(loaded_id).unwrap();
+        assert_eq!(loaded_clip.length, 1_000);
+        assert_eq!(loaded_clip.source.path, std::path::PathBuf::from("test.wav"));
+
+        let attached = loaded
+            .tracks
+            .values()
+            .any(|track| track.clips.contains(&loaded_id));
+        assert!(attached, "clip should remain attached to a track");
+    }
 }

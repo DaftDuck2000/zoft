@@ -4,6 +4,7 @@ use anyhow::Result;
 use daw_core::audio_pool::AudioFileRef;
 use daw_core::clip::{AudioClip, ClipId, Fade, FadeCurve, TimeStretchMode, TimelinePos};
 use daw_core::project::{BitDepth, Color};
+use daw_core::serialization::ProjectSerialization;
 use daw_core::track::{MonitorMode, TrackId};
 use daw_core::undo::History;
 use daw_core::Project;
@@ -671,6 +672,15 @@ impl ClipAudioWindow {
             tremolo_depth: 50.0,
         }
     }
+}
+
+/// File-menu actions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileAction {
+    New,
+    Open,
+    Save,
+    SaveAs,
 }
 
 /// In-progress clip drag (move, trim or fade handle).
@@ -3688,6 +3698,35 @@ impl eframe::App for AppUI {
             self.disk_warning = self.low_disk_warning();
         }
 
+        // File menu
+        let mut file_action: Option<FileAction> = None;
+        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+            egui::menu::bar(ui, |ui| {
+                ui.menu_button("File", |ui| {
+                    if ui.button("New").clicked() {
+                        file_action = Some(FileAction::New);
+                        ui.close_menu();
+                    }
+                    if ui.button("Open…").clicked() {
+                        file_action = Some(FileAction::Open);
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button("Save").clicked() {
+                        file_action = Some(FileAction::Save);
+                        ui.close_menu();
+                    }
+                    if ui.button("Save As…").clicked() {
+                        file_action = Some(FileAction::SaveAs);
+                        ui.close_menu();
+                    }
+                });
+            });
+        });
+        if let Some(action) = file_action {
+            self.handle_file_action(action);
+        }
+
         // Error banner (shown when an operation, e.g. recording, fails)
         if let Some(message) = self.error_message.clone() {
             egui::TopBottomPanel::top("error_banner").show(ctx, |ui| {
@@ -4777,6 +4816,9 @@ impl AppUI {
                 paste_pressed,
                 paste_released,
                 duplicate_pressed,
+                save_pressed,
+                save_as_pressed,
+                open_pressed,
             ) = ctx.input(|i| {
                 let has_copy = i
                     .events
@@ -4792,6 +4834,7 @@ impl AppUI {
                     .any(|event| matches!(event, egui::Event::Paste(_)));
 
                 let z_pressed = i.key_pressed(Key::Z);
+                let s_pressed = i.key_pressed(Key::S);
                 (
                     z_pressed,
                     z_pressed && i.modifiers.shift,
@@ -4801,6 +4844,9 @@ impl AppUI {
                     has_paste || i.key_pressed(Key::V),
                     (i.modifiers.command || i.modifiers.ctrl) && i.key_released(Key::V),
                     i.key_pressed(Key::D),
+                    s_pressed,
+                    s_pressed && i.modifiers.shift,
+                    i.key_pressed(Key::O),
                 )
             });
 
@@ -4827,6 +4873,16 @@ impl AppUI {
 
             if duplicate_pressed {
                 self.duplicate_selected_clip();
+            }
+            if save_pressed {
+                self.handle_file_action(if save_as_pressed {
+                    FileAction::SaveAs
+                } else {
+                    FileAction::Save
+                });
+            }
+            if open_pressed {
+                self.handle_file_action(FileAction::Open);
             }
 
             if undo_pressed {
@@ -5145,6 +5201,90 @@ impl AppUI {
         } else {
             None
         }
+    }
+
+    fn handle_file_action(&mut self, action: FileAction) {
+        match action {
+            FileAction::New => self.new_project(),
+            FileAction::Open => {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Zoft project", &["zoft"])
+                    .pick_file()
+                {
+                    self.load_project(&path);
+                }
+            }
+            FileAction::Save => {
+                if let Some(path) = self.project.project_path.clone() {
+                    self.save_project_to(&path);
+                } else {
+                    self.save_project_as();
+                }
+            }
+            FileAction::SaveAs => self.save_project_as(),
+        }
+    }
+
+    fn save_project_as(&mut self) {
+        let file_name = format!("{}.zoft", self.project.name);
+        if let Some(mut path) = rfd::FileDialog::new()
+            .add_filter("Zoft project", &["zoft"])
+            .set_file_name(&file_name)
+            .save_file()
+        {
+            if path.extension().and_then(|ext| ext.to_str()) != Some("zoft") {
+                path.set_extension("zoft");
+            }
+            self.save_project_to(&path);
+        }
+    }
+
+    fn save_project_to(&mut self, path: &Path) {
+        match ProjectSerialization::save(&self.project, path) {
+            Ok(()) => {
+                self.project.project_path = Some(path.to_path_buf());
+                self.error_message = None;
+            }
+            Err(e) => self.error_message = Some(format!("Could not save project: {}", e)),
+        }
+    }
+
+    fn load_project(&mut self, path: &Path) {
+        self.pause_transport();
+        match ProjectSerialization::load(path) {
+            Ok(project) => self.adopt_project(project),
+            Err(e) => self.error_message = Some(format!("Could not open project: {}", e)),
+        }
+    }
+
+    fn new_project(&mut self) {
+        self.pause_transport();
+        self.adopt_project(Project::new("Untitled"));
+    }
+
+    /// Replace the project and reset all UI state that referred to the old one.
+    fn adopt_project(&mut self, project: Project) {
+        self.project = project;
+        self.history.clear();
+        self.selected_clip = None;
+        self.deleted_from.clear();
+        self.audio_window = None;
+        self.clipboard = None;
+        self.drag = None;
+        self.playhead_secs = 0.0;
+        self.view_start_secs = 0.0;
+        self.needs_fit = true;
+        self.merge_chain = false;
+        self.disk_warning = None;
+        self.recording = false;
+        self.pending_record_track = None;
+        self.engine.set_project_format(
+            self.project.sample_rate,
+            bit_depth_bits(self.project.bit_depth),
+            2,
+        );
+        self.spawn_missing_overviews();
+        self.sync_monitoring();
     }
 
     /// Open the input device and start capturing a take at the current playhead.
@@ -5738,6 +5878,15 @@ fn bit_depth_from_spec(spec: hound::WavSpec) -> BitDepth {
         32 if spec.sample_format == hound::SampleFormat::Float => BitDepth::Float32,
         32 => BitDepth::Int32,
         _ => BitDepth::Float32,
+    }
+}
+
+/// Bits per sample for a project bit depth.
+fn bit_depth_bits(depth: BitDepth) -> u16 {
+    match depth {
+        BitDepth::Int16 => 16,
+        BitDepth::Int24 => 24,
+        BitDepth::Int32 | BitDepth::Float32 => 32,
     }
 }
 
