@@ -46,6 +46,10 @@ pub struct AudioEngine {
     selected_input_device: Arc<Mutex<Option<String>>>,
     /// Whether live input monitoring is requested (kept in sync with the UI).
     monitoring_enabled: AtomicBool,
+    /// Whether a playback mixer is currently loaded. Tracked explicitly so
+    /// stream decisions never depend on a `try_lock` that can race the audio
+    /// callback.
+    playback_active: AtomicBool,
     /// Loop range in output-device frames, applied whenever a new mixer is
     /// created and to the live mixer when it changes.
     playback_loop: Arc<Mutex<Option<(u64, u64)>>>,
@@ -75,6 +79,7 @@ impl AudioEngine {
             project_channels: channels,
             selected_input_device: Arc::new(Mutex::new(None)),
             monitoring_enabled: AtomicBool::new(false),
+            playback_active: AtomicBool::new(false),
             playback_loop: Arc::new(Mutex::new(None)),
             playback_metronome: Arc::new(Mutex::new(None)),
         })
@@ -129,6 +134,7 @@ impl AudioEngine {
             mixer.set_metronome(Some(metronome));
         }
         self.backend.set_playback_mixer(Some(mixer));
+        self.playback_active.store(true, Ordering::SeqCst);
     }
 
     /// Set (or clear) the transport loop range in output-device frames. The
@@ -149,6 +155,7 @@ impl AudioEngine {
     /// Remove the playback content (output falls silent).
     pub fn clear_playback(&self) {
         self.backend.set_playback_mixer(None);
+        self.playback_active.store(false, Ordering::SeqCst);
     }
 
     /// Current playback position in output frames, if playback is loaded.
@@ -326,7 +333,7 @@ impl AudioEngine {
             if !recording {
                 let _ = self.backend.stop_input_stream();
             }
-            let playback_loaded = self.backend.playback_position().is_some();
+            let playback_loaded = self.playback_active.load(Ordering::SeqCst);
             if !recording && !playback_loaded {
                 let _ = self.stop();
             }

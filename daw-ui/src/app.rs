@@ -799,6 +799,9 @@ struct AppUI {
     /// When the last paste shortcut was handled, used to avoid double-pasting
     /// when a backend reports both a clipboard event and a key release.
     last_paste_signal: Option<std::time::Instant>,
+    /// Last monitoring state pushed to the engine, so we only touch the audio
+    /// streams when the requested state actually changes.
+    monitoring_on: bool,
     /// Where recording started, so the clip lands at the right spot.
     record_start_secs: Option<f64>,
     /// Armed take waiting for the transport to roll (see `begin_recording`).
@@ -890,6 +893,7 @@ impl AppUI {
             last_tap: None,
             bpm_edit_from: None,
             last_paste_signal: None,
+            monitoring_on: false,
             record_start_secs: None,
             pending_record_track: None,
             last_playhead_update: std::time::Instant::now(),
@@ -1263,7 +1267,7 @@ impl AppUI {
 
     /// Enable live input monitoring when any track asks for it: `On` always,
     /// `Auto` while the track is armed or a take is running.
-    fn sync_monitoring(&self) {
+    fn sync_monitoring(&mut self) {
         let enabled = self.project.tracks.values().any(|track| {
             match track.monitor_mode {
                 MonitorMode::Off => false,
@@ -1271,7 +1275,10 @@ impl AppUI {
                 MonitorMode::On => true,
             }
         });
-        self.engine.set_monitoring(enabled);
+        if enabled != self.monitoring_on {
+            self.monitoring_on = enabled;
+            self.engine.set_monitoring(enabled);
+        }
     }
 
     fn push_undo(&mut self, action: EditAction, merge: bool) {
