@@ -92,7 +92,7 @@ struct UiState {
 - 2026-10-07: Timeline ruler rendering (16 divisions, beat markers)
 - 2026-10-07: Keyboard shortcuts (Space play/stop, R record)
 - 2026-10-21: Post-phase updates: ruler seek and loop lane, zoom/scroll, loop/In/Out, metronome, tempo/tap, track M/S/R/Mon/volume, Clip Audio window, History panel
-- 2026-10-23: Track list rows are height-matched to the arrange lanes; **+A**/**+M** add audio/MIDI tracks (undoable); MIDI input selector added to the transport bar
+- 2026-10-23: Track list rows are height-matched to the arrange lanes; **+A**/**+M** add audio/MIDI tracks (undoable); a dedicated MIDI bar lists inputs, auto-connects the first keyboard, and shows live note/velocity activity with a Refresh button
 
 ## Future Tasks (Post-Phase 0)
 

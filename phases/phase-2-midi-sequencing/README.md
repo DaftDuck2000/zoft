@@ -22,9 +22,9 @@
 ## Status Notes
 
 MIDI has started: tracks can be added as MIDI tracks, and MIDI input devices
-are enumerated through `midir` with a transport-bar selector and live
-note/velocity activity. MIDI recording to clips, playback/instruments, the
-piano roll and notation view are not implemented yet.
+are enumerated through `midir` with a dedicated MIDI bar (auto-connect,
+selector, Refresh and live note/velocity activity). MIDI recording to clips,
+playback/instruments, the piano roll and notation view are not implemented yet.
 
 ## Milestone: M2 — MIDI Sequencing (Week 44)
 

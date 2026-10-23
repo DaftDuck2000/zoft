@@ -120,5 +120,5 @@ MIDI Thru         Record Buffer      Chase Buffer
 
 ## Progress Log
 
-- 2026-10-23: MIDI keyboard input support started: `daw-engine/src/midi.rs` lists input ports with `midir`, the transport bar has a MIDI input selector and live note/velocity activity display, and audio/MIDI tracks can be added from the track list
+- 2026-10-23: MIDI keyboard input support started: `daw-engine/src/midi.rs` lists input ports with `midir`; a dedicated MIDI bar auto-connects the first real keyboard (skipping Midi Through), offers a selector + Refresh, and shows live note/velocity activity. Audio/MIDI tracks can be added from the track list
 - Remaining: MIDI clip recording, playback/instrument, chase events, loop recording modes, MIDI thru/panic, input quantize

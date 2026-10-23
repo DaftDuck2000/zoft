@@ -1119,6 +1119,17 @@ impl AppUI {
         // that are missing in the background.
         app.spawn_missing_overviews();
         app.sync_monitoring();
+        // Auto-connect the first real MIDI keyboard, skipping ALSA's virtual
+        // "Midi Through" port.
+        if let Some(device) = app
+            .midi_inputs
+            .iter()
+            .find(|device| !device.name.contains("Midi Through"))
+            .cloned()
+        {
+            app.selected_midi_input = Some(device.name);
+            app.restart_midi_monitor();
+        }
         app
     }
 
@@ -4909,57 +4920,6 @@ impl eframe::App for AppUI {
                         self.sync_monitoring();
                     }
                 }
-                if !self.midi_inputs.is_empty() {
-                    ui.separator();
-                    ui.label("MIDI:");
-                    let mut selected = self.selected_midi_input.clone();
-                    let mut changed = false;
-                    egui::ComboBox::from_id_salt("midi_input")
-                        .selected_text(selected.as_deref().unwrap_or("None"))
-                        .show_ui(ui, |ui| {
-                            if ui.selectable_value(&mut selected, None, "None").changed() {
-                                changed = true;
-                            }
-                            for device in &self.midi_inputs {
-                                if ui
-                                    .selectable_value(
-                                        &mut selected,
-                                        Some(device.name.clone()),
-                                        &device.name,
-                                    )
-                                    .changed()
-                                {
-                                    changed = true;
-                                }
-                            }
-                        });
-                    if changed {
-                        self.selected_midi_input = selected;
-                        self.restart_midi_monitor();
-                    }
-                    if let Some(activity) = self.midi_monitor.as_ref().map(|m| m.activity()) {
-                        self.midi_activity = activity;
-                    }
-                    let has_note = self.midi_activity.last_note.is_some();
-                    let active = self.midi_activity.active_notes > 0;
-                    let label = match self.midi_activity.last_note {
-                        Some(note) if active => format!(
-                            "{} vel {}",
-                            daw_engine::midi_note_name(note),
-                            self.midi_activity.last_velocity
-                        ),
-                        Some(note) => daw_engine::midi_note_name(note),
-                        None => "--".to_string(),
-                    };
-                    let color = if active {
-                        egui::Color32::GREEN
-                    } else if has_note {
-                        egui::Color32::from_gray(180)
-                    } else {
-                        egui::Color32::GRAY
-                    };
-                    ui.colored_label(color, label);
-                }
                 ui.separator();
                 ui.label(format!("Tracks: {}", self.project.track_order.len()));
             });
@@ -5170,8 +5130,72 @@ impl eframe::App for AppUI {
                 });
         });
 
-        // Central timeline/arrange area
-        egui::CentralPanel::default().show(ctx, |ui| {
+        // MIDI input bar
+        egui::TopBottomPanel::top("midi_bar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("MIDI:");
+                if self.midi_inputs.is_empty() {
+                    ui.weak("No MIDI inputs detected");
+                    if ui.small_button("Refresh").clicked() {
+                        self.refresh_midi_inputs();
+                    }
+                } else {
+                    let mut selected = self.selected_midi_input.clone();
+                    let mut changed = false;
+                    egui::ComboBox::from_id_salt("midi_input")
+                        .selected_text(selected.as_deref().unwrap_or("None"))
+                        .show_ui(ui, |ui| {
+                            if ui.selectable_value(&mut selected, None, "None").changed() {
+                                changed = true;
+                            }
+                            for device in &self.midi_inputs {
+                                if ui
+                                    .selectable_value(
+                                        &mut selected,
+                                        Some(device.name.clone()),
+                                        &device.name,
+                                    )
+                                    .changed()
+                                {
+                                    changed = true;
+                                }
+                            }
+                        });
+                    if changed {
+                        self.selected_midi_input = selected;
+                        self.restart_midi_monitor();
+                    }
+                    if ui.small_button("Refresh").clicked() {
+                        self.refresh_midi_inputs();
+                    }
+                    if let Some(activity) = self.midi_monitor.as_ref().map(|m| m.activity()) {
+                        self.midi_activity = activity;
+                    }
+                    let has_note = self.midi_activity.last_note.is_some();
+                    let active = self.midi_activity.active_notes > 0;
+                    let label = match self.midi_activity.last_note {
+                        Some(note) if active => format!(
+                            "{} vel {}",
+                            daw_engine::midi_note_name(note),
+                            self.midi_activity.last_velocity
+                        ),
+                        Some(note) => daw_engine::midi_note_name(note),
+                        None => "--".to_string(),
+                    };
+                    let color = if active {
+                        egui::Color32::GREEN
+                    } else if has_note {
+                        egui::Color32::from_gray(180)
+                    } else {
+                        egui::Color32::GRAY
+                    };
+                    ui.colored_label(color, label);
+                }
+            });
+        });
+
+        // Arrange toolbar (above the side panel and timeline so rows line up)
+        egui::TopBottomPanel::top("arrange_toolbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("Arrange");
                 ui.separator();
@@ -5264,8 +5288,10 @@ impl eframe::App for AppUI {
                     format_clock(self.timeline_duration())
                 ));
             });
-            ui.separator();
+        });
 
+        // Central timeline/arrange area
+        egui::CentralPanel::default().show(ctx, |ui| {
             let rect = ui.available_rect_before_wrap();
             if rect.width() <= 1.0 || rect.height() <= 1.0 {
                 return;
@@ -6513,6 +6539,18 @@ impl AppUI {
     fn new_project_from_template(&mut self, template: Template) {
         self.pause_transport();
         self.adopt_project(project_from_template(template));
+    }
+
+    /// Re-scan MIDI inputs, e.g. after plugging a keyboard in.
+    fn refresh_midi_inputs(&mut self) {
+        self.midi_inputs = daw_engine::list_midi_inputs().unwrap_or_default();
+        if let Some(selected) = &self.selected_midi_input {
+            if !self.midi_inputs.iter().any(|device| &device.name == selected) {
+                self.selected_midi_input = None;
+                self.midi_monitor = None;
+                self.midi_activity = daw_engine::MidiActivity::default();
+            }
+        }
     }
 
     /// Open (or close) the MIDI input monitor for the selected device.
