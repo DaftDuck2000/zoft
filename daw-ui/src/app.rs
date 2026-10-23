@@ -545,6 +545,8 @@ enum EditAction {
     },
     /// Add a new track (undo removes it again).
     AddTrack { track: Track },
+    /// Remove a track, remembering its original order for undo.
+    RemoveTrack { track: Track, index: usize },
     /// Several edits applied and undone as one history step.
     Group {
         actions: Vec<EditAction>,
@@ -615,6 +617,7 @@ impl EditAction {
                 }
             }
             EditAction::AddTrack { track } => format!("Add track: {}", track.name),
+            EditAction::RemoveTrack { track, .. } => format!("Remove track: {}", track.name),
             EditAction::Group { label, .. } => label.clone(),
         }
     }
@@ -1789,6 +1792,17 @@ impl AppUI {
                     self.project.add_track(track.clone());
                 } else {
                     self.project.remove_track(track.id);
+                }
+            }
+            EditAction::RemoveTrack { track, index } => {
+                if forward {
+                    self.project.remove_track(track.id);
+                } else {
+                    self.project.tracks.insert(track.id, track.clone());
+                    if !self.project.track_order.contains(&track.id) {
+                        let position = (*index).min(self.project.track_order.len());
+                        self.project.track_order.insert(position, track.id);
+                    }
                 }
             }
             EditAction::Group { actions, .. } => {
@@ -4929,6 +4943,7 @@ impl eframe::App for AppUI {
         egui::SidePanel::left("track_list").show(ctx, |ui| {
             let mut add_audio_track = false;
             let mut add_midi_track = false;
+            let mut remove_track = None;
             ui.spacing_mut().item_spacing.y = 0.0;
             ui.allocate_ui_with_layout(
                 egui::vec2(ui.available_width(), RULER_HEIGHT),
@@ -4938,14 +4953,14 @@ impl eframe::App for AppUI {
                     ui.heading("Tracks");
                     ui.add_space(4.0);
                     if ui
-                        .small_button("+A")
+                        .small_button("+Audio")
                         .on_hover_text("Add audio track")
                         .clicked()
                     {
                         add_audio_track = true;
                     }
                     if ui
-                        .small_button("+M")
+                        .small_button("+MIDI")
                         .on_hover_text("Add MIDI track")
                         .clicked()
                     {
@@ -5046,6 +5061,13 @@ impl eframe::App for AppUI {
                         )
                         .on_hover_text(format!("Track volume {:.0}%", after.volume * 100.0));
                         ui.label(format!("{:.0}%", after.volume * 100.0));
+                        if ui
+                            .small_button("×")
+                            .on_hover_text("Remove track")
+                            .clicked()
+                        {
+                            remove_track = Some(*track_id);
+                        }
                         },
                     );
                     ui.painter().hline(
@@ -5081,6 +5103,9 @@ impl eframe::App for AppUI {
             }
             if add_midi_track {
                 self.add_track(true);
+            }
+            if let Some(track_id) = remove_track {
+                self.remove_track(track_id);
             }
             self.sync_monitoring();
 
@@ -6539,6 +6564,27 @@ impl AppUI {
     fn new_project_from_template(&mut self, template: Template) {
         self.pause_transport();
         self.adopt_project(project_from_template(template));
+    }
+
+    /// Remove a track (and detach its clips into the trash) as one undoable
+    /// step. The track object keeps its clip list, so undo restores everything.
+    fn remove_track(&mut self, track_id: TrackId) {
+        let Some(track) = self.project.tracks.get(&track_id).cloned() else {
+            return;
+        };
+        let index = self
+            .project
+            .track_order
+            .iter()
+            .position(|id| *id == track_id)
+            .unwrap_or(0);
+        let action = EditAction::RemoveTrack { track, index };
+        self.apply_action(&action, true);
+        self.push_undo(action, false);
+        self.clear_selection();
+        self.after_edit();
+        self.refresh_playback_if_playing();
+        self.sync_monitoring();
     }
 
     /// Re-scan MIDI inputs, e.g. after plugging a keyboard in.

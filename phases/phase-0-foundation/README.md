@@ -35,8 +35,7 @@ to reflect incomplete tooling and persistence work as of 2026-10-21:
   timeline ruler and the `.zoft` serializer/loader
 - 0.1 still lacks the pinned toolchain, GitHub Actions workflow, pre-commit
   hooks, CHANGELOG and wired config/profiling
-- 0.4 still lacks add/remove/reorder track UI, markers, a theme toggle,
-  vertical track-list scrolling and window-state persistence
+- 0.4 still lacks track reordering, markers, a theme toggle, vertical track-list scrolling and window-state persistence
 - 0.5 has the binary format, File menu Save/Open, Recent Projects, a 2-minute autosave with recovery prompt and starter templates; only large-project benchmark checks remain
 - Post-phase additions now in daily use: ruler seek + loop lane, zoom/scroll,
   metronome, tempo/tap, track M/S/R/Mon/volume, punch recording, recording level
