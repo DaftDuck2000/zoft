@@ -27,11 +27,11 @@ selector, Refresh and live note/velocity activity). Armed MIDI tracks record
 timestamped notes into clips that render in the arrange lane and play through
 a basic built-in sine voice; live input is auditioned through the same voice
 while recording, and MIDI clips show miniature note previews in the arrange
-view. Double-clicking a MIDI clip opens a read-only piano-roll view. Every
-track type now has a real-time insert chain (saturation, filter, bit crusher,
-tremolo) that runs before the track fader. Instruments, chase events, loop
-takes, MIDI thru and the editing tools in the piano roll are not implemented
-yet.
+view. Double-clicking a MIDI clip opens an editable piano-roll view with
+add/move/resize/delete, multi-selection and undo. Every track type now has a
+real-time insert chain (saturation, filter, bit crusher, tremolo) that runs
+before the track fader. Instruments, chase events, loop takes, MIDI thru,
+velocity/CC lanes and the remaining editing tools are not implemented yet.
 
 ## Milestone: M2 — MIDI Sequencing (Week 44)
 

@@ -284,12 +284,25 @@ fn note_name(pitch: u8) -> String {
     format!("{}{}", NAMES[(pitch % 12) as usize], pitch as i32 / 12 - 1)
 }
 
-/// Pair note-on/off events in a MIDI clip into `(start_tick, end_tick, note,
-/// velocity)` spans relative to the clip start. Notes still held at the end of
-/// the clip stop at its boundary.
-fn midi_clip_note_spans(clip: &MidiClip) -> Vec<(u64, u64, u8, u8)> {
-    let mut spans = Vec::new();
-    let mut active: HashMap<(u8, u8), (u64, u8)> = HashMap::new();
+/// One editable note in the piano roll. Unlike the lightweight span tuples used
+/// by the arrange preview, this keeps the MIDI channel and can be written back
+/// into a clip.
+#[derive(Debug, Clone, PartialEq)]
+struct PianoRollNote {
+    start: u64,
+    end: u64,
+    pitch: u8,
+    velocity: u8,
+    channel: u8,
+}
+
+/// Pair note-on/off events in a MIDI clip into editable notes. Overlapping
+/// notes on the same pitch/channel are supported by matching each note-off to
+/// the oldest open note-on. Notes still held at the end of the clip stop at its
+/// boundary.
+fn midi_clip_notes(clip: &MidiClip) -> Vec<PianoRollNote> {
+    let mut notes = Vec::new();
+    let mut active: HashMap<(u8, u8), VecDeque<(u64, u8)>> = HashMap::new();
     let end_of_clip = clip.length.max(1);
 
     for event in &clip.events {
@@ -300,26 +313,102 @@ fn midi_clip_note_spans(clip: &MidiClip) -> Vec<(u64, u64, u8, u8)> {
                 note,
                 velocity,
             } if *velocity > 0 => {
-                if let Some((start_tick, start_velocity)) = active.remove(&(*channel, *note)) {
-                    spans.push((start_tick, tick.max(start_tick + 1), *note, start_velocity));
-                }
-                active.insert((*channel, *note), (tick, *velocity));
+                active
+                    .entry((*channel, *note))
+                    .or_default()
+                    .push_back((tick, *velocity));
             }
             MidiMessage::NoteOn { channel, note, .. }
             | MidiMessage::NoteOff { channel, note, .. } => {
-                if let Some((start_tick, start_velocity)) = active.remove(&(*channel, *note)) {
-                    spans.push((start_tick, tick.max(start_tick + 1), *note, start_velocity));
+                if let Some(queue) = active.get_mut(&(*channel, *note)) {
+                    if let Some((start_tick, start_velocity)) = queue.pop_front() {
+                        notes.push(PianoRollNote {
+                            start: start_tick,
+                            end: tick.max(start_tick + 1),
+                            pitch: *note,
+                            velocity: start_velocity,
+                            channel: *channel,
+                        });
+                    }
                 }
             }
             _ => {}
         }
     }
 
-    for ((_channel, note), (start_tick, velocity)) in active {
-        spans.push((start_tick, end_of_clip.max(start_tick + 1), note, velocity));
+    for ((channel, note), queue) in active {
+        for (start_tick, velocity) in queue {
+            notes.push(PianoRollNote {
+                start: start_tick,
+                end: end_of_clip.max(start_tick + 1),
+                pitch: note,
+                velocity,
+                channel,
+            });
+        }
     }
-    spans.sort_by_key(|(start, _, note, _)| (*start, *note));
-    spans
+    notes.sort_by_key(|note| (note.start, note.pitch, note.channel));
+    notes
+}
+
+/// Pair note-on/off events in a MIDI clip into `(start_tick, end_tick, note,
+/// velocity)` spans relative to the clip start.
+fn midi_clip_note_spans(clip: &MidiClip) -> Vec<(u64, u64, u8, u8)> {
+    midi_clip_notes(clip)
+        .into_iter()
+        .map(|note| (note.start, note.end, note.pitch, note.velocity))
+        .collect()
+}
+
+/// Replace a clip's note events with the piano roll's note list. Non-note
+/// events (CC, pitch bend, etc.) are preserved.
+fn write_piano_roll_notes(clip: &mut MidiClip, notes: &[PianoRollNote]) {
+    let mut events: Vec<MidiEvent> = clip
+        .events
+        .iter()
+        .filter(|event| {
+            !matches!(
+                event.message,
+                MidiMessage::NoteOn { .. } | MidiMessage::NoteOff { .. }
+            )
+        })
+        .cloned()
+        .collect();
+
+    for note in notes {
+        let start = note.start.min(clip.length.saturating_sub(1));
+        let end = note.end.max(start + 1).min(clip.length.max(start + 1));
+        events.push(MidiEvent::note_on(
+            start,
+            note.channel,
+            note.pitch,
+            note.velocity.max(1),
+        ));
+        events.push(MidiEvent::note_off(end, note.channel, note.pitch, 0));
+    }
+
+    // Note-offs sort before note-ons at the same tick so a repeated pitch
+    // starts a fresh note instead of immediately closing the new one.
+    events.sort_by_key(|event| {
+        let priority = match event.message {
+            MidiMessage::NoteOff { .. } => 0,
+            MidiMessage::NoteOn { .. } => 1,
+            _ => 2,
+        };
+        (event.tick, priority)
+    });
+    clip.events = events;
+}
+
+/// Tick grid used by the piano roll, derived from the arrange snap setting.
+fn piano_roll_snap_ticks(snap: SnapMode, beats_per_bar: u64) -> u64 {
+    match snap {
+        SnapMode::Off => 1,
+        SnapMode::Bar => 960 * beats_per_bar.max(1),
+        SnapMode::Beat => 960,
+        SnapMode::Eighth => 480,
+        SnapMode::Sixteenth => 240,
+    }
 }
 
 /// Convert a loop range in seconds to output-device frames. Returns `None`
@@ -628,6 +717,12 @@ enum EditAction {
     AttachMidi { track: TrackId, clip_id: ClipId },
     /// Detach a MIDI clip from its track (undo reattaches).
     DetachMidi { track: TrackId, clip_id: ClipId },
+    /// Replace a MIDI clip's notes (piano-roll editing).
+    MidiClip {
+        clip_id: ClipId,
+        from: MidiClip,
+        to: MidiClip,
+    },
     /// Several edits applied and undone as one history step.
     Group {
         actions: Vec<EditAction>,
@@ -710,6 +805,7 @@ impl EditAction {
             }
             EditAction::AttachMidi { .. } => "Add MIDI clip".to_string(),
             EditAction::DetachMidi { .. } => "Delete MIDI clip".to_string(),
+            EditAction::MidiClip { .. } => "Edit MIDI notes".to_string(),
             EditAction::Group { label, .. } => label.clone(),
         }
     }
@@ -916,10 +1012,54 @@ impl ClipAudioWindow {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NoteDragMode {
+    Move,
+    ResizeEnd,
+}
+
+/// In-progress piano-roll note gesture.
+#[derive(Debug, Clone)]
+struct NoteDrag {
+    mode: NoteDragMode,
+    anchor_tick: u64,
+    anchor_pitch: u8,
+    /// Note indices and their values when the gesture started.
+    originals: Vec<(usize, PianoRollNote)>,
+    /// Clip snapshot for one undo entry when the gesture ends.
+    before: MidiClip,
+}
+
 /// State of the floating piano-roll window for one MIDI clip.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct PianoRollWindow {
     clip_id: ClipId,
+    notes: Vec<PianoRollNote>,
+    initialized: bool,
+    selected: BTreeSet<usize>,
+    drag: Option<NoteDrag>,
+    /// Length used for the next newly added note.
+    last_length: u64,
+}
+
+impl PianoRollWindow {
+    fn new(clip_id: ClipId) -> Self {
+        Self {
+            clip_id,
+            notes: Vec::new(),
+            initialized: false,
+            selected: BTreeSet::new(),
+            drag: None,
+            last_length: 960,
+        }
+    }
+
+    fn load(&mut self, clip: &MidiClip) {
+        self.notes = midi_clip_notes(clip);
+        self.selected.clear();
+        self.drag = None;
+        self.initialized = true;
+    }
 }
 
 /// File-menu actions.
@@ -1657,6 +1797,46 @@ impl AppUI {
         self.request_playback_reload();
     }
 
+    /// Update only the MIDI note list on the live mixer. Used while dragging
+    /// piano-roll notes so audio clips are not re-read from disk every frame.
+    fn refresh_midi_playback(&mut self) {
+        if !self.playing {
+            return;
+        }
+        let out_rate = self.engine.output_sample_rate().max(1);
+        let notes = self.collect_playable_notes(out_rate);
+        self.engine.set_playback_notes(notes);
+    }
+
+    /// Write the piano-roll note buffer into the project clip.
+    fn write_piano_roll_to_project(&mut self, window: &PianoRollWindow) {
+        let Some(clip) = self.project.midi_clips.get_mut(window.clip_id) else {
+            return;
+        };
+        write_piano_roll_notes(clip, &window.notes);
+        self.after_edit();
+        self.refresh_midi_playback();
+    }
+
+    /// Push one undo entry for a completed piano-roll edit.
+    fn push_midi_clip_undo(&mut self, clip_id: ClipId, before: MidiClip) {
+        let Some(after) = self.project.midi_clips.get(clip_id).cloned() else {
+            return;
+        };
+        if before != after {
+            self.push_undo(EditAction::MidiClip { clip_id, from: before, to: after }, false);
+        }
+    }
+
+    /// Force the open piano roll to reload from the project after undo/redo.
+    fn reload_piano_roll(&mut self) {
+        if let Some(window) = &mut self.piano_roll {
+            window.initialized = false;
+            window.selected.clear();
+            window.drag = None;
+        }
+    }
+
     /// Enable live input monitoring when any track asks for it: `On` always,
     /// `Auto` while the track is armed or a take is running.
     fn sync_monitoring(&mut self) {
@@ -2090,6 +2270,15 @@ impl AppUI {
                     }
                 }
             }
+            EditAction::MidiClip { clip_id, from, to } => {
+                if let Some(clip) = self.project.midi_clips.get_mut(*clip_id) {
+                    *clip = if forward {
+                        to.clone()
+                    } else {
+                        from.clone()
+                    };
+                }
+            }
             EditAction::Group { actions, .. } => {
                 if forward {
                     for action in actions {
@@ -2110,6 +2299,7 @@ impl AppUI {
             self.after_edit();
             self.refresh_playback_if_playing();
             self.sync_monitoring();
+            self.reload_piano_roll();
         }
     }
 
@@ -2119,6 +2309,7 @@ impl AppUI {
             self.after_edit();
             self.refresh_playback_if_playing();
             self.sync_monitoring();
+            self.reload_piano_roll();
         }
     }
 
@@ -4539,23 +4730,33 @@ impl AppUI {
         }
     }
 
-    /// Basic piano-roll view: pitch stripes, beat/bar grid and every captured
-    /// note as a rectangle. Editing comes later; this is for inspecting takes.
+    /// Editable piano-roll view: pitch stripes, beat/bar grid, note selection,
+    /// drag move/resize, double-click entry and right-click delete.
     fn show_piano_roll(&mut self, ctx: &egui::Context) {
-        let Some(window) = self.piano_roll else {
+        let Some(mut window) = self.piano_roll.clone() else {
             return;
         };
-        let Some(clip) = self.project.midi_clips.get(window.clip_id) else {
+        let Some(clip) = self.project.midi_clips.get(window.clip_id).cloned() else {
             self.piano_roll = None;
             return;
         };
-        let spans = midi_clip_note_spans(clip);
+        if !window.initialized {
+            window.load(&clip);
+        }
+
         let length = clip.length.max(1);
-        let note_count = spans.len();
         let (numerator, _) = self.time_signature();
         let beats_per_bar = numerator.max(1) as u64;
+        let beat_ticks = 960u64;
+        let bar_ticks = beat_ticks * beats_per_bar.max(1);
+        let snap_ticks = piano_roll_snap_ticks(self.snap_mode, beats_per_bar);
+        let snap_label = self.snap_mode.label();
         let mut open = true;
         let mut close = false;
+        let mut commit = false;
+        let mut undo_before: Option<MidiClip> = None;
+        let mut delete_selected = false;
+        let mut select_all = false;
 
         egui::Window::new("Piano Roll")
             .id(egui::Id::new(("piano_roll", window.clip_id)))
@@ -4564,18 +4765,35 @@ impl AppUI {
             .min_size([420.0, 260.0])
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(format!("{} notes", note_count));
+                    ui.label(format!("{} notes", window.notes.len()));
                     ui.separator();
                     ui.weak(format!("{} ticks", length));
                     ui.separator();
-                    ui.weak("Double-click a MIDI clip to reopen");
+                    ui.weak(format!("Snap: {}", snap_label));
+                    if ui
+                        .add_enabled(
+                            !window.selected.is_empty(),
+                            egui::Button::new("Delete"),
+                        )
+                        .clicked()
+                    {
+                        delete_selected = true;
+                    }
+                    if ui.small_button("Select All").clicked() {
+                        select_all = true;
+                    }
                     if ui.small_button("Close").clicked() {
                         close = true;
                     }
                 });
+                ui.weak(
+                    "Double-click to add · drag to move/resize · right-click to delete",
+                );
 
-                let (response, painter) =
-                    ui.allocate_painter(ui.available_size(), egui::Sense::hover());
+                let (response, painter) = ui.allocate_painter(
+                    ui.available_size(),
+                    egui::Sense::click_and_drag(),
+                );
                 let rect = response.rect;
                 if rect.width() < 80.0 || rect.height() < 40.0 {
                     return;
@@ -4592,12 +4810,12 @@ impl AppUI {
                 );
 
                 // Show at least two octaves so sparse takes still have context.
-                let (mut low, mut high) = if spans.is_empty() {
+                let (mut low, mut high) = if window.notes.is_empty() {
                     (48u8, 72u8)
                 } else {
                     (
-                        spans.iter().map(|span| span.2).min().unwrap_or(48),
-                        spans.iter().map(|span| span.2).max().unwrap_or(72),
+                        window.notes.iter().map(|note| note.pitch).min().unwrap_or(48),
+                        window.notes.iter().map(|note| note.pitch).max().unwrap_or(72),
                     )
                 };
                 low = low.saturating_sub(2);
@@ -4659,9 +4877,21 @@ impl AppUI {
                     }
                 }
 
-                // Beat and bar lines.
-                let beat_ticks = 960u64;
-                let bar_ticks = beat_ticks * beats_per_bar.max(1);
+                // Snap subdivisions first, then beats and bars on top.
+                if snap_ticks > 1 && length / snap_ticks <= 500 {
+                    let mut tick = 0u64;
+                    while tick <= length {
+                        if tick % beat_ticks != 0 {
+                            let x = grid.left()
+                                + (tick as f32 / length as f32) * grid.width();
+                            painter.line_segment(
+                                [egui::pos2(x, grid.top()), egui::pos2(x, grid.bottom())],
+                                egui::Stroke::new(0.5_f32, egui::Color32::from_gray(42)),
+                            );
+                        }
+                        tick += snap_ticks;
+                    }
+                }
                 let mut tick = 0u64;
                 while tick <= length {
                     let x = grid.left() + (tick as f32 / length as f32) * grid.width();
@@ -4680,35 +4910,369 @@ impl AppUI {
                     tick += beat_ticks;
                 }
 
-                // Note rectangles.
-                for (start, end, pitch, velocity) in &spans {
-                    if *pitch < low || *pitch > high {
+                let pitch_at = |y: f32| -> u8 {
+                    let row = ((y - grid.top()) / row_height).floor();
+                    let row = row.clamp(0.0, (rows - 1.0).max(0.0)) as i32;
+                    (high as i32 - row).clamp(0, 127) as u8
+                };
+                let tick_at = |x: f32| -> u64 {
+                    let fraction = ((x - grid.left()) / grid.width()).clamp(0.0, 1.0);
+                    (fraction as f64 * length as f64).round() as u64
+                };
+                let snap_tick = |tick: u64| -> u64 {
+                    if snap_ticks <= 1 {
+                        tick
+                    } else {
+                        ((tick + snap_ticks / 2) / snap_ticks) * snap_ticks
+                    }
+                };
+
+                let mut note_rects: Vec<(usize, egui::Rect)> =
+                    Vec::with_capacity(window.notes.len());
+                for (index, note) in window.notes.iter().enumerate() {
+                    if note.pitch < low || note.pitch > high {
                         continue;
                     }
-                    let x0 = grid.left() + (*start as f32 / length as f32) * grid.width();
-                    let x1 = grid.left() + (*end as f32 / length as f32) * grid.width();
-                    let y0 = grid.top() + (high - *pitch) as f32 * row_height;
+                    let x0 = grid.left()
+                        + (note.start as f32 / length as f32) * grid.width();
+                    let x1 =
+                        grid.left() + (note.end as f32 / length as f32) * grid.width();
+                    let y0 = grid.top() + (high - note.pitch) as f32 * row_height;
                     let note_rect = egui::Rect::from_min_max(
                         egui::pos2(x0, y0 + 1.0),
                         egui::pos2(x1.max(x0 + 2.0), y0 + row_height - 1.0),
                     );
-                    let level = 120 + (*velocity as u16 * 90 / 127) as u8;
+                    let selected = window.selected.contains(&index);
+                    let level = 120 + (note.velocity as u16 * 90 / 127) as u8;
                     painter.rect_filled(
                         note_rect,
                         2.0,
-                        egui::Color32::from_rgb(70, level, 220),
+                        if selected {
+                            egui::Color32::from_rgb(120, 220, 255)
+                        } else {
+                            egui::Color32::from_rgb(70, level, 220)
+                        },
                     );
                     painter.rect_stroke(
                         note_rect,
                         2.0,
-                        egui::Stroke::new(0.5_f32, egui::Color32::from_gray(230)),
+                        egui::Stroke::new(
+                            if selected { 1.5_f32 } else { 0.5_f32 },
+                            if selected {
+                                egui::Color32::WHITE
+                            } else {
+                                egui::Color32::from_gray(230)
+                            },
+                        ),
                     );
+                    note_rects.push((index, note_rect));
+                }
+
+                let hover_pos = ui.input(|i| i.pointer.hover_pos());
+                let hit_test = |pos: egui::Pos2| -> Option<(usize, NoteDragMode)> {
+                    for (index, note_rect) in note_rects.iter().rev() {
+                        if note_rect.contains(pos) {
+                            let edge = (note_rect.right() - pos.x).max(0.0) <= 6.0;
+                            return Some((
+                                *index,
+                                if edge {
+                                    NoteDragMode::ResizeEnd
+                                } else {
+                                    NoteDragMode::Move
+                                },
+                            ));
+                        }
+                    }
+                    None
+                };
+
+                if let Some(pos) = hover_pos {
+                    if response.hovered() {
+                        if let Some((_, mode)) = hit_test(pos) {
+                            let icon = match mode {
+                                NoteDragMode::Move => egui::CursorIcon::Grab,
+                                NoteDragMode::ResizeEnd => {
+                                    egui::CursorIcon::ResizeHorizontal
+                                }
+                            };
+                            ui.output_mut(|output| output.cursor_icon = icon);
+                        }
+                    }
+                }
+
+                let modifiers = ui.input(|i| i.modifiers);
+                let pointer_pos = response.interact_pointer_pos().or(hover_pos);
+                let double_clicked = response.double_clicked();
+                let mut handled_double = false;
+
+                // Double-click empty space adds a note.
+                if double_clicked && !modifiers.command && !modifiers.shift {
+                    if let Some(pos) = pointer_pos {
+                        if grid.contains(pos)
+                            && hit_test(pos).is_none()
+                            && clip.length > 0
+                        {
+                            let start = snap_tick(tick_at(pos.x))
+                                .min(length.saturating_sub(1));
+                            let wanted = window.last_length.max(1);
+                            let end = start
+                                .saturating_add(wanted)
+                                .min(length)
+                                .max(start + 1);
+                            let note = PianoRollNote {
+                                start,
+                                end,
+                                pitch: pitch_at(pos.y),
+                                velocity: 100,
+                                channel: 0,
+                            };
+                            undo_before = Some(clip.clone());
+                            window.notes.push(note);
+                            let index = window.notes.len() - 1;
+                            window.selected.clear();
+                            window.selected.insert(index);
+                            commit = true;
+                            handled_double = true;
+                        }
+                    }
+                }
+
+                // Right-click a note to delete it (or the whole selection if
+                // the clicked note is selected).
+                if response.secondary_clicked() {
+                    if let Some(pos) = response.interact_pointer_pos() {
+                        if let Some((index, _)) = hit_test(pos) {
+                            undo_before = Some(clip.clone());
+                            if window.selected.contains(&index) {
+                                delete_selected = true;
+                            } else {
+                                window.notes.remove(index);
+                                window.selected.clear();
+                                window.drag = None;
+                                commit = true;
+                            }
+                        }
+                    }
+                }
+
+                if ui.rect_contains_pointer(ui.max_rect()) {
+                    let delete_key = ui.input(|i| {
+                        i.key_pressed(egui::Key::Delete)
+                            || i.key_pressed(egui::Key::Backspace)
+                    });
+                    if delete_key && !window.selected.is_empty() {
+                        delete_selected = true;
+                    }
+                    if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A)) {
+                        select_all = true;
+                    }
+                    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        window.selected.clear();
+                    }
+                }
+
+                if select_all {
+                    window.selected = (0..window.notes.len()).collect();
+                }
+                if delete_selected && !window.selected.is_empty() {
+                    undo_before = Some(clip.clone());
+                    let selected = std::mem::take(&mut window.selected);
+                    let mut index = 0usize;
+                    window.notes.retain(|_| {
+                        let keep = !selected.contains(&index);
+                        index += 1;
+                        keep
+                    });
+                    window.drag = None;
+                    commit = true;
+                }
+
+                // Selection and drag start.
+                if response.drag_started() && !handled_double {
+                    if let Some(pos) = response.interact_pointer_pos() {
+                        let press_pos = ui
+                            .input(|i| i.pointer.press_origin())
+                            .unwrap_or(pos);
+                        if !grid.contains(press_pos) {
+                            window.selected.clear();
+                        } else {
+                            match hit_test(press_pos) {
+                                Some((index, mode)) => {
+                                    if modifiers.command || modifiers.shift {
+                                        if window.selected.contains(&index) {
+                                            window.selected.remove(&index);
+                                        } else {
+                                            window.selected.insert(index);
+                                        }
+                                    } else if !window.selected.contains(&index) {
+                                        window.selected.clear();
+                                        window.selected.insert(index);
+                                    }
+                                    if window.selected.contains(&index) {
+                                        let originals = window
+                                            .selected
+                                            .iter()
+                                            .filter_map(|index| {
+                                                window
+                                                    .notes
+                                                    .get(*index)
+                                                    .cloned()
+                                                    .map(|note| (*index, note))
+                                            })
+                                            .collect();
+                                        window.drag = Some(NoteDrag {
+                                            mode,
+                                            anchor_tick: tick_at(press_pos.x),
+                                            anchor_pitch: pitch_at(press_pos.y),
+                                            originals,
+                                            before: clip.clone(),
+                                        });
+                                    }
+                                }
+                                None => {
+                                    if !modifiers.command && !modifiers.shift {
+                                        window.selected.clear();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if response.dragged() {
+                    if let Some(drag) = window.drag.as_ref() {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            let current_tick = tick_at(pos.x);
+                            let current_pitch = pitch_at(pos.y);
+                            match drag.mode {
+                                NoteDragMode::Move => {
+                                    let raw_delta =
+                                        current_tick as i64 - drag.anchor_tick as i64;
+                                    let anchor = drag
+                                        .originals
+                                        .first()
+                                        .map(|(_, note)| note.start)
+                                        .unwrap_or(0);
+                                    let target_start = snap_tick(
+                                        (anchor as i64 + raw_delta).max(0) as u64,
+                                    );
+                                    let delta_tick =
+                                        target_start as i64 - anchor as i64;
+                                    let delta_pitch = current_pitch as i16
+                                        - drag.anchor_pitch as i16;
+                                    for (index, original) in &drag.originals {
+                                        if let Some(note) = window.notes.get_mut(*index) {
+                                            let duration = original
+                                                .end
+                                                .saturating_sub(original.start)
+                                                .max(1);
+                                            let start = (original.start as i64
+                                                + delta_tick)
+                                                .clamp(
+                                                    0,
+                                                    length
+                                                        .saturating_sub(duration)
+                                                        as i64,
+                                                )
+                                                as u64;
+                                            note.start = start;
+                                            note.end = (start + duration)
+                                                .min(length)
+                                                .max(start + 1);
+                                            note.pitch = (original.pitch as i16
+                                                + delta_pitch)
+                                                .clamp(0, 127)
+                                                as u8;
+                                        }
+                                    }
+                                    commit = true;
+                                }
+                                NoteDragMode::ResizeEnd => {
+                                    let delta =
+                                        current_tick as i64 - drag.anchor_tick as i64;
+                                    for (index, original) in &drag.originals {
+                                        if let Some(note) = window.notes.get_mut(*index) {
+                                            let end = snap_tick(
+                                                (original.end as i64 + delta)
+                                                    .max(original.start as i64 + 1)
+                                                    as u64,
+                                            )
+                                            .min(length)
+                                            .max(original.start + 1);
+                                            note.end = end;
+                                        }
+                                    }
+                                    if let Some((index, _)) = drag.originals.first() {
+                                        if let Some(note) = window.notes.get(*index) {
+                                            window.last_length =
+                                                note.end.saturating_sub(note.start).max(1);
+                                        }
+                                    }
+                                    commit = true;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if response.drag_stopped() {
+                    if let Some(drag) = window.drag.take() {
+                        let changed = drag.originals.iter().any(|(index, original)| {
+                            window.notes.get(*index) != Some(original)
+                        });
+                        if changed {
+                            undo_before = Some(drag.before);
+                            commit = true;
+                        }
+                    }
+                }
+
+                if response.clicked() && !double_clicked && !handled_double {
+                    if let Some(pos) = response.interact_pointer_pos() {
+                        if grid.contains(pos) {
+                            match hit_test(pos) {
+                                Some((index, _)) => {
+                                    if modifiers.command || modifiers.shift {
+                                        if window.selected.contains(&index) {
+                                            window.selected.remove(&index);
+                                        } else {
+                                            window.selected.insert(index);
+                                        }
+                                    } else {
+                                        window.selected.clear();
+                                        window.selected.insert(index);
+                                    }
+                                }
+                                None => {
+                                    if !modifiers.command && !modifiers.shift {
+                                        window.selected.clear();
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             });
 
         if !open || close {
+            if commit {
+                self.write_piano_roll_to_project(&window);
+            }
+            let before = undo_before.or_else(|| window.drag.take().map(|drag| drag.before));
+            if let Some(before) = before {
+                self.push_midi_clip_undo(window.clip_id, before);
+            }
             self.piano_roll = None;
+            return;
         }
+
+        if commit {
+            self.write_piano_roll_to_project(&window);
+        }
+        if let Some(before) = undo_before {
+            self.push_midi_clip_undo(window.clip_id, before);
+        }
+        self.piano_roll = Some(window);
     }
 }
 
@@ -5860,7 +6424,7 @@ impl eframe::App for AppUI {
                     .clicked()
                 {
                     if let Some(clip_id) = self.selected_midi_clip {
-                        self.piano_roll = Some(PianoRollWindow { clip_id });
+                        self.piano_roll = Some(PianoRollWindow::new(clip_id));
                     }
                 }
                 ui.separator();
@@ -6665,7 +7229,7 @@ impl eframe::App for AppUI {
                     {
                         self.clear_selection();
                         self.selected_midi_clip = Some(*midi_id);
-                        self.piano_roll = Some(PianoRollWindow { clip_id: *midi_id });
+                        self.piano_roll = Some(PianoRollWindow::new(*midi_id));
                     }
                 }
             }
@@ -6973,8 +7537,11 @@ impl AppUI {
             self.toggle_selected_clips_muted();
         }
 
-        // Delete/Backspace: remove the selected clip (recoverable via undo)
-        if ctx.input(|i| i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace)) {
+        // Delete/Backspace: remove the selected clip (recoverable via undo).
+        // While the piano roll is open, its grid handles Delete for notes.
+        if self.piano_roll.is_none()
+            && ctx.input(|i| i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace))
+        {
             self.delete_selected_clip();
         }
 
@@ -8950,12 +9517,13 @@ mod tests {
         clip_span_samples, clips_in_marquee, contiguous_clip_span, filter_audio,
         knob_from_normalized, knob_to_normalized, load_wav_interleaved,
         load_wav_range_interleaved, loop_range_frames, measure_integrated_loudness,
-        merge_continuous_edit, metronome_config, midi_clip_note_spans, note_name,
-        processed_file_stem, punch_waiting,
+        merge_continuous_edit, metronome_config, midi_clip_note_spans, midi_clip_notes,
+        note_name, piano_roll_snap_ticks, processed_file_stem, punch_waiting,
         render_pitch_stretch, reverse_interleaved, saturate, take_lane_layout,
-        tape_stretch_interleaved, tremolo, wav_file_info, wav_peak, write_wav_f32,
-        write_wav_range, write_wav_range_with_envelope, project_from_template, ClipShape,
-        ClipSourceState, EditAction, FilterKind, MonitorMode, Template, TrackShape,
+        tape_stretch_interleaved, tremolo, wav_file_info, wav_peak, write_piano_roll_notes,
+        write_wav_f32, write_wav_range, write_wav_range_with_envelope, project_from_template,
+        ClipShape, ClipSourceState, EditAction, FilterKind, MonitorMode, PianoRollNote, SnapMode,
+        Template, TrackShape,
     };
     use daw_core::audio_pool::AudioFileRef;
     use daw_core::clip::{
@@ -9808,6 +10376,94 @@ mod tests {
 
         let spans = midi_clip_note_spans(&clip);
         assert_eq!(spans, vec![(480, 960, 67, 90)]);
+    }
+
+    #[test]
+    fn midi_clip_notes_keep_channels_and_overlaps() {
+        let mut clip = MidiClip::new(TimelinePos::default(), 960);
+        clip.add_event(MidiEvent::note_on(0, 0, 60, 100));
+        clip.add_event(MidiEvent::note_on(120, 0, 60, 90));
+        clip.add_event(MidiEvent::note_off(480, 0, 60, 0));
+        clip.add_event(MidiEvent::note_off(600, 0, 60, 0));
+        clip.add_event(MidiEvent::note_on(240, 1, 64, 70));
+        clip.add_event(MidiEvent::note_off(720, 1, 64, 0));
+
+        let notes = midi_clip_notes(&clip);
+        assert_eq!(
+            notes,
+            vec![
+                PianoRollNote {
+                    start: 0,
+                    end: 480,
+                    pitch: 60,
+                    velocity: 100,
+                    channel: 0,
+                },
+                PianoRollNote {
+                    start: 120,
+                    end: 600,
+                    pitch: 60,
+                    velocity: 90,
+                    channel: 0,
+                },
+                PianoRollNote {
+                    start: 240,
+                    end: 720,
+                    pitch: 64,
+                    velocity: 70,
+                    channel: 1,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn piano_roll_notes_round_trip_and_keep_other_events() {
+        let mut clip = MidiClip::new(TimelinePos::default(), 1920);
+        clip.add_event(MidiEvent::control_change(0, 0, 1, 64));
+        let notes = vec![
+            PianoRollNote {
+                start: 0,
+                end: 480,
+                pitch: 60,
+                velocity: 100,
+                channel: 0,
+            },
+            PianoRollNote {
+                start: 960,
+                end: 1440,
+                pitch: 64,
+                velocity: 80,
+                channel: 0,
+            },
+        ];
+
+        write_piano_roll_notes(&mut clip, &notes);
+        assert_eq!(midi_clip_notes(&clip), notes);
+        assert!(clip.events.iter().any(|event| matches!(
+            event.message,
+            daw_core::clip::MidiMessage::ControlChange { controller: 1, value: 64, .. }
+        )));
+    }
+
+    #[test]
+    fn piano_roll_snap_ticks_follow_the_arrange_grid() {
+        assert_eq!(piano_roll_snap_ticks(SnapMode::Off, 4), 1);
+        assert_eq!(piano_roll_snap_ticks(SnapMode::Bar, 4), 3840);
+        assert_eq!(piano_roll_snap_ticks(SnapMode::Beat, 4), 960);
+        assert_eq!(piano_roll_snap_ticks(SnapMode::Eighth, 4), 480);
+        assert_eq!(piano_roll_snap_ticks(SnapMode::Sixteenth, 4), 240);
+    }
+
+    #[test]
+    fn midi_clip_edit_description_is_named() {
+        let clip = MidiClip::new(TimelinePos::default(), 960);
+        let action = EditAction::MidiClip {
+            clip_id: ClipId::default(),
+            from: clip.clone(),
+            to: clip,
+        };
+        assert_eq!(action.description(), "Edit MIDI notes");
     }
 
     #[test]

@@ -74,7 +74,7 @@ impl AudioClip {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MidiClip {
     pub id: ClipId,
     pub events: Vec<MidiEvent>,
@@ -205,7 +205,7 @@ pub enum TimeStretchMode {
     Musical,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MidiEvent {
     pub tick: u64,
     pub message: MidiMessage,

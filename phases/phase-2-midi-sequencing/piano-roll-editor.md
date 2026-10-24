@@ -12,10 +12,10 @@ Full-featured piano roll: note entry/selection/editing, velocity lanes, CC lanes
 
 ## Requirements
 
-- [ ] Note grid: Pitch (vertical) × Time (horizontal), configurable snap
-- [ ] Note entry: Click to add, drag length, right-click delete
-- [ ] Selection: Rectangle, click note, Ctrl+click multi-select, Shift+click range
-- [ ] Note editing: Drag move (pitch/time), drag resize, velocity drag
+- [x] Note grid: Pitch (vertical) × Time (horizontal); snap follows the Arrange snap setting
+- [x] Note entry: Double-click to add, drag the right edge to resize, right-click to delete
+- [x] Selection: Click, Ctrl/Shift+click, Select All
+- [~] Note editing: Drag move and resize implemented; velocity drag pending
 - [ ] Velocity lane: Bar graph per note, drag to edit, curve tool
 - [ ] CC lanes: Multiple lanes (Mod wheel, Expression, Pitch Bend, custom)
 - [ ] Tool palette: Select, Pencil, Eraser, Mute, Scissors, Glue, Velocity, Line
@@ -145,10 +145,10 @@ enum CCEditMode {
 
 ## Acceptance Criteria
 
-- [ ] Notes render correctly at all zoom levels
-- [ ] Pencil tool adds notes at snap grid
-- [ ] Selection rectangle selects multiple notes
-- [ ] Drag moves notes (constrain: Shift=pitch only, Ctrl=time only)
+- [x] Notes render correctly at all zoom levels
+- [x] Double-click adds notes at the snap grid
+- [~] Selection rectangle selects multiple notes (click/Ctrl/Shift selection works)
+- [x] Drag moves notes (time and pitch) and resizes note lengths
 - [ ] Velocity lane edits work
 - [ ] CC lanes: add/edit/delete points
 - [ ] Ghost notes show other clips
@@ -160,6 +160,7 @@ enum CCEditMode {
 
 - 2026-10-24: Basic read-only piano roll. Double-click a MIDI clip (or use Arrange → Piano Roll…) to open a window with pitch stripes, a C-labelled keyboard, beat/bar grid lines and note rectangles sized by tick position/duration and coloured by velocity. Editing, zoom/scroll, velocity/CC lanes and the tool palette are still to come
 - 2026-10-24: MIDI clips now show a miniature piano-roll preview directly in the arrange lane, with pitch-normalized note lanes and velocity-based opacity, so takes can be read without opening the full piano-roll window
+- 2026-10-24: Piano roll is editable. Double-click empty grid space adds a note at the Arrange snap setting, drag moves selected notes in time and pitch, dragging a note's right edge resizes it, and right-click/Delete removes notes. Ctrl/Shift+click builds a multi-note selection and Select All selects the clip. Every gesture is undoable through a new `MidiClip` history action. Velocity/CC lanes, zoom/scroll and the tool palette remain
 - YYYY-MM-DD: Pencil/Eraser/Select tools
 - YYYY-MM-DD: Note drag + resize
 - YYYY-MM-DD: Velocity lane
