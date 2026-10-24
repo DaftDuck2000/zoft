@@ -6085,7 +6085,7 @@ impl AppUI {
             .id(egui::Id::new(("piano_roll", window.clip_id)))
             .open(&mut open)
             .default_size([1180.0, 560.0])
-            .min_size([720.0, 300.0])
+            .min_size([720.0, 480.0])
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(format!("{} notes", window.notes.len()));
@@ -6236,8 +6236,12 @@ impl AppUI {
                     ui.vertical(|ui| {
 
                 let velocity_lane_height = 84.0;
+                // Keep the editor height independent of the window's current
+                // size. Sizing it from `available_height` feeds the window's
+                // auto-resize logic back into itself, making the window grow
+                // every frame until it fills the screen.
                 let grid_height =
-                    (ui.available_height() - velocity_lane_height - 6.0).max(120.0);
+                    (ctx.screen_rect().height() * 0.45).clamp(280.0, 460.0);
                 let (response, painter) = ui.allocate_painter(
                     egui::vec2(ui.available_width(), grid_height),
                     egui::Sense::click_and_drag(),
