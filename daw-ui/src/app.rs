@@ -6681,7 +6681,7 @@ impl AppUI {
                 }
 
                 // Selection and drag start.
-                if response.drag_started() && !handled_double {
+                if response.drag_started_by(egui::PointerButton::Primary) && !handled_double {
                     if let Some(pos) = response.interact_pointer_pos() {
                         let press_pos = ui
                             .input(|i| i.pointer.press_origin())
@@ -6743,7 +6743,7 @@ impl AppUI {
                     }
                 }
 
-                if response.dragged() {
+                if response.dragged_by(egui::PointerButton::Primary) {
                     if let Some((start, _)) = window.marquee {
                         if let Some(pos) = response.interact_pointer_pos() {
                             window.marquee = Some((start, pos));
@@ -6832,7 +6832,7 @@ impl AppUI {
                     }
                 }
 
-                if response.drag_stopped() {
+                if response.drag_stopped_by(egui::PointerButton::Primary) {
                     if let Some((start, end)) = window.marquee.take() {
                         let marquee =
                             egui::Rect::from_two_pos(start, end).intersect(grid);
@@ -7050,7 +7050,7 @@ fn knob(
 
     if response.double_clicked() {
         norm = default_norm;
-    } else if response.dragged() {
+    } else if response.dragged_by(egui::PointerButton::Primary) {
         let fine = ui.input(|input| input.modifiers.shift);
         let speed = if fine { 0.1 } else { 1.0 };
         norm -= response.drag_delta().y / KNOB_DRAG_PIXELS * speed;
@@ -8614,7 +8614,7 @@ impl eframe::App for AppUI {
                 .unwrap_or(false);
             let pressed = ui.input(|i| i.pointer.primary_pressed());
 
-            if ruler_response.drag_started() {
+            if ruler_response.drag_started_by(egui::PointerButton::Primary) {
                 let started_in_loop_lane = ruler_response
                     .interact_pointer_pos()
                     .map(|p| p.y <= loop_lane_bottom)
@@ -8634,7 +8634,7 @@ impl eframe::App for AppUI {
                 }
             }
 
-            if ruler_response.dragged() {
+            if ruler_response.dragged_by(egui::PointerButton::Primary) {
                 if let Some(anchor) = self.loop_drag_anchor_secs {
                     if let Some(pos) = ruler_response.interact_pointer_pos() {
                         let t = view.t(rect, pos.x).clamp(0.0, max_t);
@@ -8646,7 +8646,9 @@ impl eframe::App for AppUI {
                 }
             }
 
-            if ruler_response.drag_stopped() && self.loop_drag_anchor_secs.take().is_some() {
+            if ruler_response.drag_stopped_by(egui::PointerButton::Primary)
+                && self.loop_drag_anchor_secs.take().is_some()
+            {
                 if self.loop_end_secs - self.loop_start_secs < MIN_LOOP_SECS {
                     self.loop_end_secs = self.loop_start_secs + MIN_LOOP_SECS;
                 }
@@ -8654,7 +8656,9 @@ impl eframe::App for AppUI {
             }
 
             let dragging_loop = self.loop_drag_anchor_secs.is_some();
-            let seek_pos = if !dragging_loop && ruler_response.dragged() {
+            let seek_pos = if !dragging_loop
+                && ruler_response.dragged_by(egui::PointerButton::Primary)
+            {
                 ruler_response.interact_pointer_pos()
             } else if ruler_response.clicked() && !pointer_on_playhead {
                 ruler_response.interact_pointer_pos()
@@ -8926,7 +8930,7 @@ impl eframe::App for AppUI {
                     }
                 }
             }
-            if edit_response.drag_started() {
+            if edit_response.drag_started_by(egui::PointerButton::Primary) {
                 // Classify the gesture from where the pointer went down, not
                 // from where it is after egui's drag threshold: otherwise edge
                 // grabs would already be inside the body and become moves.
@@ -8946,7 +8950,7 @@ impl eframe::App for AppUI {
                     }
                 }
             }
-            if edit_response.dragged() {
+            if edit_response.dragged_by(egui::PointerButton::Primary) {
                 if self.midi_drag.is_some() {
                     if let Some(pos) = pointer_pos {
                         self.update_midi_clip_drag(
@@ -8965,7 +8969,7 @@ impl eframe::App for AppUI {
                     self.update_clip_drag(pos, rect, track_y_start, track_height, view);
                 }
             }
-            if edit_response.drag_stopped() {
+            if edit_response.drag_stopped_by(egui::PointerButton::Primary) {
                 if let Some((start, end)) = self.marquee.take() {
                     let marquee = egui::Rect::from_two_pos(start, end);
                     let audio_hits = clips_in_marquee(&clip_rects, marquee);
@@ -9057,7 +9061,7 @@ impl eframe::App for AppUI {
                 ui.id().with("playhead"),
                 egui::Sense::drag(),
             );
-            if response.dragged() {
+            if response.dragged_by(egui::PointerButton::Primary) {
                 if !self.dragging_playhead {
                     self.dragging_playhead = true;
                     // Seeking stops the transport (and ends an active take).
@@ -9071,7 +9075,7 @@ impl eframe::App for AppUI {
                     let max_t = duration.max(view.t(rect, rect.right()));
                     self.playhead_secs = view.t(rect, pos.x).clamp(0.0, max_t);
                 }
-            } else if response.drag_stopped() {
+            } else if response.drag_stopped_by(egui::PointerButton::Primary) {
                 self.dragging_playhead = false;
             }
 

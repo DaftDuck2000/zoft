@@ -169,7 +169,7 @@ enum CCEditMode {
 - 2026-10-24: Piano-roll audition and navigation. Clicking a note plays it through the live synth, and dragging it to a new pitch retriggers the preview. The view now pans with the wheel (time), Shift+wheel (pitch) or middle-drag, zooms with Ctrl+wheel and the +/− buttons, and re-fits with Fit. The piano roll has its own snap picker (Off, Bar, Beat, 1/8, 1/16, 1/32, 1/8T, 1/16T), so note entry, dragging and resizing no longer depend on the arrange setting. Newly double-clicked notes are as long as the current snap value (Off falls back to the last used length)
 - 2026-10-24: Trimmed MIDI clip regions are shaded in the piano roll. Notes outside the clip's visible window stay editable and reappear when the clip edge is dragged back out in the arrange view
 - 2026-10-24: MIDI Tools now live in a left-side panel inside the piano-roll window. Quantize, transpose and velocity controls apply to the open clip as one undo step
-- 2026-10-24: Piano-roll velocity colours now span a wide blue → cyan → yellow gradient. Dragging on empty grid space draws a selection marquee that selects every intersecting note; Ctrl/Shift makes the marquee additive
+- 2026-10-24: Piano-roll velocity colours now span a wide blue → cyan → yellow gradient. Dragging on empty grid space draws a selection marquee that selects every intersecting note; Ctrl/Shift makes the marquee additive. Middle-drag now pans without starting a note selection or edit
 - YYYY-MM-DD: Pencil/Eraser/Select tools
 - YYYY-MM-DD: Note drag + resize
 - YYYY-MM-DD: Velocity lane
