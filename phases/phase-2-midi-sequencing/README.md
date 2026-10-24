@@ -28,8 +28,8 @@ timestamped notes into clips that render in the arrange lane and play through
 a basic built-in sine voice; live input is auditioned through the same voice
 while recording, and MIDI clips show miniature note previews in the arrange
 view. Double-clicking a MIDI clip opens an editable piano-roll view with
-add/move/resize/delete, multi-selection, note audition, undo, and
-wheel/middle-drag panning with zoom. Every track type now has a real-time
+add/move/resize/delete, multi-selection, note audition, undo, wheel/middle-drag
+panning with zoom, and its own snap picker. Every track type now has a real-time
 insert chain (saturation, filter, bit crusher, tremolo) that runs before the
 track fader. Instruments, chase events, loop takes, MIDI thru, velocity/CC
 lanes and the remaining editing tools are not implemented yet.

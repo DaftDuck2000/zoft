@@ -400,17 +400,6 @@ fn write_piano_roll_notes(clip: &mut MidiClip, notes: &[PianoRollNote]) {
     clip.events = events;
 }
 
-/// Tick grid used by the piano roll, derived from the arrange snap setting.
-fn piano_roll_snap_ticks(snap: SnapMode, beats_per_bar: u64) -> u64 {
-    match snap {
-        SnapMode::Off => 1,
-        SnapMode::Bar => 960 * beats_per_bar.max(1),
-        SnapMode::Beat => 960,
-        SnapMode::Eighth => 480,
-        SnapMode::Sixteenth => 240,
-    }
-}
-
 /// Fit the piano-roll view to the clip length and the notes' pitch range.
 fn fit_piano_roll_view(window: &mut PianoRollWindow, grid: egui::Rect, length: u64) {
     let length = length.max(1) as f32;
@@ -1045,6 +1034,69 @@ enum NoteDragMode {
     ResizeEnd,
 }
 
+/// Snap resolutions available inside the piano roll. Finer than the arrange
+/// grid so drum and bass parts can be placed precisely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PianoRollSnap {
+    Off,
+    Bar,
+    Beat,
+    Eighth,
+    Sixteenth,
+    ThirtySecond,
+    EighthTriplet,
+    SixteenthTriplet,
+}
+
+impl PianoRollSnap {
+    const ALL: [Self; 8] = [
+        Self::Off,
+        Self::Bar,
+        Self::Beat,
+        Self::Eighth,
+        Self::Sixteenth,
+        Self::ThirtySecond,
+        Self::EighthTriplet,
+        Self::SixteenthTriplet,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::Bar => "Bar",
+            Self::Beat => "Beat",
+            Self::Eighth => "1/8",
+            Self::Sixteenth => "1/16",
+            Self::ThirtySecond => "1/32",
+            Self::EighthTriplet => "1/8T",
+            Self::SixteenthTriplet => "1/16T",
+        }
+    }
+
+    fn ticks(self, beats_per_bar: u64) -> u64 {
+        match self {
+            Self::Off => 1,
+            Self::Bar => 960 * beats_per_bar.max(1),
+            Self::Beat => 960,
+            Self::Eighth => 480,
+            Self::Sixteenth => 240,
+            Self::ThirtySecond => 120,
+            Self::EighthTriplet => 320,
+            Self::SixteenthTriplet => 160,
+        }
+    }
+
+    fn from_arrange(snap: SnapMode) -> Self {
+        match snap {
+            SnapMode::Off => Self::Off,
+            SnapMode::Bar => Self::Bar,
+            SnapMode::Beat => Self::Beat,
+            SnapMode::Eighth => Self::Eighth,
+            SnapMode::Sixteenth => Self::Sixteenth,
+        }
+    }
+}
+
 /// In-progress piano-roll note gesture.
 #[derive(Debug, Clone)]
 struct NoteDrag {
@@ -1080,10 +1132,12 @@ struct PianoRollWindow {
     pixels_per_semitone: f32,
     /// Re-fit the view on the next frame.
     needs_fit: bool,
+    /// Snap resolution chosen in the piano-roll header.
+    snap: PianoRollSnap,
 }
 
 impl PianoRollWindow {
-    fn new(clip_id: ClipId) -> Self {
+    fn new(clip_id: ClipId, snap: SnapMode) -> Self {
         Self {
             clip_id,
             notes: Vec::new(),
@@ -1096,6 +1150,7 @@ impl PianoRollWindow {
             view_low_pitch: 48.0,
             pixels_per_semitone: 16.0,
             needs_fit: true,
+            snap: PianoRollSnap::from_arrange(snap),
         }
     }
 
@@ -4828,8 +4883,6 @@ impl AppUI {
         let beats_per_bar = numerator.max(1) as u64;
         let beat_ticks = 960u64;
         let bar_ticks = beat_ticks * beats_per_bar.max(1);
-        let snap_ticks = piano_roll_snap_ticks(self.snap_mode, beats_per_bar);
-        let snap_label = self.snap_mode.label();
         let mut open = true;
         let mut close = false;
         let mut commit = false;
@@ -4850,7 +4903,15 @@ impl AppUI {
                     ui.separator();
                     ui.weak(format!("{} ticks", length));
                     ui.separator();
-                    ui.weak(format!("Snap: {}", snap_label));
+                    ui.label("Snap:");
+                    egui::ComboBox::from_id_salt("piano_roll_snap")
+                        .selected_text(window.snap.label())
+                        .width(76.0)
+                        .show_ui(ui, |ui| {
+                            for snap in PianoRollSnap::ALL {
+                                ui.selectable_value(&mut window.snap, snap, snap.label());
+                            }
+                        });
                     if ui.small_button("Fit").clicked() {
                         window.needs_fit = true;
                     }
@@ -4879,6 +4940,7 @@ impl AppUI {
                 ui.weak(
                     "Double-click add · drag move/resize · right-click delete · wheel pan · Ctrl+wheel zoom",
                 );
+                let snap_ticks = window.snap.ticks(beats_per_bar);
 
                 let (response, painter) = ui.allocate_painter(
                     ui.available_size(),
@@ -4955,10 +5017,11 @@ impl AppUI {
                         }
                     } else if scroll.x != 0.0 || scroll.y != 0.0 {
                         // Wheel scrolls time like the arrange view; Shift+wheel
-                        // scrolls pitch.
+                        // scrolls pitch. egui turns Shift+wheel into horizontal
+                        // scroll, so both axes contribute.
                         if view_modifiers.shift {
-                            window.view_low_pitch +=
-                                scroll.y / window.pixels_per_semitone.max(0.0001);
+                            window.view_low_pitch += (scroll.x + scroll.y)
+                                / window.pixels_per_semitone.max(0.0001);
                         } else {
                             window.view_start_tick -= (scroll.x + scroll.y) as f64
                                 / window.pixels_per_tick.max(0.0001) as f64;
@@ -6640,7 +6703,7 @@ impl eframe::App for AppUI {
                     .clicked()
                 {
                     if let Some(clip_id) = self.selected_midi_clip {
-                        self.piano_roll = Some(PianoRollWindow::new(clip_id));
+                        self.piano_roll = Some(PianoRollWindow::new(clip_id, self.snap_mode));
                     }
                 }
                 ui.separator();
@@ -7445,7 +7508,7 @@ impl eframe::App for AppUI {
                     {
                         self.clear_selection();
                         self.selected_midi_clip = Some(*midi_id);
-                        self.piano_roll = Some(PianoRollWindow::new(*midi_id));
+                        self.piano_roll = Some(PianoRollWindow::new(*midi_id, self.snap_mode));
                     }
                 }
             }
@@ -9736,12 +9799,12 @@ mod tests {
         knob_from_normalized, knob_to_normalized, load_wav_interleaved,
         load_wav_range_interleaved, loop_range_frames, measure_integrated_loudness,
         merge_continuous_edit, metronome_config, midi_clip_note_spans, midi_clip_notes,
-        note_name, piano_roll_snap_ticks, processed_file_stem, punch_waiting,
+        note_name, processed_file_stem, punch_waiting,
         render_pitch_stretch, reverse_interleaved, saturate, take_lane_layout,
         tape_stretch_interleaved, tremolo, wav_file_info, wav_peak, write_piano_roll_notes,
         write_wav_f32, write_wav_range, write_wav_range_with_envelope, fit_piano_roll_view,
         project_from_template, ClipShape, ClipSourceState, EditAction, FilterKind, MonitorMode,
-        PianoRollNote, PianoRollWindow, SnapMode, Template, TrackShape,
+        PianoRollNote, PianoRollSnap, PianoRollWindow, SnapMode, Template, TrackShape,
     };
     use daw_core::audio_pool::AudioFileRef;
     use daw_core::clip::{
@@ -10665,17 +10728,20 @@ mod tests {
     }
 
     #[test]
-    fn piano_roll_snap_ticks_follow_the_arrange_grid() {
-        assert_eq!(piano_roll_snap_ticks(SnapMode::Off, 4), 1);
-        assert_eq!(piano_roll_snap_ticks(SnapMode::Bar, 4), 3840);
-        assert_eq!(piano_roll_snap_ticks(SnapMode::Beat, 4), 960);
-        assert_eq!(piano_roll_snap_ticks(SnapMode::Eighth, 4), 480);
-        assert_eq!(piano_roll_snap_ticks(SnapMode::Sixteenth, 4), 240);
+    fn piano_roll_snap_ticks_follow_the_header_choice() {
+        assert_eq!(PianoRollSnap::Off.ticks(4), 1);
+        assert_eq!(PianoRollSnap::Bar.ticks(4), 3840);
+        assert_eq!(PianoRollSnap::Beat.ticks(4), 960);
+        assert_eq!(PianoRollSnap::Eighth.ticks(4), 480);
+        assert_eq!(PianoRollSnap::Sixteenth.ticks(4), 240);
+        assert_eq!(PianoRollSnap::ThirtySecond.ticks(4), 120);
+        assert_eq!(PianoRollSnap::EighthTriplet.ticks(4), 320);
+        assert_eq!(PianoRollSnap::SixteenthTriplet.ticks(4), 160);
     }
 
     #[test]
     fn piano_roll_fit_contains_the_clip_and_notes() {
-        let mut window = PianoRollWindow::new(ClipId::default());
+        let mut window = PianoRollWindow::new(ClipId::default(), SnapMode::Beat);
         window.notes = vec![PianoRollNote {
             start: 0,
             end: 480,
