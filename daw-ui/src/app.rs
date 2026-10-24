@@ -6087,6 +6087,7 @@ impl AppUI {
             .default_size([1180.0, 560.0])
             .min_size([720.0, 480.0])
             .show(ctx, |ui| {
+                let content_bottom = ui.max_rect().bottom();
                 ui.horizontal(|ui| {
                     ui.label(format!("{} notes", window.notes.len()));
                     ui.separator();
@@ -6133,6 +6134,16 @@ impl AppUI {
                     "Double-click add · drag move/resize · right-click delete · wheel pan · Ctrl+wheel zoom",
                 );
                 let snap_ticks = window.snap.ticks(beats_per_bar);
+                // Size the editor from the window's allocated height, not from
+                // the content's available height, so egui's auto-resize cannot
+                // feed back into itself. The velocity lane grows with the
+                // window instead of staying a fixed strip.
+                let editor_height = (content_bottom
+                    - ui.cursor().top()
+                    - ui.spacing().item_spacing.y)
+                    .max(220.0);
+                let velocity_lane_height =
+                    (editor_height * 0.22).clamp(100.0, 180.0);
 
                 ui.horizontal_top(|ui| {
                     ui.vertical(|ui| {
@@ -6235,13 +6246,8 @@ impl AppUI {
                     ui.separator();
                     ui.vertical(|ui| {
 
-                let velocity_lane_height = 84.0;
-                // Keep the editor height independent of the window's current
-                // size. Sizing it from `available_height` feeds the window's
-                // auto-resize logic back into itself, making the window grow
-                // every frame until it fills the screen.
                 let grid_height =
-                    (ctx.screen_rect().height() * 0.45).clamp(280.0, 460.0);
+                    (editor_height - velocity_lane_height - 6.0).max(120.0);
                 let (response, painter) = ui.allocate_painter(
                     egui::vec2(ui.available_width(), grid_height),
                     egui::Sense::click_and_drag(),

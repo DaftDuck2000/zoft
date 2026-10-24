@@ -172,6 +172,7 @@ enum CCEditMode {
 - 2026-10-24: Piano-roll velocity colours now span a wide blue → cyan → yellow gradient. Dragging on empty grid space draws a selection marquee that selects every intersecting note; Ctrl/Shift makes the marquee additive. Middle-drag now pans without starting a note selection or edit
 - 2026-10-24: Added a velocity lane below the piano-roll grid. Each note has a velocity bar; dragging a bar sets that note's velocity (or every selected note when the clicked bar is selected). The lane uses the same horizontal view/zoom as the grid, and each drag is one undo step
 - 2026-10-24: Fixed the piano-roll window slowly growing to fill the screen. Grid height is now independent of the window's current size, breaking egui's content/window auto-resize feedback loop
+- 2026-10-24: The velocity lane is taller and now scales with the piano-roll window height, so resizing the window gives both the note grid and velocity editor more room without re-triggering auto-growth
 - YYYY-MM-DD: Pencil/Eraser/Select tools
 - YYYY-MM-DD: Note drag + resize
 - YYYY-MM-DD: Velocity lane
