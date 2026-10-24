@@ -316,7 +316,7 @@ struct TracksData {
 mod tests {
     use super::*;
     use crate::audio_pool::AudioFileRef;
-    use crate::clip::{AudioClip, TimelinePos};
+    use crate::clip::{AudioClip, MidiClip, MidiEvent, TimelinePos};
     use crate::project::BitDepth;
     use crate::track::Track;
 
@@ -336,9 +336,17 @@ mod tests {
         );
         let clip = AudioClip::new(source, TimelinePos::default(), 1_000);
         let clip_id = project.audio_clips.insert(clip);
+
+        let mut midi = MidiClip::new(TimelinePos::default(), 960);
+        midi.content_offset = 240;
+        midi.add_event(MidiEvent::note_on(240, 0, 60, 100));
+        midi.add_event(MidiEvent::note_off(480, 0, 60, 0));
+        let midi_id = project.midi_clips.insert(midi);
+
         let first_track = project.track_order[0];
         if let Some(track) = project.get_track_mut(first_track) {
             track.add_clip(clip_id);
+            track.add_midi_clip(midi_id);
         }
 
         let path = std::env::temp_dir().join(format!(
@@ -353,11 +361,16 @@ mod tests {
         assert_eq!(loaded.sample_rate, project.sample_rate);
         assert_eq!(loaded.track_order.len(), project.track_order.len());
         assert_eq!(loaded.audio_clips.len(), 1);
+        assert_eq!(loaded.midi_clips.len(), 1);
 
         let loaded_id = loaded.audio_clips.keys().next().unwrap();
         let loaded_clip = loaded.audio_clips.get(loaded_id).unwrap();
         assert_eq!(loaded_clip.length, 1_000);
         assert_eq!(loaded_clip.source.path, std::path::PathBuf::from("test.wav"));
+
+        let loaded_midi = loaded.midi_clips.values().next().unwrap();
+        assert_eq!(loaded_midi.content_offset, 240);
+        assert_eq!(loaded_midi.events.len(), 2);
 
         let attached = loaded
             .tracks

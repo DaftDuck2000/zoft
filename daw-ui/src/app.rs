@@ -296,17 +296,20 @@ struct PianoRollNote {
     channel: u8,
 }
 
-/// Pair note-on/off events in a MIDI clip into editable notes. Overlapping
-/// notes on the same pitch/channel are supported by matching each note-off to
-/// the oldest open note-on. Notes still held at the end of the clip stop at its
+/// Pair note-on/off events in a MIDI clip into editable notes in **content
+/// coordinates** (0 = start of the recorded content). Overlapping notes on the
+/// same pitch/channel are supported by matching each note-off to the oldest
+/// open note-on. Notes still held at the end of the content stop at its
 /// boundary.
-fn midi_clip_notes(clip: &MidiClip) -> Vec<PianoRollNote> {
+fn midi_clip_content_notes(clip: &MidiClip) -> Vec<PianoRollNote> {
     let mut notes = Vec::new();
     let mut active: HashMap<(u8, u8), VecDeque<(u64, u8)>> = HashMap::new();
-    let end_of_clip = clip.length.max(1);
+    let end_of_clip = clip
+        .content_offset
+        .saturating_add(clip.length.max(1));
 
     for event in &clip.events {
-        let tick = event.tick.min(end_of_clip);
+        let tick = event.tick;
         match &event.message {
             MidiMessage::NoteOn {
                 channel,
@@ -351,6 +354,29 @@ fn midi_clip_notes(clip: &MidiClip) -> Vec<PianoRollNote> {
     notes
 }
 
+/// Like [`midi_clip_content_notes`], but clipped to the clip's visible region
+/// and returned in clip-relative coordinates (0 = timeline position). Used by
+/// playback and the arrange preview.
+fn midi_clip_notes(clip: &MidiClip) -> Vec<PianoRollNote> {
+    let visible_start = clip.content_offset;
+    let visible_end = visible_start.saturating_add(clip.length.max(1));
+    midi_clip_content_notes(clip)
+        .into_iter()
+        .filter_map(|note| {
+            if note.end <= visible_start || note.start >= visible_end {
+                return None;
+            }
+            Some(PianoRollNote {
+                start: note.start.max(visible_start) - visible_start,
+                end: note.end.min(visible_end) - visible_start,
+                pitch: note.pitch,
+                velocity: note.velocity,
+                channel: note.channel,
+            })
+        })
+        .collect()
+}
+
 /// Pair note-on/off events in a MIDI clip into `(start_tick, end_tick, note,
 /// velocity)` spans relative to the clip start.
 fn midi_clip_note_spans(clip: &MidiClip) -> Vec<(u64, u64, u8, u8)> {
@@ -360,7 +386,9 @@ fn midi_clip_note_spans(clip: &MidiClip) -> Vec<(u64, u64, u8, u8)> {
         .collect()
 }
 
-/// Replace a clip's note events with the piano roll's note list. Non-note
+/// Replace a clip's note events with the piano roll's note list. Notes are in
+/// content coordinates, so trimmed material outside the visible region is kept
+/// and can be revealed again by dragging the clip edge back out. Non-note
 /// events (CC, pitch bend, etc.) are preserved.
 fn write_piano_roll_notes(clip: &mut MidiClip, notes: &[PianoRollNote]) {
     let mut events: Vec<MidiEvent> = clip
@@ -376,8 +404,8 @@ fn write_piano_roll_notes(clip: &mut MidiClip, notes: &[PianoRollNote]) {
         .collect();
 
     for note in notes {
-        let start = note.start.min(clip.length.saturating_sub(1));
-        let end = note.end.max(start + 1).min(clip.length.max(start + 1));
+        let start = note.start;
+        let end = note.end.max(start + 1);
         events.push(MidiEvent::note_on(
             start,
             note.channel,
@@ -412,6 +440,58 @@ fn piano_roll_new_note_length(
     } else {
         snap_ticks.max(1)
     }
+}
+
+/// Snap resolution in ticks used for MIDI clip trimming in the arrange view.
+fn timeline_snap_ticks(snap: SnapMode, beats_per_bar: u64) -> u64 {
+    match snap {
+        SnapMode::Off => 1,
+        SnapMode::Bar => 960 * beats_per_bar.max(1),
+        SnapMode::Beat => 960,
+        SnapMode::Eighth => 480,
+        SnapMode::Sixteenth => 240,
+    }
+}
+
+/// Compute the visible start/offset/length after dragging a MIDI clip's left
+/// edge. Trimming moves the visible window over the content; events are never
+/// deleted.
+fn midi_trim_start(
+    before: &MidiClip,
+    requested_tick: u64,
+    snap_ticks: u64,
+) -> (u64, u64, u64) {
+    let snap = |tick: u64| -> u64 {
+        if snap_ticks <= 1 {
+            tick
+        } else {
+            ((tick + snap_ticks / 2) / snap_ticks) * snap_ticks
+        }
+    };
+    let earliest_start = before
+        .timeline_position
+        .tick
+        .saturating_sub(before.content_offset);
+    let max_start = before.timeline_position.tick + before.length.saturating_sub(1);
+    let new_start = snap(requested_tick).clamp(earliest_start, max_start);
+    let delta = new_start as i64 - before.timeline_position.tick as i64;
+    let new_offset = (before.content_offset as i64 + delta).max(0) as u64;
+    let new_length = (before.length as i64 - delta).max(1) as u64;
+    (new_start, new_offset, new_length)
+}
+
+/// Compute the new visible length after dragging a MIDI clip's right edge.
+fn midi_trim_end(before: &MidiClip, requested_tick: u64, snap_ticks: u64) -> u64 {
+    let snap = |tick: u64| -> u64 {
+        if snap_ticks <= 1 {
+            tick
+        } else {
+            ((tick + snap_ticks / 2) / snap_ticks) * snap_ticks
+        }
+    };
+    let min_end = before.timeline_position.tick + 1;
+    let new_end = snap(requested_tick).max(min_end);
+    new_end - before.timeline_position.tick
 }
 
 /// Fit the piano-roll view to the clip length and the notes' pitch range.
@@ -835,7 +915,7 @@ impl EditAction {
             }
             EditAction::AttachMidi { .. } => "Add MIDI clip".to_string(),
             EditAction::DetachMidi { .. } => "Delete MIDI clip".to_string(),
-            EditAction::MidiClip { .. } => "Edit MIDI notes".to_string(),
+            EditAction::MidiClip { .. } => "Edit MIDI clip".to_string(),
             EditAction::Group { label, .. } => label.clone(),
         }
     }
@@ -1169,7 +1249,7 @@ impl PianoRollWindow {
     }
 
     fn load(&mut self, clip: &MidiClip) {
-        self.notes = midi_clip_notes(clip);
+        self.notes = midi_clip_content_notes(clip);
         self.selected.clear();
         self.drag = None;
         self.initialized = true;
@@ -1296,6 +1376,15 @@ struct ClipDrag {
     members: Vec<ClipDragMember>,
 }
 
+/// In-progress MIDI clip trim. Events are never deleted: trimming only moves
+/// the clip's visible window over the recorded content.
+#[derive(Clone)]
+struct MidiClipDrag {
+    clip_id: ClipId,
+    mode: DragMode,
+    before: MidiClip,
+}
+
 /// Decoded mono windows used for sample-accurate rendering at high zoom.
 #[derive(Default)]
 struct DetailCache {
@@ -1398,6 +1487,8 @@ struct AppUI {
     /// Alt bypasses snapping while held.
     snap_suspended: bool,
     drag: Option<ClipDrag>,
+    /// In-progress MIDI clip trim drag.
+    midi_drag: Option<MidiClipDrag>,
     /// Rubber-band selection while dragging empty track space.
     marquee: Option<(egui::Pos2, egui::Pos2)>,
     marquee_additive: bool,
@@ -1522,6 +1613,7 @@ impl AppUI {
             ruler_mode: RulerMode::BarsBeats,
             snap_suspended: false,
             drag: None,
+            midi_drag: None,
             marquee: None,
             marquee_additive: false,
             clipboard: Vec::new(),
@@ -2521,6 +2613,28 @@ impl AppUI {
         None
     }
 
+    /// MIDI clips only expose trim handles for now: the left and right edge
+    /// zones. The body returns `Move`, but callers currently ignore it.
+    fn midi_clip_hit(
+        clip_rects: &[(ClipId, egui::Rect)],
+        pos: egui::Pos2,
+    ) -> Option<(ClipId, DragMode)> {
+        for (clip_id, rect) in clip_rects.iter().rev() {
+            if !rect.contains(pos) {
+                continue;
+            }
+            let mode = if pos.x <= rect.left() + CLIP_EDGE_PX {
+                DragMode::TrimStart
+            } else if pos.x >= rect.right() - CLIP_EDGE_PX {
+                DragMode::TrimEnd
+            } else {
+                DragMode::Move
+            };
+            return Some((*clip_id, mode));
+        }
+        None
+    }
+
     fn track_at_y(&self, y: f32, track_y_start: f32, track_height: f32) -> Option<TrackId> {
         if self.project.track_order.is_empty() || track_height <= 0.0 {
             return None;
@@ -2874,6 +2988,102 @@ impl AppUI {
                     self.refresh_playback_if_playing();
                 }
             }
+        }
+    }
+
+    /// Start a MIDI clip trim from the left or right edge.
+    fn begin_midi_clip_drag(
+        &mut self,
+        pos: egui::Pos2,
+        midi_rects: &[(ClipId, egui::Rect)],
+        rect: egui::Rect,
+        view: TimelineView,
+    ) {
+        let Some((clip_id, mode)) = Self::midi_clip_hit(midi_rects, pos) else {
+            return;
+        };
+        if !matches!(mode, DragMode::TrimStart | DragMode::TrimEnd) {
+            return;
+        }
+        let Some(before) = self.project.midi_clips.get(clip_id).cloned() else {
+            return;
+        };
+        // Don't start a trim on top of the playhead handle.
+        let playhead_x = view.x(rect, self.playhead_secs);
+        if (pos.x - playhead_x).abs() <= CLIP_EDGE_PX {
+            return;
+        }
+        self.clear_selection();
+        self.selected_midi_clip = Some(clip_id);
+        self.midi_drag = Some(MidiClipDrag {
+            clip_id,
+            mode,
+            before,
+        });
+    }
+
+    /// Move the visible window of a MIDI clip over its recorded content.
+    fn update_midi_clip_drag(&mut self, pos: egui::Pos2, rect: egui::Rect, view: TimelineView) {
+        let Some(drag) = self.midi_drag.take() else {
+            return;
+        };
+        let before = drag.before.clone();
+        let project_sr = self.project.sample_rate.max(1) as f64;
+        let beats_per_bar = self.time_signature().0.max(1) as u64;
+        let pointer_sample = (view.t(rect, pos.x).max(0.0) * project_sr).round() as u64;
+        let pointer_tick = self
+            .project
+            .tempo_map
+            .sample_to_tick(pointer_sample, project_sr);
+        let snap_ticks = timeline_snap_ticks(self.snap_mode, beats_per_bar);
+
+        match drag.mode {
+            DragMode::TrimStart => {
+                let (new_start, new_offset, new_length) =
+                    midi_trim_start(&before, pointer_tick, snap_ticks);
+                let new_sample = self
+                    .project
+                    .tempo_map
+                    .tick_to_sample(new_start, project_sr);
+                if let Some(clip) = self.project.midi_clips.get_mut(drag.clip_id) {
+                    clip.timeline_position.tick = new_start;
+                    clip.timeline_position.sample = new_sample;
+                    clip.content_offset = new_offset;
+                    clip.length = new_length;
+                }
+            }
+            DragMode::TrimEnd => {
+                let new_length = midi_trim_end(&before, pointer_tick, snap_ticks);
+                if let Some(clip) = self.project.midi_clips.get_mut(drag.clip_id) {
+                    clip.length = new_length;
+                }
+            }
+            _ => {}
+        }
+
+        self.midi_drag = Some(drag);
+        self.refresh_midi_playback();
+    }
+
+    /// Commit a finished MIDI trim as one undo step.
+    fn finish_midi_clip_drag(&mut self) {
+        let Some(drag) = self.midi_drag.take() else {
+            return;
+        };
+        let Some(after) = self.project.midi_clips.get(drag.clip_id).cloned() else {
+            return;
+        };
+        if after != drag.before {
+            self.push_undo(
+                EditAction::MidiClip {
+                    clip_id: drag.clip_id,
+                    from: drag.before,
+                    to: after,
+                },
+                false,
+            );
+            self.after_edit();
+            self.refresh_playback_if_playing();
         }
     }
 
@@ -4892,7 +5102,19 @@ impl AppUI {
             window.load(&clip);
         }
 
-        let length = clip.length.max(1);
+        // The editor works in content coordinates: trimmed-away notes stay in
+        // the buffer so dragging the clip edge back out can reveal them again.
+        let visible_start = clip.content_offset;
+        let visible_end = visible_start.saturating_add(clip.length.max(1));
+        let content_end = window
+            .notes
+            .iter()
+            .map(|note| note.end)
+            .max()
+            .unwrap_or(0)
+            .max(visible_end)
+            .max(1);
+        let length = content_end;
         let (numerator, _) = self.time_signature();
         let beats_per_bar = numerator.max(1) as u64;
         let beat_ticks = 960u64;
@@ -4915,7 +5137,10 @@ impl AppUI {
                 ui.horizontal(|ui| {
                     ui.label(format!("{} notes", window.notes.len()));
                     ui.separator();
-                    ui.weak(format!("{} ticks", length));
+                    ui.weak(format!(
+                        "content {} · visible {} ticks",
+                        length, clip.length
+                    ));
                     ui.separator();
                     ui.label("Snap:");
                     egui::ComboBox::from_id_salt("piano_roll_snap")
@@ -5121,6 +5346,52 @@ impl AppUI {
                             } else {
                                 egui::Color32::from_gray(20)
                             },
+                        );
+                    }
+                }
+
+                // Shade material trimmed away from the clip bounds so hidden
+                // notes remain visible and can be recovered by extending the
+                // clip edge back out.
+                let trim_start_x = x_for_tick(visible_start as f64);
+                let trim_end_x = x_for_tick(visible_end as f64);
+                let shade = egui::Color32::from_rgba_unmultiplied(10, 10, 14, 130);
+                if visible_start > 0 {
+                    let left = x_for_tick(0.0).max(grid.left());
+                    let right = trim_start_x.min(grid.right());
+                    if right > left {
+                        painter.rect_filled(
+                            egui::Rect::from_min_max(
+                                egui::pos2(left, grid.top()),
+                                egui::pos2(right, grid.bottom()),
+                            ),
+                            0.0,
+                            shade,
+                        );
+                    }
+                }
+                if visible_end < length {
+                    let left = trim_end_x.max(grid.left());
+                    let right = grid.right();
+                    if right > left {
+                        painter.rect_filled(
+                            egui::Rect::from_min_max(
+                                egui::pos2(left, grid.top()),
+                                egui::pos2(right, grid.bottom()),
+                            ),
+                            0.0,
+                            shade,
+                        );
+                    }
+                }
+                for x in [trim_start_x, trim_end_x] {
+                    if x >= grid.left() && x <= grid.right() {
+                        painter.line_segment(
+                            [egui::pos2(x, grid.top()), egui::pos2(x, grid.bottom())],
+                            egui::Stroke::new(
+                                1.0_f32,
+                                egui::Color32::from_rgba_unmultiplied(220, 220, 160, 160),
+                            ),
                         );
                     }
                 }
@@ -7536,7 +7807,15 @@ impl eframe::App for AppUI {
                 // from where it is after egui's drag threshold: otherwise edge
                 // grabs would already be inside the body and become moves.
                 if let Some(pos) = press_origin.or(pointer_pos) {
-                    if Self::clip_hit(&clip_rects, pos).is_some() {
+                    let midi_hit = Self::midi_clip_hit(&midi_clip_rects, pos);
+                    if matches!(
+                        midi_hit,
+                        Some((_, DragMode::TrimStart)) | Some((_, DragMode::TrimEnd))
+                    ) {
+                        self.begin_midi_clip_drag(pos, &midi_clip_rects, rect, view);
+                    } else if midi_hit.is_some() {
+                        // MIDI clip body: selection is handled on click.
+                    } else if Self::clip_hit(&clip_rects, pos).is_some() {
                         self.begin_clip_drag(pos, &clip_rects, rect, view);
                     } else if pos.y > rect.top() + ruler_height {
                         // Empty track space: rubber-band selection.
@@ -7549,7 +7828,11 @@ impl eframe::App for AppUI {
                 }
             }
             if edit_response.dragged() {
-                if let Some((start, _)) = self.marquee {
+                if self.midi_drag.is_some() {
+                    if let Some(pos) = pointer_pos {
+                        self.update_midi_clip_drag(pos, rect, view);
+                    }
+                } else if let Some((start, _)) = self.marquee {
                     if let Some(pos) = pointer_pos {
                         self.marquee = Some((start, pos));
                     }
@@ -7570,6 +7853,8 @@ impl eframe::App for AppUI {
                         self.selected_clip = hits.last().copied();
                     }
                     self.marquee_additive = false;
+                } else if self.midi_drag.is_some() {
+                    self.finish_midi_clip_drag();
                 } else {
                     self.finish_clip_drag();
                 }
@@ -7592,9 +7877,16 @@ impl eframe::App for AppUI {
             }
 
             // Hover feedback: resize cursor over trim/fade zones, grab over bodies.
-            if self.drag.is_none() && !self.dragging_playhead && hovered {
+            if self.drag.is_none() && self.midi_drag.is_none() && !self.dragging_playhead && hovered {
                 if let Some(pos) = pointer_pos {
-                    if let Some((_, mode)) = Self::clip_hit(&clip_rects, pos) {
+                    if let Some((_, mode)) = Self::midi_clip_hit(&midi_clip_rects, pos) {
+                        if matches!(
+                            mode,
+                            DragMode::TrimStart | DragMode::TrimEnd
+                        ) {
+                            ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::ResizeHorizontal);
+                        }
+                    } else if let Some((_, mode)) = Self::clip_hit(&clip_rects, pos) {
                         let icon = match mode {
                             DragMode::Move => egui::CursorIcon::Grab,
                             _ => egui::CursorIcon::ResizeHorizontal,
@@ -8477,6 +8769,7 @@ impl AppUI {
         self.piano_roll_preview = None;
         self.clipboard = Vec::new();
         self.drag = None;
+        self.midi_drag = None;
         self.recovery_offer = None;
         self.playhead_secs = 0.0;
         self.view_start_secs = 0.0;
@@ -9818,13 +10111,13 @@ mod tests {
         knob_from_normalized, knob_to_normalized, load_wav_interleaved,
         load_wav_range_interleaved, loop_range_frames, measure_integrated_loudness,
         merge_continuous_edit, metronome_config, midi_clip_note_spans, midi_clip_notes,
-        note_name, processed_file_stem, punch_waiting,
+        midi_clip_content_notes, note_name, processed_file_stem, punch_waiting,
         render_pitch_stretch, reverse_interleaved, saturate, take_lane_layout,
-        tape_stretch_interleaved, tremolo, wav_file_info, wav_peak, write_piano_roll_notes,
-        write_wav_f32, write_wav_range, write_wav_range_with_envelope, fit_piano_roll_view,
-        piano_roll_new_note_length, project_from_template, ClipShape, ClipSourceState, EditAction,
-        FilterKind, MonitorMode, PianoRollNote, PianoRollSnap, PianoRollWindow, SnapMode,
-        Template, TrackShape,
+        tape_stretch_interleaved, timeline_snap_ticks, tremolo, wav_file_info, wav_peak,
+        write_piano_roll_notes, write_wav_f32, write_wav_range, write_wav_range_with_envelope,
+        fit_piano_roll_view, piano_roll_new_note_length, midi_trim_end, midi_trim_start,
+        project_from_template, ClipShape, ClipSourceState, EditAction, FilterKind, MonitorMode,
+        PianoRollNote, PianoRollSnap, PianoRollWindow, SnapMode, Template, TrackShape,
     };
     use daw_core::audio_pool::AudioFileRef;
     use daw_core::clip::{
@@ -10806,7 +11099,94 @@ mod tests {
             from: clip.clone(),
             to: clip,
         };
-        assert_eq!(action.description(), "Edit MIDI notes");
+        assert_eq!(action.description(), "Edit MIDI clip");
+    }
+
+    #[test]
+    fn midi_clip_notes_respect_content_offset() {
+        let mut clip = MidiClip::new(TimelinePos::default(), 960);
+        clip.content_offset = 480;
+        clip.add_event(MidiEvent::note_on(0, 0, 60, 100));
+        clip.add_event(MidiEvent::note_off(480, 0, 60, 0));
+        clip.add_event(MidiEvent::note_on(480, 0, 64, 100));
+        clip.add_event(MidiEvent::note_off(960, 0, 64, 0));
+        clip.add_event(MidiEvent::note_on(960, 0, 67, 100));
+        clip.add_event(MidiEvent::note_off(1440, 0, 67, 0));
+
+        assert_eq!(
+            midi_clip_notes(&clip),
+            vec![
+                PianoRollNote {
+                    start: 0,
+                    end: 480,
+                    pitch: 64,
+                    velocity: 100,
+                    channel: 0,
+                },
+                PianoRollNote {
+                    start: 480,
+                    end: 960,
+                    pitch: 67,
+                    velocity: 100,
+                    channel: 0,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn writing_piano_roll_notes_keeps_trimmed_material() {
+        let mut clip = MidiClip::new(TimelinePos::default(), 960);
+        clip.content_offset = 480;
+        clip.add_event(MidiEvent::note_on(0, 0, 60, 100));
+        clip.add_event(MidiEvent::note_off(480, 0, 60, 0));
+        clip.add_event(MidiEvent::note_on(480, 0, 64, 100));
+        clip.add_event(MidiEvent::note_off(960, 0, 64, 0));
+        clip.add_event(MidiEvent::note_on(1920, 0, 67, 100));
+        clip.add_event(MidiEvent::note_off(2400, 0, 67, 0));
+
+        let mut notes = midi_clip_content_notes(&clip);
+        assert_eq!(notes.len(), 3);
+        let visible = notes
+            .iter_mut()
+            .find(|note| note.pitch == 64)
+            .expect("visible note");
+        visible.pitch = 65;
+        write_piano_roll_notes(&mut clip, &notes);
+
+        let content = midi_clip_content_notes(&clip);
+        assert!(content.iter().any(|note| note.pitch == 60));
+        assert!(content.iter().any(|note| note.pitch == 65));
+        assert!(content.iter().any(|note| note.pitch == 67));
+    }
+
+    #[test]
+    fn timeline_snap_ticks_follow_the_arrange_grid() {
+        assert_eq!(timeline_snap_ticks(SnapMode::Off, 4), 1);
+        assert_eq!(timeline_snap_ticks(SnapMode::Bar, 4), 3840);
+        assert_eq!(timeline_snap_ticks(SnapMode::Beat, 4), 960);
+        assert_eq!(timeline_snap_ticks(SnapMode::Eighth, 4), 480);
+        assert_eq!(timeline_snap_ticks(SnapMode::Sixteenth, 4), 240);
+    }
+
+    #[test]
+    fn midi_trim_start_moves_the_visible_window() {
+        let mut clip = MidiClip::new(TimelinePos::new(960, 0), 960);
+        clip.content_offset = 480;
+
+        assert_eq!(midi_trim_start(&clip, 1200, 240), (1200, 720, 720));
+        assert_eq!(midi_trim_start(&clip, 720, 240), (720, 240, 1200));
+        // Cannot trim before the recorded content begins.
+        assert_eq!(midi_trim_start(&clip, 0, 240), (480, 0, 1440));
+    }
+
+    #[test]
+    fn midi_trim_end_changes_visible_length() {
+        let clip = MidiClip::new(TimelinePos::new(960, 0), 960);
+        assert_eq!(midi_trim_end(&clip, 1440, 240), 480);
+        assert_eq!(midi_trim_end(&clip, 1920, 240), 960);
+        // At least one tick remains visible.
+        assert_eq!(midi_trim_end(&clip, 0, 240), 1);
     }
 
     #[test]

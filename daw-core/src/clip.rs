@@ -81,6 +81,10 @@ pub struct MidiClip {
     pub timeline_position: TimelinePos,
     /// Clip length in ticks (PPQN 960).
     pub length: u64,
+    /// Ticks trimmed from the start of the recorded content. Events keep their
+    /// original content coordinates, so trimming is non-destructive.
+    #[serde(default)]
+    pub content_offset: u64,
     pub loop_enabled: bool,
     pub loop_range: Option<Range<u64>>,
     pub color: Option<Color>,
@@ -94,6 +98,7 @@ impl MidiClip {
             events: Vec::new(),
             timeline_position,
             length,
+            content_offset: 0,
             loop_enabled: false,
             loop_range: None,
             color: None,
