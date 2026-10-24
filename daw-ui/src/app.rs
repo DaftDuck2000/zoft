@@ -494,6 +494,26 @@ fn midi_trim_end(before: &MidiClip, requested_tick: u64, snap_ticks: u64) -> u64
     new_end - before.timeline_position.tick
 }
 
+/// Split a MIDI clip at a timeline tick. The two halves keep the original
+/// content and share it through their visible windows, so splitting is
+/// non-destructive.
+fn split_midi_clip_at_tick(clip: &MidiClip, split_tick: u64) -> Option<(MidiClip, MidiClip)> {
+    let offset = split_tick.checked_sub(clip.timeline_position.tick)?;
+    if offset == 0 || offset >= clip.length {
+        return None;
+    }
+
+    let mut left = clip.clone();
+    left.length = offset;
+
+    let mut right = clip.clone();
+    right.id = ClipId::default();
+    right.timeline_position.tick = split_tick;
+    right.content_offset = clip.content_offset.saturating_add(offset);
+    right.length = clip.length - offset;
+    Some((left, right))
+}
+
 /// Fit the piano-roll view to the clip length and the notes' pitch range.
 fn fit_piano_roll_view(window: &mut PianoRollWindow, grid: egui::Rect, length: u64) {
     let length = length.max(1) as f32;
@@ -3220,10 +3240,53 @@ impl AppUI {
 
     /// Split the selected clip at the playhead.
     fn split_selected_clip(&mut self) {
+        if let Some(midi_id) = self.selected_midi_clip {
+            self.split_midi_clip_at(midi_id, self.playhead_secs);
+            return;
+        }
         let Some(clip_id) = self.selected_clip else {
             return;
         };
         self.split_clip_at(clip_id, self.playhead_secs);
+    }
+
+    /// Split a MIDI clip at `split_secs` into two non-destructive halves.
+    fn split_midi_clip_at(&mut self, clip_id: ClipId, split_secs: f64) -> Option<ClipId> {
+        let track_id = self.midi_clip_track(clip_id)?;
+        let clip = self.project.midi_clips.get(clip_id)?.clone();
+        let project_sr = self.project.sample_rate.max(1) as f64;
+        let sample = (split_secs.max(0.0) * project_sr).round() as u64;
+        let split_tick = self.project.tempo_map.sample_to_tick(sample, project_sr);
+        let Some((left, mut right)) = split_midi_clip_at_tick(&clip, split_tick) else {
+            self.error_message =
+                Some("The split point must be inside the MIDI clip.".to_string());
+            return None;
+        };
+
+        right.timeline_position.sample =
+            self.project.tempo_map.tick_to_sample(split_tick, project_sr);
+        let right_id = self.project.midi_clips.insert(right);
+        let action = EditAction::Group {
+            actions: vec![
+                EditAction::MidiClip {
+                    clip_id,
+                    from: clip,
+                    to: left,
+                },
+                EditAction::AttachMidi {
+                    track: track_id,
+                    clip_id: right_id,
+                },
+            ],
+            label: "Split MIDI clip".to_string(),
+        };
+        self.apply_action(&action, true);
+        self.push_undo(action, false);
+        self.clear_selection();
+        self.selected_midi_clip = Some(right_id);
+        self.after_edit();
+        self.refresh_playback_if_playing();
+        Some(right_id)
     }
 
     /// Split `clip_id` at `split_secs` into two clips referencing the same
@@ -4091,6 +4154,10 @@ impl AppUI {
     }
 
     fn duplicate_selected_clip(&mut self) {
+        if let Some(midi_id) = self.selected_midi_clip {
+            self.duplicate_midi_clip(midi_id);
+            return;
+        }
         let ids = self.selection_ids();
         if ids.is_empty() {
             return;
@@ -4154,6 +4221,37 @@ impl AppUI {
             self.after_edit();
             self.refresh_playback_if_playing();
         }
+    }
+
+    /// Duplicate a MIDI clip immediately after its visible span.
+    fn duplicate_midi_clip(&mut self, clip_id: ClipId) {
+        let Some(track_id) = self.midi_clip_track(clip_id) else {
+            return;
+        };
+        let Some(clip) = self.project.midi_clips.get(clip_id).cloned() else {
+            return;
+        };
+        let project_sr = self.project.sample_rate.max(1) as f64;
+        let new_tick = clip
+            .timeline_position
+            .tick
+            .saturating_add(clip.length.max(1));
+        let mut copy = clip;
+        copy.id = ClipId::default();
+        copy.timeline_position.tick = new_tick;
+        copy.timeline_position.sample =
+            self.project.tempo_map.tick_to_sample(new_tick, project_sr);
+        let new_id = self.project.midi_clips.insert(copy);
+        let action = EditAction::AttachMidi {
+            track: track_id,
+            clip_id: new_id,
+        };
+        self.apply_action(&action, true);
+        self.push_undo(action, false);
+        self.clear_selection();
+        self.selected_midi_clip = Some(new_id);
+        self.after_edit();
+        self.refresh_playback_if_playing();
     }
 
     /// Clip gain, fade and colour controls shown in the Clip Audio window.
@@ -10247,8 +10345,9 @@ mod tests {
         tape_stretch_interleaved, timeline_snap_ticks, tremolo, wav_file_info, wav_peak,
         write_piano_roll_notes, write_wav_f32, write_wav_range, write_wav_range_with_envelope,
         fit_piano_roll_view, piano_roll_new_note_length, midi_trim_end, midi_trim_start,
-        project_from_template, ClipShape, ClipSourceState, EditAction, FilterKind, MonitorMode,
-        PianoRollNote, PianoRollSnap, PianoRollWindow, SnapMode, Template, TrackShape,
+        split_midi_clip_at_tick, project_from_template, ClipShape, ClipSourceState, EditAction,
+        FilterKind, MonitorMode, PianoRollNote, PianoRollSnap, PianoRollWindow, SnapMode,
+        Template, TrackShape,
     };
     use daw_core::audio_pool::AudioFileRef;
     use daw_core::clip::{
@@ -11327,6 +11426,23 @@ mod tests {
         assert_eq!(midi_trim_end(&clip, 1920, 240), 960);
         // At least one tick remains visible.
         assert_eq!(midi_trim_end(&clip, 0, 240), 1);
+    }
+
+    #[test]
+    fn splitting_midi_clip_preserves_content_windows() {
+        let mut clip = MidiClip::new(TimelinePos::new(960, 0), 1920);
+        clip.content_offset = 240;
+
+        let (left, right) =
+            split_midi_clip_at_tick(&clip, 1920).expect("split inside clip");
+        assert_eq!(left.length, 960);
+        assert_eq!(left.content_offset, 240);
+        assert_eq!(right.timeline_position.tick, 1920);
+        assert_eq!(right.content_offset, 1200);
+        assert_eq!(right.length, 960);
+
+        assert!(split_midi_clip_at_tick(&clip, 960).is_none());
+        assert!(split_midi_clip_at_tick(&clip, 2880).is_none());
     }
 
     #[test]
