@@ -19,6 +19,7 @@ Implement MIDI track: input routing, recording with chase events, loop recording
 - [x] MIDI clip trimming: Drag either edge in the arrange view; hidden notes are preserved
 - [x] MIDI clip moving: Drag the body in time or onto another MIDI/instrument track
 - [x] MIDI clip split/duplicate: `S` splits at the playhead, `Ctrl+D` duplicates the visible span
+- [x] MIDI multi-selection: click, Ctrl/Shift+click, marquee selection, group move/delete/duplicate/copy/paste/mute
 - [x] Live MIDI audition while an armed/monitored MIDI or instrument track is recording
 - [ ] Chase events: Send pending CC/pitch bend/program change on seek/play
 - [ ] Loop recording: Overdub (merge) or new take (lanes)
@@ -121,6 +122,7 @@ MIDI Thru         Record Buffer      Chase Buffer
 - [x] MIDI clips can be cropped from either edge; trimming is non-destructive
 - [x] MIDI clips can be dragged in time or onto another MIDI/instrument track
 - [x] MIDI clips can be split at the playhead and duplicated
+- [x] MIDI clips support the same multi-selection and group editing as audio clips
 - [x] Per-track real-time inserts (saturation, filter, bit crusher, tremolo) apply to audio and MIDI playback
 - [ ] Chase sends CC/pitch bend on seek
 - [ ] Loop recording: overdub merges, new take creates lane
@@ -137,4 +139,5 @@ MIDI Thru         Record Buffer      Chase Buffer
 - 2026-10-24: MIDI clip cropping. Dragging either edge of a MIDI clip in the arrange view trims its visible window using the Arrange snap grid. Trimming is non-destructive: events stay in content coordinates and a `content_offset` marks the visible start, so dragging the edge back out reveals the hidden notes again. The piano roll shades trimmed regions and keeps hidden notes editable
 - 2026-10-24: MIDI clip moving. Dragging a MIDI clip's body moves it in time using the Arrange snap settings (including relative snap), and dropping it on another MIDI/instrument track reattaches it there. Moves are undoable and update playback immediately
 - 2026-10-24: MIDI clip split and duplicate. `S` splits the selected MIDI clip at the playhead into two non-destructive visible windows, and `Ctrl+D` duplicates the clip immediately after its visible span. Both operations are undoable
+- 2026-10-24: MIDI clip multi-selection. MIDI clips now use the same selection model as audio: click, Ctrl/Shift+click and marquee selection build a set, with group move, delete, duplicate, copy/paste and mute. Group moves preserve relative time offsets and can shift across MIDI/instrument tracks together
 - Remaining: instrument/plugin output, chase events, loop recording modes, MIDI thru/panic, input quantize
