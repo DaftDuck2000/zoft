@@ -442,6 +442,46 @@ fn piano_roll_new_note_length(
     }
 }
 
+/// Move note starts toward a grid, preserving each note's duration.
+fn quantize_midi_notes(notes: &mut [PianoRollNote], grid_ticks: u64, strength: f32) {
+    if grid_ticks <= 1 {
+        return;
+    }
+    let strength = strength.clamp(0.0, 1.0);
+    if strength <= 0.0 {
+        return;
+    }
+    for note in notes {
+        let target = ((note.start + grid_ticks / 2) / grid_ticks) * grid_ticks;
+        let duration = note.end.saturating_sub(note.start).max(1);
+        let start = (note.start as f64
+            + (target as f64 - note.start as f64) * strength as f64)
+            .round() as u64;
+        note.start = start;
+        note.end = start.saturating_add(duration);
+    }
+}
+
+/// Transpose notes by a fixed number of semitones, clamping to the MIDI range.
+fn transpose_midi_notes(notes: &mut [PianoRollNote], semitones: i32) {
+    if semitones == 0 {
+        return;
+    }
+    for note in notes {
+        note.pitch = (note.pitch as i32 + semitones).clamp(0, 127) as u8;
+    }
+}
+
+/// Scale note velocities by a factor, keeping them in the audible MIDI range.
+fn scale_midi_velocities(notes: &mut [PianoRollNote], factor: f32) {
+    if (factor - 1.0).abs() < 1e-4 {
+        return;
+    }
+    for note in notes {
+        note.velocity = (note.velocity as f32 * factor).round().clamp(1.0, 127.0) as u8;
+    }
+}
+
 /// Snap resolution in ticks used for MIDI clip trimming in the arrange view.
 fn timeline_snap_ticks(snap: SnapMode, beats_per_bar: u64) -> u64 {
     match snap {
@@ -1297,6 +1337,26 @@ impl PianoRollWindow {
     }
 }
 
+/// State of the floating MIDI tools window (quantize, transpose, velocity).
+#[derive(Debug, Clone, Copy)]
+struct MidiToolsWindow {
+    quantize_snap: PianoRollSnap,
+    quantize_strength: f32,
+    transpose: i32,
+    velocity_factor: f32,
+}
+
+impl Default for MidiToolsWindow {
+    fn default() -> Self {
+        Self {
+            quantize_snap: PianoRollSnap::Beat,
+            quantize_strength: 1.0,
+            transpose: 0,
+            velocity_factor: 1.0,
+        }
+    }
+}
+
 /// File-menu actions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Template {
@@ -1565,6 +1625,8 @@ struct AppUI {
     pending_insert_edit: Option<(TrackId, Vec<InsertSlot>)>,
     /// Floating piano-roll view for the selected MIDI clip.
     piano_roll: Option<PianoRollWindow>,
+    /// Floating MIDI tools window for the selected MIDI clips.
+    midi_tools: Option<MidiToolsWindow>,
     /// Pitch currently auditioned from the piano roll, with its start time so
     /// clicks produce an audible note instead of a one-frame blip.
     piano_roll_preview: Option<(u8, std::time::Instant)>,
@@ -1686,6 +1748,7 @@ impl AppUI {
             track_effects: None,
             pending_insert_edit: None,
             piano_roll: None,
+            midi_tools: None,
             piano_roll_preview: None,
             deleted_from: HashMap::new(),
             history: History::new(1000),
@@ -2113,6 +2176,55 @@ impl AppUI {
         if before != after {
             self.push_undo(EditAction::MidiClip { clip_id, from: before, to: after }, false);
         }
+    }
+
+    /// Apply a MIDI note transform to every selected MIDI clip as one undo step.
+    fn apply_midi_note_edit(
+        &mut self,
+        label: &str,
+        edit: impl Fn(&mut [PianoRollNote]),
+    ) {
+        let ids = self.midi_selection_ids();
+        if ids.is_empty() {
+            return;
+        }
+        let mut actions = Vec::new();
+        for clip_id in ids {
+            let Some(clip) = self.project.midi_clips.get(clip_id).cloned() else {
+                continue;
+            };
+            let mut notes = midi_clip_content_notes(&clip);
+            let before = notes.clone();
+            edit(&mut notes);
+            if notes == before {
+                continue;
+            }
+            let mut to = clip.clone();
+            write_piano_roll_notes(&mut to, &notes);
+            if to != clip {
+                actions.push(EditAction::MidiClip {
+                    clip_id,
+                    from: clip,
+                    to,
+                });
+            }
+        }
+        if actions.is_empty() {
+            return;
+        }
+        let action = if actions.len() == 1 {
+            actions.pop().unwrap()
+        } else {
+            EditAction::Group {
+                actions,
+                label: label.to_string(),
+            }
+        };
+        self.apply_action(&action, true);
+        self.push_undo(action, false);
+        self.after_edit();
+        self.refresh_playback_if_playing();
+        self.reload_piano_roll();
     }
 
     /// Force the open piano roll to reload from the project after undo/redo.
@@ -5883,6 +5995,156 @@ impl AppUI {
         }
     }
 
+    /// Floating MIDI tools: quantize, transpose and velocity scaling for the
+    /// selected MIDI clips.
+    fn show_midi_tools(&mut self, ctx: &egui::Context) {
+        let Some(mut window) = self.midi_tools else {
+            return;
+        };
+        let selected = self.selected_midi_clips.len();
+        let beats_per_bar = self.time_signature().0.max(1) as u64;
+        let mut open = true;
+        let mut do_quantize = false;
+        let mut do_transpose = false;
+        let mut do_velocity = false;
+
+        egui::Window::new("MIDI Tools")
+            .id(egui::Id::new("midi_tools"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(380.0)
+            .show(ctx, |ui| {
+                if selected == 0 {
+                    ui.weak("Select one or more MIDI clips in the arrange view.");
+                } else {
+                    ui.label(format!("{} selected MIDI clip(s)", selected));
+                }
+                ui.separator();
+
+                ui.heading("Quantize");
+                ui.horizontal(|ui| {
+                    ui.label("Grid:");
+                    egui::ComboBox::from_id_salt("midi_tools_quantize_grid")
+                        .selected_text(window.quantize_snap.label())
+                        .width(76.0)
+                        .show_ui(ui, |ui| {
+                            for snap in PianoRollSnap::ALL {
+                                if snap != PianoRollSnap::Off {
+                                    ui.selectable_value(
+                                        &mut window.quantize_snap,
+                                        snap,
+                                        snap.label(),
+                                    );
+                                }
+                            }
+                        });
+                });
+                let mut strength = window.quantize_strength * 100.0;
+                if ui
+                    .add(
+                        egui::Slider::new(&mut strength, 0.0..=100.0)
+                            .text("Strength")
+                            .suffix("%"),
+                    )
+                    .changed()
+                {
+                    window.quantize_strength = strength / 100.0;
+                }
+                if ui
+                    .add_enabled(
+                        selected > 0
+                            && window.quantize_snap != PianoRollSnap::Off
+                            && window.quantize_strength > 0.0,
+                        egui::Button::new("Quantize"),
+                    )
+                    .clicked()
+                {
+                    do_quantize = true;
+                }
+
+                ui.separator();
+                ui.heading("Transpose");
+                ui.add(
+                    egui::Slider::new(&mut window.transpose, -24..=24)
+                        .text("Semitones")
+                        .step_by(1.0),
+                );
+                ui.horizontal(|ui| {
+                    if ui.small_button("-12").clicked() {
+                        window.transpose -= 12;
+                    }
+                    if ui.small_button("+12").clicked() {
+                        window.transpose += 12;
+                    }
+                    window.transpose = window.transpose.clamp(-24, 24);
+                });
+                if ui
+                    .add_enabled(
+                        selected > 0 && window.transpose != 0,
+                        egui::Button::new("Transpose"),
+                    )
+                    .clicked()
+                {
+                    do_transpose = true;
+                }
+
+                ui.separator();
+                ui.heading("Velocity");
+                let mut velocity_percent = window.velocity_factor * 100.0;
+                if ui
+                    .add(
+                        egui::Slider::new(&mut velocity_percent, 0.0..=200.0)
+                            .text("Scale")
+                            .suffix("%"),
+                    )
+                    .changed()
+                {
+                    window.velocity_factor = velocity_percent / 100.0;
+                }
+                if ui
+                    .add_enabled(
+                        selected > 0
+                            && (window.velocity_factor - 1.0).abs() > 1e-3,
+                        egui::Button::new("Apply Velocity"),
+                    )
+                    .clicked()
+                {
+                    do_velocity = true;
+                }
+
+                ui.add_space(4.0);
+                ui.weak(
+                    "Tools apply to every note in the selected MIDI clips, including trimmed regions.",
+                );
+            });
+
+        if !open {
+            self.midi_tools = None;
+            return;
+        }
+        if do_quantize {
+            let grid = window.quantize_snap.ticks(beats_per_bar);
+            let strength = window.quantize_strength;
+            self.apply_midi_note_edit("Quantize MIDI", |notes| {
+                quantize_midi_notes(notes, grid, strength);
+            });
+        }
+        if do_transpose {
+            let semitones = window.transpose;
+            self.apply_midi_note_edit("Transpose MIDI", |notes| {
+                transpose_midi_notes(notes, semitones);
+            });
+        }
+        if do_velocity {
+            let factor = window.velocity_factor;
+            self.apply_midi_note_edit("Scale MIDI velocity", |notes| {
+                scale_midi_velocities(notes, factor);
+            });
+        }
+        self.midi_tools = Some(window);
+    }
+
     /// Editable piano-roll view: pitch stripes, beat/bar grid, note selection,
     /// drag move/resize, double-click entry and right-click delete.
     fn show_piano_roll(&mut self, ctx: &egui::Context) {
@@ -7792,6 +8054,18 @@ impl eframe::App for AppUI {
                         self.piano_roll = Some(PianoRollWindow::new(clip_id, self.snap_mode));
                     }
                 }
+                if ui
+                    .add_enabled(
+                        !self.selected_midi_clips.is_empty(),
+                        egui::Button::new("MIDI…"),
+                    )
+                    .on_hover_text(
+                        "Quantize, transpose and velocity tools for selected MIDI clips",
+                    )
+                    .clicked()
+                {
+                    self.midi_tools = Some(MidiToolsWindow::default());
+                }
                 ui.separator();
                 ui.label("Snap:");
                 egui::ComboBox::from_id_salt("snap_mode")
@@ -8800,6 +9074,7 @@ impl eframe::App for AppUI {
 
         self.show_audio_window(ctx);
         self.show_track_effects(ctx);
+        self.show_midi_tools(ctx);
         self.show_piano_roll(ctx);
         self.show_history_window(ctx);
 
@@ -9584,6 +9859,7 @@ impl AppUI {
         self.track_effects = None;
         self.pending_insert_edit = None;
         self.piano_roll = None;
+        self.midi_tools = None;
         self.piano_roll_preview = None;
         self.clipboard = Vec::new();
         self.midi_clipboard = Vec::new();
@@ -10934,7 +11210,8 @@ mod tests {
         tape_stretch_interleaved, timeline_snap_ticks, tremolo, wav_file_info, wav_peak,
         write_piano_roll_notes, write_wav_f32, write_wav_range, write_wav_range_with_envelope,
         fit_piano_roll_view, piano_roll_new_note_length, midi_trim_end, midi_trim_start,
-        split_midi_clip_at_tick, project_from_template, ClipShape, ClipSourceState, EditAction,
+        split_midi_clip_at_tick, quantize_midi_notes, scale_midi_velocities,
+        transpose_midi_notes, project_from_template, ClipShape, ClipSourceState, EditAction,
         FilterKind, MonitorMode, PianoRollNote, PianoRollSnap, PianoRollWindow, SnapMode,
         Template, TrackShape,
     };
@@ -11909,6 +12186,57 @@ mod tests {
             piano_roll_new_note_length(PianoRollSnap::Off, 1, 960),
             960
         );
+    }
+
+    #[test]
+    fn midi_quantize_preserves_duration_and_strength() {
+        let mut notes = vec![PianoRollNote {
+            start: 100,
+            end: 400,
+            pitch: 60,
+            velocity: 100,
+            channel: 0,
+        }];
+        quantize_midi_notes(&mut notes, 240, 1.0);
+        assert_eq!(notes[0].start, 0);
+        assert_eq!(notes[0].end, 300);
+
+        notes[0].start = 100;
+        notes[0].end = 400;
+        quantize_midi_notes(&mut notes, 240, 0.5);
+        assert_eq!(notes[0].start, 50);
+        assert_eq!(notes[0].end, 350);
+    }
+
+    #[test]
+    fn midi_transpose_and_velocity_clamp_to_valid_ranges() {
+        let mut notes = vec![
+            PianoRollNote {
+                start: 0,
+                end: 120,
+                pitch: 60,
+                velocity: 100,
+                channel: 0,
+            },
+            PianoRollNote {
+                start: 240,
+                end: 360,
+                pitch: 120,
+                velocity: 10,
+                channel: 0,
+            },
+        ];
+        transpose_midi_notes(&mut notes, 12);
+        assert_eq!(notes[0].pitch, 72);
+        assert_eq!(notes[1].pitch, 127);
+        transpose_midi_notes(&mut notes, -100);
+        assert_eq!(notes[0].pitch, 0);
+        assert_eq!(notes[1].pitch, 27);
+
+        scale_midi_velocities(&mut notes, 2.0);
+        assert_eq!(notes[0].velocity, 127);
+        scale_midi_velocities(&mut notes, 0.0);
+        assert_eq!(notes[0].velocity, 1);
     }
 
     #[test]

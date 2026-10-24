@@ -9,7 +9,7 @@
 |----|---------|--------|------|
 | 2.1 | MIDI Track Record/Playback | `[~]` | `midi-track-record-playback.md` |
 | 2.2 | Piano Roll Editor | `[~]` | `piano-roll-editor.md` |
-| 2.3 | MIDI Editing Tools | `[ ]` | `midi-editing-tools.md` |
+| 2.3 | MIDI Editing Tools | `[~]` | `midi-editing-tools.md` |
 | 2.4 | MIDI Effect Plugins | `[ ]` | `midi-effects.md` |
 | 2.5 | Notation View (Stretch) | `[ ]` | `notation-view.md` |
 
@@ -34,11 +34,12 @@ either edge in the arrange view, dragged in time, dropped onto another
 MIDI/instrument track, split at the playhead, duplicated, and multi-selected
 with the same click/Ctrl/Shift/marquee model as audio for group moves, deletes,
 duplicates, copy/paste and mute; audio and MIDI selections can be combined and
-moved as one group. Trimming is non-destructive and the piano roll shades
-trimmed regions. Every track type now has a real-time insert chain (saturation,
-filter, bit crusher, tremolo) that runs before the track fader. Instruments,
-chase events, loop takes, MIDI thru, velocity/CC lanes and the remaining
-editing tools are not implemented yet.
+moved as one group. The MIDI Tools window adds quantize, transpose and velocity
+scaling for the selected MIDI clips. Trimming is non-destructive and the piano
+roll shades trimmed regions. Every track type now has a real-time insert chain
+(saturation, filter, bit crusher, tremolo) that runs before the track fader.
+Instruments, chase events, loop takes, MIDI thru, velocity/CC lanes and the
+remaining editing tools are not implemented yet.
 
 ## Milestone: M2 — MIDI Sequencing (Week 44)
 

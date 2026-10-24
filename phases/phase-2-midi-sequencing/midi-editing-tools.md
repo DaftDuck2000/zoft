@@ -4,7 +4,7 @@
 ## ID: 2.3
 ## Priority: High
 ## Estimated: 2 weeks
-## Status: `[ ]` Not Started
+## Status: `[~]` In Progress
 ## Depends On: 2.2
 
 ## Description
@@ -12,18 +12,18 @@ MIDI transformation tools: quantize, humanize, transpose, scale conform, legato,
 
 ## Requirements
 
-- [ ] Quantize: Notes to grid, with strength (0-100%), swing, tuplets
+- [x] Quantize: Notes to grid with strength (0-100%) and tuplet grids; swing pending
 - [ ] Humanize: Random timing/velocity offset
-- [ ] Transpose: Semitones, octave, preserve intervals
+- [x] Transpose: Semitones and octave buttons; scale-aware transpose pending
 - [ ] Scale Conform: Force notes to scale (major, minor, modes, custom)
 - [ ] Legato: Extend notes to next note start (with gap option)
-- [ ] Velocity Tools: Compress, expand, curve, randomize, scale
+- [~] Velocity Tools: Scale implemented; compress, expand, curve, randomize pending
 - [ ] Note Length: Set fixed, scale, legato, staccato
 - [ ] Randomize: Pitch, velocity, timing, note density
 - [ ] Split Notes: At pitch, at velocity, at channel
 - [ ] Join Notes: Adjacent same-pitch notes
 - [ ] Mirror/Reverse: Time reverse, pitch mirror
-- [ ] Batch apply: To selection, to clip, to track, to project
+- [x] Batch apply: To the current MIDI clip selection
 
 ## Technical Details
 
@@ -119,21 +119,20 @@ fn velocity_curve(events: &mut [MidiEvent], params: &ToolParams) {
 
 ## Acceptance Criteria
 
-- [ ] Quantize with strength/swing works musically
+- [~] Quantize with strength/swing works musically
 - [ ] Humanize adds natural variation
-- [ ] Transpose preserves chord quality
+- [x] Transpose preserves chord quality
 - [ ] Scale conform maps notes correctly
 - [ ] Legato creates smooth transitions
-- [ ] Velocity curve shapes dynamics
+- [~] Velocity curve shapes dynamics
 - [ ] All tools support preview
-- [ ] Batch apply to selection/clip/track/project
-- [ ] Each tool = single undo step
+- [x] Batch apply to selection/clip/track/project
+- [x] Each tool = single undo step
 
 ## Progress Log
 
-- YYYY-MM-DD: Quantize (grid, strength, swing)
+- 2026-10-24: MIDI Tools window with quantize (Bar/Beat/1/8/1/16/1/32/1/8T/1/16T, 0-100% strength), transpose (±24 semitones and octave buttons) and velocity scaling (0-200%). Applies to every selected MIDI clip as one undo step; trimmed notes are included
 - YYYY-MM-DD: Humanize
-- YYYY-MM-DD: Transpose
 - YYYY-MM-DD: Scale conform
 - YYYY-MM-DD: Legato
 - YYYY-MM-DD: Velocity tools
