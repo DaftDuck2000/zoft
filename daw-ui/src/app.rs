@@ -5749,6 +5749,7 @@ impl eframe::App for AppUI {
             );
             let mut header_ui = ui.new_child(
                 egui::UiBuilder::new()
+                    .id_salt("track_list_header")
                     .max_rect(header_rect)
                     .layout(egui::Layout::left_to_right(egui::Align::Center)),
             );
@@ -5784,6 +5785,7 @@ impl eframe::App for AppUI {
                     );
                     let mut row_ui = ui.new_child(
                         egui::UiBuilder::new()
+                            .id_salt(("track_row", *track_id))
                             .max_rect(row_rect)
                             .layout(egui::Layout::left_to_right(egui::Align::Center)),
                     );
