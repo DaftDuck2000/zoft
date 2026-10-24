@@ -35,11 +35,12 @@ MIDI/instrument track, split at the playhead, duplicated, and multi-selected
 with the same click/Ctrl/Shift/marquee model as audio for group moves, deletes,
 duplicates, copy/paste and mute; audio and MIDI selections can be combined and
 moved as one group. The MIDI Tools panel in the piano roll adds quantize,
-transpose and velocity scaling for the open clip. Trimming is non-destructive
-and the piano roll shades trimmed regions. Every track type now has a real-time
-insert chain (saturation, filter, bit crusher, tremolo) that runs before the
-track fader. Instruments, chase events, loop takes, MIDI thru, velocity/CC
-lanes and the remaining editing tools are not implemented yet.
+transpose and velocity scaling, and a velocity lane allows per-note dynamics
+editing. Trimming is non-destructive and the piano roll shades trimmed regions.
+Every track type now has a real-time insert chain (saturation, filter, bit
+crusher, tremolo) that runs before the track fader. Instruments, chase events,
+loop takes, MIDI thru, CC lanes and the remaining editing tools are not
+implemented yet.
 
 ## Milestone: M2 — MIDI Sequencing (Week 44)
 

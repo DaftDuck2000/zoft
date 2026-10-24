@@ -1343,6 +1343,8 @@ struct PianoRollWindow {
     /// Rubber-band note selection.
     marquee: Option<(egui::Pos2, egui::Pos2)>,
     marquee_additive: bool,
+    /// Clip snapshot while dragging a velocity bar.
+    velocity_drag_before: Option<MidiClip>,
 }
 
 impl PianoRollWindow {
@@ -1363,6 +1365,7 @@ impl PianoRollWindow {
             tools: MidiToolsState::default(),
             marquee: None,
             marquee_additive: false,
+            velocity_drag_before: None,
         }
     }
 
@@ -1372,6 +1375,7 @@ impl PianoRollWindow {
         self.drag = None;
         self.marquee = None;
         self.marquee_additive = false;
+        self.velocity_drag_before = None;
         self.initialized = true;
         self.needs_fit = true;
     }
@@ -6231,8 +6235,11 @@ impl AppUI {
                     ui.separator();
                     ui.vertical(|ui| {
 
+                let velocity_lane_height = 84.0;
+                let grid_height =
+                    (ui.available_height() - velocity_lane_height - 6.0).max(120.0);
                 let (response, painter) = ui.allocate_painter(
-                    ui.available_size(),
+                    egui::vec2(ui.available_width(), grid_height),
                     egui::Sense::click_and_drag(),
                 );
                 let rect = response.rect;
@@ -6900,6 +6907,134 @@ impl AppUI {
                             egui::Color32::from_rgb(120, 170, 240),
                         ),
                     );
+                }
+                ui.add_space(6.0);
+                let (vel_response, vel_painter) = ui.allocate_painter(
+                    egui::vec2(ui.available_width(), velocity_lane_height),
+                    egui::Sense::click_and_drag(),
+                );
+                let vel_rect = vel_response.rect;
+                let vel_grid = egui::Rect::from_min_max(
+                    egui::pos2(grid.left(), vel_rect.top()),
+                    egui::pos2(grid.right(), vel_rect.bottom()),
+                );
+                vel_painter.rect_filled(vel_rect, 0.0, egui::Color32::from_gray(24));
+                vel_painter.text(
+                    egui::pos2(vel_rect.left() + 3.0, vel_rect.top() + 3.0),
+                    egui::Align2::LEFT_TOP,
+                    "Velocity",
+                    egui::FontId::proportional(9.0),
+                    egui::Color32::from_gray(180),
+                );
+                for (fraction, label) in
+                    [(0.0_f32, "0"), (0.5, "64"), (1.0, "127")]
+                {
+                    let y = vel_grid.bottom() - fraction * vel_grid.height();
+                    vel_painter.line_segment(
+                        [
+                            egui::pos2(vel_grid.left(), y),
+                            egui::pos2(vel_grid.right(), y),
+                        ],
+                        egui::Stroke::new(0.5_f32, egui::Color32::from_gray(48)),
+                    );
+                    vel_painter.text(
+                        egui::pos2(vel_grid.left() - 4.0, y),
+                        egui::Align2::RIGHT_CENTER,
+                        label,
+                        egui::FontId::monospace(7.0),
+                        egui::Color32::from_gray(130),
+                    );
+                }
+
+                let mut velocity_bars: Vec<(usize, egui::Rect)> = Vec::new();
+                for (index, note) in window.notes.iter().enumerate() {
+                    let x = x_for_tick(note.start as f64);
+                    if x < vel_grid.left() - 4.0 || x > vel_grid.right() + 4.0 {
+                        continue;
+                    }
+                    let height = (note.velocity as f32 / 127.0)
+                        * (vel_grid.height() - 6.0).max(1.0);
+                    let bar = egui::Rect::from_min_max(
+                        egui::pos2(x - 2.5, vel_grid.bottom() - height),
+                        egui::pos2(x + 2.5, vel_grid.bottom()),
+                    );
+                    let selected = window.selected.contains(&index);
+                    let color = velocity_color(note.velocity);
+                    let fill = if selected {
+                        egui::Color32::from_rgb(
+                            color.r().saturating_add(35),
+                            color.g().saturating_add(35),
+                            color.b().saturating_add(35),
+                        )
+                    } else {
+                        color
+                    };
+                    vel_painter.rect_filled(bar, 1.0, fill);
+                    if selected {
+                        vel_painter.rect_stroke(
+                            bar,
+                            1.0,
+                            egui::Stroke::new(1.0_f32, egui::Color32::WHITE),
+                        );
+                    }
+                    velocity_bars.push((index, bar));
+                }
+
+                if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
+                    if vel_response.hovered()
+                        && velocity_bars
+                            .iter()
+                            .any(|(_, bar)| bar.expand(4.0).contains(pos))
+                    {
+                        ui.output_mut(|output| {
+                            output.cursor_icon = egui::CursorIcon::ResizeVertical
+                        });
+                    }
+                }
+
+                if vel_response.drag_started_by(egui::PointerButton::Primary) {
+                    window.velocity_drag_before = Some(clip.clone());
+                }
+                if vel_response.dragged_by(egui::PointerButton::Primary) {
+                    if let Some(pos) = vel_response.interact_pointer_pos() {
+                        if vel_grid.contains(pos) {
+                            let mut nearest: Option<(usize, f32)> = None;
+                            for (index, bar) in &velocity_bars {
+                                let distance = (bar.center().x - pos.x).abs();
+                                if distance <= 8.0
+                                    && nearest.map_or(true, |(_, best)| distance < best)
+                                {
+                                    nearest = Some((*index, distance));
+                                }
+                            }
+                            if let Some((index, _)) = nearest {
+                                let targets: Vec<usize> =
+                                    if window.selected.contains(&index) {
+                                        window.selected.iter().copied().collect()
+                                    } else {
+                                        vec![index]
+                                    };
+                                let velocity = (((vel_grid.bottom() - pos.y)
+                                    / vel_grid.height().max(1.0))
+                                    * 127.0)
+                                    .round()
+                                    .clamp(1.0, 127.0)
+                                    as u8;
+                                for target in targets {
+                                    if let Some(note) = window.notes.get_mut(target) {
+                                        note.velocity = velocity;
+                                    }
+                                }
+                                commit = true;
+                            }
+                        }
+                    }
+                }
+                if vel_response.drag_stopped_by(egui::PointerButton::Primary) {
+                    if let Some(before) = window.velocity_drag_before.take() {
+                        undo_before = Some(before);
+                        commit = true;
+                    }
                 }
                     });
                 });

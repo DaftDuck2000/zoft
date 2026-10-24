@@ -17,7 +17,7 @@ Full-featured piano roll: note entry/selection/editing, velocity lanes, CC lanes
 - [x] Selection: Click, Ctrl/Shift+click, drag a marquee over empty space, Select All
 - [~] Note editing: Drag move and resize implemented; velocity drag pending
 - [x] Note audition: Clicking a note or dragging it to a new pitch plays it
-- [ ] Velocity lane: Bar graph per note, drag to edit, curve tool
+- [~] Velocity lane: Bar graph per note with drag-to-edit; curve tool pending
 - [ ] CC lanes: Multiple lanes (Mod wheel, Expression, Pitch Bend, custom)
 - [ ] Tool palette: Select, Pencil, Eraser, Mute, Scissors, Glue, Velocity, Line
 - [x] MIDI Tools side panel: quantize, transpose and velocity scaling for the open clip
@@ -154,7 +154,7 @@ enum CCEditMode {
 - [x] Drag moves notes (time and pitch) and resizes note lengths
 - [x] Notes audition when clicked or dragged to a new pitch
 - [x] Wheel/middle-drag pans the piano-roll view; Ctrl+wheel zooms
-- [ ] Velocity lane edits work
+- [~] Velocity lane edits work
 - [ ] CC lanes: add/edit/delete points
 - [ ] Ghost notes show other clips
 - [ ] Scale highlighting works (major/minor/modes)
@@ -170,6 +170,7 @@ enum CCEditMode {
 - 2026-10-24: Trimmed MIDI clip regions are shaded in the piano roll. Notes outside the clip's visible window stay editable and reappear when the clip edge is dragged back out in the arrange view
 - 2026-10-24: MIDI Tools now live in a left-side panel inside the piano-roll window. Quantize, transpose and velocity controls apply to the open clip as one undo step
 - 2026-10-24: Piano-roll velocity colours now span a wide blue → cyan → yellow gradient. Dragging on empty grid space draws a selection marquee that selects every intersecting note; Ctrl/Shift makes the marquee additive. Middle-drag now pans without starting a note selection or edit
+- 2026-10-24: Added a velocity lane below the piano-roll grid. Each note has a velocity bar; dragging a bar sets that note's velocity (or every selected note when the clicked bar is selected). The lane uses the same horizontal view/zoom as the grid, and each drag is one undo step
 - YYYY-MM-DD: Pencil/Eraser/Select tools
 - YYYY-MM-DD: Note drag + resize
 - YYYY-MM-DD: Velocity lane
