@@ -827,6 +827,14 @@ enum EditAction {
     AttachMidi { track: TrackId, clip_id: ClipId },
     /// Detach a MIDI clip from its track (undo reattaches).
     DetachMidi { track: TrackId, clip_id: ClipId },
+    /// Move a MIDI clip in time and/or to another MIDI/instrument track.
+    MoveMidi {
+        clip_id: ClipId,
+        from_track: TrackId,
+        from_pos: TimelinePos,
+        to_track: TrackId,
+        to_pos: TimelinePos,
+    },
     /// Replace a MIDI clip's notes (piano-roll editing).
     MidiClip {
         clip_id: ClipId,
@@ -915,6 +923,7 @@ impl EditAction {
             }
             EditAction::AttachMidi { .. } => "Add MIDI clip".to_string(),
             EditAction::DetachMidi { .. } => "Delete MIDI clip".to_string(),
+            EditAction::MoveMidi { .. } => "Move MIDI clip".to_string(),
             EditAction::MidiClip { .. } => "Edit MIDI clip".to_string(),
             EditAction::Group { label, .. } => label.clone(),
         }
@@ -1376,13 +1385,16 @@ struct ClipDrag {
     members: Vec<ClipDragMember>,
 }
 
-/// In-progress MIDI clip trim. Events are never deleted: trimming only moves
-/// the clip's visible window over the recorded content.
+/// In-progress MIDI clip trim or move.
 #[derive(Clone)]
 struct MidiClipDrag {
     clip_id: ClipId,
     mode: DragMode,
     before: MidiClip,
+    from_track: TrackId,
+    last_track: TrackId,
+    /// Offset from the clip start to where the pointer grabbed it, in ticks.
+    grab_offset_ticks: i64,
 }
 
 /// Decoded mono windows used for sample-accurate rendering at high zoom.
@@ -1963,6 +1975,17 @@ impl AppUI {
             .copied()
     }
 
+    fn place_midi_clip(&mut self, clip_id: ClipId, track_id: TrackId) {
+        for track in self.project.tracks.values_mut() {
+            if track.id != track_id {
+                track.remove_midi_clip(clip_id);
+            }
+        }
+        if let Some(track) = self.project.tracks.get_mut(&track_id) {
+            track.add_midi_clip(clip_id);
+        }
+    }
+
     /// Find the contiguous run of clips on the selected clip's track. A run
     /// grows while clips touch (`end >= next.start`) or overlap.
     fn consolidation_plan(&self, clip_id: ClipId) -> Option<ConsolidationPlan> {
@@ -2509,6 +2532,23 @@ impl AppUI {
                     }
                 }
             }
+            EditAction::MoveMidi {
+                clip_id,
+                from_track,
+                from_pos,
+                to_track,
+                to_pos,
+            } => {
+                let (track_id, position) = if forward {
+                    (*to_track, *to_pos)
+                } else {
+                    (*from_track, *from_pos)
+                };
+                self.place_midi_clip(*clip_id, track_id);
+                if let Some(clip) = self.project.midi_clips.get_mut(*clip_id) {
+                    clip.timeline_position = position;
+                }
+            }
             EditAction::MidiClip { clip_id, from, to } => {
                 if let Some(clip) = self.project.midi_clips.get_mut(*clip_id) {
                     *clip = if forward {
@@ -3002,10 +3042,16 @@ impl AppUI {
         let Some((clip_id, mode)) = Self::midi_clip_hit(midi_rects, pos) else {
             return;
         };
-        if !matches!(mode, DragMode::TrimStart | DragMode::TrimEnd) {
+        if !matches!(
+            mode,
+            DragMode::Move | DragMode::TrimStart | DragMode::TrimEnd
+        ) {
             return;
         }
         let Some(before) = self.project.midi_clips.get(clip_id).cloned() else {
+            return;
+        };
+        let Some(from_track) = self.midi_clip_track(clip_id) else {
             return;
         };
         // Don't start a trim on top of the playhead handle.
@@ -3013,18 +3059,36 @@ impl AppUI {
         if (pos.x - playhead_x).abs() <= CLIP_EDGE_PX {
             return;
         }
+        let project_sr = self.project.sample_rate.max(1) as f64;
+        let pointer_sample = (view.t(rect, pos.x).max(0.0) * project_sr).round() as u64;
+        let pointer_tick = self
+            .project
+            .tempo_map
+            .sample_to_tick(pointer_sample, project_sr);
+        let grab_offset_ticks =
+            pointer_tick as i64 - before.timeline_position.tick as i64;
         self.clear_selection();
         self.selected_midi_clip = Some(clip_id);
         self.midi_drag = Some(MidiClipDrag {
             clip_id,
             mode,
             before,
+            from_track,
+            last_track: from_track,
+            grab_offset_ticks,
         });
     }
 
-    /// Move the visible window of a MIDI clip over its recorded content.
-    fn update_midi_clip_drag(&mut self, pos: egui::Pos2, rect: egui::Rect, view: TimelineView) {
-        let Some(drag) = self.midi_drag.take() else {
+    /// Move a MIDI clip in time/across tracks, or trim its visible window.
+    fn update_midi_clip_drag(
+        &mut self,
+        pos: egui::Pos2,
+        rect: egui::Rect,
+        track_y_start: f32,
+        track_height: f32,
+        view: TimelineView,
+    ) {
+        let Some(mut drag) = self.midi_drag.take() else {
             return;
         };
         let before = drag.before.clone();
@@ -3036,8 +3100,58 @@ impl AppUI {
             .tempo_map
             .sample_to_tick(pointer_sample, project_sr);
         let snap_ticks = timeline_snap_ticks(self.snap_mode, beats_per_bar);
+        let snap_tick = |tick: u64| -> u64 {
+            if snap_ticks <= 1 {
+                tick
+            } else {
+                ((tick + snap_ticks / 2) / snap_ticks) * snap_ticks
+            }
+        };
 
         match drag.mode {
+            DragMode::Move => {
+                let raw_start = (pointer_tick as i64 - drag.grab_offset_ticks).max(0) as u64;
+                let new_start = if snap_ticks <= 1 {
+                    raw_start
+                } else if self.snap_relative {
+                    let grid = snap_ticks as f64;
+                    let anchor = before.timeline_position.tick as f64;
+                    let steps = ((raw_start as f64 - anchor) / grid).round();
+                    (anchor + steps * grid).max(0.0) as u64
+                } else {
+                    snap_tick(raw_start)
+                };
+                let new_sample = self
+                    .project
+                    .tempo_map
+                    .tick_to_sample(new_start, project_sr);
+                if let Some(clip) = self.project.midi_clips.get_mut(drag.clip_id) {
+                    clip.timeline_position.tick = new_start;
+                    clip.timeline_position.sample = new_sample;
+                }
+
+                // Only MIDI/instrument tracks can hold MIDI clips. If the
+                // pointer is over another track type, keep the last valid one.
+                if let Some(track_id) =
+                    self.track_at_y(pos.y, track_y_start, track_height)
+                {
+                    let valid = self
+                        .project
+                        .tracks
+                        .get(&track_id)
+                        .map(|track| {
+                            matches!(
+                                track.track_type,
+                                TrackType::Midi | TrackType::Instrument
+                            )
+                        })
+                        .unwrap_or(false);
+                    if valid && track_id != drag.last_track {
+                        self.place_midi_clip(drag.clip_id, track_id);
+                        drag.last_track = track_id;
+                    }
+                }
+            }
             DragMode::TrimStart => {
                 let (new_start, new_offset, new_length) =
                     midi_trim_start(&before, pointer_tick, snap_ticks);
@@ -3065,7 +3179,7 @@ impl AppUI {
         self.refresh_midi_playback();
     }
 
-    /// Commit a finished MIDI trim as one undo step.
+    /// Commit a finished MIDI move/trim as one undo step.
     fn finish_midi_clip_drag(&mut self) {
         let Some(drag) = self.midi_drag.take() else {
             return;
@@ -3073,7 +3187,24 @@ impl AppUI {
         let Some(after) = self.project.midi_clips.get(drag.clip_id).cloned() else {
             return;
         };
-        if after != drag.before {
+        if drag.mode == DragMode::Move {
+            let moved = drag.last_track != drag.from_track
+                || after.timeline_position != drag.before.timeline_position;
+            if moved {
+                self.push_undo(
+                    EditAction::MoveMidi {
+                        clip_id: drag.clip_id,
+                        from_track: drag.from_track,
+                        from_pos: drag.before.timeline_position,
+                        to_track: drag.last_track,
+                        to_pos: after.timeline_position,
+                    },
+                    false,
+                );
+                self.after_edit();
+                self.refresh_playback_if_playing();
+            }
+        } else if after != drag.before {
             self.push_undo(
                 EditAction::MidiClip {
                     clip_id: drag.clip_id,
@@ -7808,13 +7939,8 @@ impl eframe::App for AppUI {
                 // grabs would already be inside the body and become moves.
                 if let Some(pos) = press_origin.or(pointer_pos) {
                     let midi_hit = Self::midi_clip_hit(&midi_clip_rects, pos);
-                    if matches!(
-                        midi_hit,
-                        Some((_, DragMode::TrimStart)) | Some((_, DragMode::TrimEnd))
-                    ) {
+                    if midi_hit.is_some() {
                         self.begin_midi_clip_drag(pos, &midi_clip_rects, rect, view);
-                    } else if midi_hit.is_some() {
-                        // MIDI clip body: selection is handled on click.
                     } else if Self::clip_hit(&clip_rects, pos).is_some() {
                         self.begin_clip_drag(pos, &clip_rects, rect, view);
                     } else if pos.y > rect.top() + ruler_height {
@@ -7830,7 +7956,13 @@ impl eframe::App for AppUI {
             if edit_response.dragged() {
                 if self.midi_drag.is_some() {
                     if let Some(pos) = pointer_pos {
-                        self.update_midi_clip_drag(pos, rect, view);
+                        self.update_midi_clip_drag(
+                            pos,
+                            rect,
+                            track_y_start,
+                            track_height,
+                            view,
+                        );
                     }
                 } else if let Some((start, _)) = self.marquee {
                     if let Some(pos) = pointer_pos {
@@ -7880,12 +8012,11 @@ impl eframe::App for AppUI {
             if self.drag.is_none() && self.midi_drag.is_none() && !self.dragging_playhead && hovered {
                 if let Some(pos) = pointer_pos {
                     if let Some((_, mode)) = Self::midi_clip_hit(&midi_clip_rects, pos) {
-                        if matches!(
-                            mode,
-                            DragMode::TrimStart | DragMode::TrimEnd
-                        ) {
-                            ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::ResizeHorizontal);
-                        }
+                        let icon = match mode {
+                            DragMode::Move => egui::CursorIcon::Grab,
+                            _ => egui::CursorIcon::ResizeHorizontal,
+                        };
+                        ui.output_mut(|o| o.cursor_icon = icon);
                     } else if let Some((_, mode)) = Self::clip_hit(&clip_rects, pos) {
                         let icon = match mode {
                             DragMode::Move => egui::CursorIcon::Grab,
@@ -11100,6 +11231,15 @@ mod tests {
             to: clip,
         };
         assert_eq!(action.description(), "Edit MIDI clip");
+
+        let moved = EditAction::MoveMidi {
+            clip_id: ClipId::default(),
+            from_track: daw_core::track::TrackId::default(),
+            from_pos: TimelinePos::default(),
+            to_track: daw_core::track::TrackId::default(),
+            to_pos: TimelinePos::default(),
+        };
+        assert_eq!(moved.description(), "Move MIDI clip");
     }
 
     #[test]
