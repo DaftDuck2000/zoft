@@ -5733,10 +5733,186 @@ impl eframe::App for AppUI {
             });
         });
 
+        // MIDI input bar
+        egui::TopBottomPanel::top("midi_bar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("MIDI:");
+                if self.midi_inputs.is_empty() {
+                    ui.weak("No MIDI inputs detected");
+                    if ui.small_button("Refresh").clicked() {
+                        self.refresh_midi_inputs();
+                    }
+                } else {
+                    let mut selected = self.selected_midi_input.clone();
+                    let mut changed = false;
+                    egui::ComboBox::from_id_salt("midi_input")
+                        .selected_text(selected.as_deref().unwrap_or("None"))
+                        .show_ui(ui, |ui| {
+                            if ui.selectable_value(&mut selected, None, "None").changed() {
+                                changed = true;
+                            }
+                            for device in &self.midi_inputs {
+                                if ui
+                                    .selectable_value(
+                                        &mut selected,
+                                        Some(device.name.clone()),
+                                        &device.name,
+                                    )
+                                    .changed()
+                                {
+                                    changed = true;
+                                }
+                            }
+                        });
+                    if changed {
+                        self.selected_midi_input = selected;
+                        self.restart_midi_monitor();
+                    }
+                    if ui.small_button("Refresh").clicked() {
+                        self.refresh_midi_inputs();
+                    }
+                    if let Some(activity) = self.midi_monitor.as_ref().map(|m| m.activity()) {
+                        self.midi_activity = activity;
+                    }
+                    let has_note = self.midi_activity.last_note.is_some();
+                    let active = self.midi_activity.active_notes > 0;
+                    let label = match self.midi_activity.last_note {
+                        Some(note) if active => format!(
+                            "{} vel {}",
+                            daw_engine::midi_note_name(note),
+                            self.midi_activity.last_velocity
+                        ),
+                        Some(note) => daw_engine::midi_note_name(note),
+                        None => "--".to_string(),
+                    };
+                    let color = if active {
+                        egui::Color32::GREEN
+                    } else if has_note {
+                        egui::Color32::from_gray(180)
+                    } else {
+                        egui::Color32::GRAY
+                    };
+                    ui.colored_label(color, label);
+                }
+            });
+        });
+
+        // Arrange toolbar (above the side panel and timeline so rows line up)
+        egui::TopBottomPanel::top("arrange_toolbar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.heading("Arrange");
+                ui.separator();
+                if ui.small_button("Fit").clicked() {
+                    self.needs_fit = true;
+                }
+                if ui.small_button("−").clicked() {
+                    self.zoom_center(1.0 / 1.5);
+                }
+                if ui.small_button("+").clicked() {
+                    self.zoom_center(1.5);
+                }
+                ui.label(format!("{:.1} px/s", self.pixels_per_sec));
+                ui.separator();
+
+                // Undo / redo
+                let can_undo = self.history.can_undo();
+                let can_redo = self.history.can_redo();
+                if ui
+                    .add_enabled(can_undo, egui::Button::new("↶"))
+                    .on_hover_text("Undo (Ctrl+Z)")
+                    .clicked()
+                {
+                    self.undo();
+                }
+                if ui
+                    .add_enabled(can_redo, egui::Button::new("↷"))
+                    .on_hover_text("Redo (Ctrl+Shift+Z)")
+                    .clicked()
+                {
+                    self.redo();
+                }
+                if ui
+                    .selectable_label(self.history_open, "History")
+                    .on_hover_text("Show every edit in this session and jump to any point")
+                    .clicked()
+                {
+                    self.history_open = !self.history_open;
+                }
+                if ui
+                    .add_enabled(
+                        !self.selected_clips.is_empty(),
+                        egui::Button::new("Audio…"),
+                    )
+                    .on_hover_text("Clip gain, fades, colour and effects")
+                    .clicked()
+                {
+                    let ids = self.selection_ids();
+                    if !ids.is_empty() {
+                        self.audio_window = Some(ClipAudioWindow::new(ids));
+                    }
+                }
+                if ui
+                    .add_enabled(
+                        self.selected_midi_clip.is_some(),
+                        egui::Button::new("Piano Roll…"),
+                    )
+                    .on_hover_text("Inspect the selected MIDI clip")
+                    .clicked()
+                {
+                    if let Some(clip_id) = self.selected_midi_clip {
+                        self.piano_roll = Some(PianoRollWindow { clip_id });
+                    }
+                }
+                ui.separator();
+                ui.label("Snap:");
+                egui::ComboBox::from_id_salt("snap_mode")
+                    .selected_text(self.snap_mode.label())
+                    .width(70.0)
+                    .show_ui(ui, |ui| {
+                        for mode in [
+                            SnapMode::Off,
+                            SnapMode::Bar,
+                            SnapMode::Beat,
+                            SnapMode::Eighth,
+                            SnapMode::Sixteenth,
+                        ] {
+                            ui.selectable_value(&mut self.snap_mode, mode, mode.label());
+                        }
+                    });
+                ui.checkbox(&mut self.snap_relative, "Relative").on_hover_text(
+                    "Move clips in grid steps relative to their original position, preserving off-grid offsets",
+                );
+                ui.separator();
+
+                // Ruler display: musical bars/beats (default) or clock time.
+                ui.label("Ruler:");
+                egui::ComboBox::from_id_salt("ruler_mode")
+                    .selected_text(self.ruler_mode.label())
+                    .width(100.0)
+                    .show_ui(ui, |ui| {
+                        for mode in [RulerMode::BarsBeats, RulerMode::Time] {
+                            ui.selectable_value(&mut self.ruler_mode, mode, mode.label());
+                        }
+                    });
+                ui.separator();
+                ui.label(format!(
+                    "{} / {}",
+                    format_clock(self.playhead_secs),
+                    format_clock(self.timeline_duration())
+                ));
+            });
+        });
+
         // Left track list
         egui::SidePanel::left("track_list")
             .default_width(420.0)
             .min_width(320.0)
+            // Match the central panel's vertical inner margin so the first row
+            // starts at the same y as the arrange ruler's first lane.
+            .frame(
+                egui::Frame::side_top_panel(&ctx.style())
+                    .inner_margin(egui::Margin::same(8.0)),
+            )
             .show(ctx, |ui| {
             let mut add_audio_track = false;
             let mut add_midi_track = false;
@@ -6004,176 +6180,6 @@ impl eframe::App for AppUI {
                         });
                     }
                 });
-        });
-
-        // MIDI input bar
-        egui::TopBottomPanel::top("midi_bar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("MIDI:");
-                if self.midi_inputs.is_empty() {
-                    ui.weak("No MIDI inputs detected");
-                    if ui.small_button("Refresh").clicked() {
-                        self.refresh_midi_inputs();
-                    }
-                } else {
-                    let mut selected = self.selected_midi_input.clone();
-                    let mut changed = false;
-                    egui::ComboBox::from_id_salt("midi_input")
-                        .selected_text(selected.as_deref().unwrap_or("None"))
-                        .show_ui(ui, |ui| {
-                            if ui.selectable_value(&mut selected, None, "None").changed() {
-                                changed = true;
-                            }
-                            for device in &self.midi_inputs {
-                                if ui
-                                    .selectable_value(
-                                        &mut selected,
-                                        Some(device.name.clone()),
-                                        &device.name,
-                                    )
-                                    .changed()
-                                {
-                                    changed = true;
-                                }
-                            }
-                        });
-                    if changed {
-                        self.selected_midi_input = selected;
-                        self.restart_midi_monitor();
-                    }
-                    if ui.small_button("Refresh").clicked() {
-                        self.refresh_midi_inputs();
-                    }
-                    if let Some(activity) = self.midi_monitor.as_ref().map(|m| m.activity()) {
-                        self.midi_activity = activity;
-                    }
-                    let has_note = self.midi_activity.last_note.is_some();
-                    let active = self.midi_activity.active_notes > 0;
-                    let label = match self.midi_activity.last_note {
-                        Some(note) if active => format!(
-                            "{} vel {}",
-                            daw_engine::midi_note_name(note),
-                            self.midi_activity.last_velocity
-                        ),
-                        Some(note) => daw_engine::midi_note_name(note),
-                        None => "--".to_string(),
-                    };
-                    let color = if active {
-                        egui::Color32::GREEN
-                    } else if has_note {
-                        egui::Color32::from_gray(180)
-                    } else {
-                        egui::Color32::GRAY
-                    };
-                    ui.colored_label(color, label);
-                }
-            });
-        });
-
-        // Arrange toolbar (above the side panel and timeline so rows line up)
-        egui::TopBottomPanel::top("arrange_toolbar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.heading("Arrange");
-                ui.separator();
-                if ui.small_button("Fit").clicked() {
-                    self.needs_fit = true;
-                }
-                if ui.small_button("−").clicked() {
-                    self.zoom_center(1.0 / 1.5);
-                }
-                if ui.small_button("+").clicked() {
-                    self.zoom_center(1.5);
-                }
-                ui.label(format!("{:.1} px/s", self.pixels_per_sec));
-                ui.separator();
-
-                // Undo / redo
-                let can_undo = self.history.can_undo();
-                let can_redo = self.history.can_redo();
-                if ui
-                    .add_enabled(can_undo, egui::Button::new("↶"))
-                    .on_hover_text("Undo (Ctrl+Z)")
-                    .clicked()
-                {
-                    self.undo();
-                }
-                if ui
-                    .add_enabled(can_redo, egui::Button::new("↷"))
-                    .on_hover_text("Redo (Ctrl+Shift+Z)")
-                    .clicked()
-                {
-                    self.redo();
-                }
-                if ui
-                    .selectable_label(self.history_open, "History")
-                    .on_hover_text("Show every edit in this session and jump to any point")
-                    .clicked()
-                {
-                    self.history_open = !self.history_open;
-                }
-                if ui
-                    .add_enabled(
-                        !self.selected_clips.is_empty(),
-                        egui::Button::new("Audio…"),
-                    )
-                    .on_hover_text("Clip gain, fades, colour and effects")
-                    .clicked()
-                {
-                    let ids = self.selection_ids();
-                    if !ids.is_empty() {
-                        self.audio_window = Some(ClipAudioWindow::new(ids));
-                    }
-                }
-                if ui
-                    .add_enabled(
-                        self.selected_midi_clip.is_some(),
-                        egui::Button::new("Piano Roll…"),
-                    )
-                    .on_hover_text("Inspect the selected MIDI clip")
-                    .clicked()
-                {
-                    if let Some(clip_id) = self.selected_midi_clip {
-                        self.piano_roll = Some(PianoRollWindow { clip_id });
-                    }
-                }
-                ui.separator();
-                ui.label("Snap:");
-                egui::ComboBox::from_id_salt("snap_mode")
-                    .selected_text(self.snap_mode.label())
-                    .width(70.0)
-                    .show_ui(ui, |ui| {
-                        for mode in [
-                            SnapMode::Off,
-                            SnapMode::Bar,
-                            SnapMode::Beat,
-                            SnapMode::Eighth,
-                            SnapMode::Sixteenth,
-                        ] {
-                            ui.selectable_value(&mut self.snap_mode, mode, mode.label());
-                        }
-                    });
-                ui.checkbox(&mut self.snap_relative, "Relative").on_hover_text(
-                    "Move clips in grid steps relative to their original position, preserving off-grid offsets",
-                );
-                ui.separator();
-
-                // Ruler display: musical bars/beats (default) or clock time.
-                ui.label("Ruler:");
-                egui::ComboBox::from_id_salt("ruler_mode")
-                    .selected_text(self.ruler_mode.label())
-                    .width(100.0)
-                    .show_ui(ui, |ui| {
-                        for mode in [RulerMode::BarsBeats, RulerMode::Time] {
-                            ui.selectable_value(&mut self.ruler_mode, mode, mode.label());
-                        }
-                    });
-                ui.separator();
-                ui.label(format!(
-                    "{} / {}",
-                    format_clock(self.playhead_secs),
-                    format_clock(self.timeline_duration())
-                ));
-            });
         });
 
         // Central timeline/arrange area
