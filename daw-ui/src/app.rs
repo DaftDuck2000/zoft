@@ -5743,38 +5743,52 @@ impl eframe::App for AppUI {
             let mut remove_track = None;
             let mut open_track_effects = None;
             ui.spacing_mut().item_spacing.y = 0.0;
-            ui.allocate_ui_with_layout(
+            let (header_rect, _) = ui.allocate_exact_size(
                 egui::vec2(ui.available_width(), RULER_HEIGHT),
-                egui::Layout::left_to_right(egui::Align::Center),
-                |ui| {
-                    ui.add_space(4.0);
-                    ui.heading("Tracks");
-                    ui.add_space(4.0);
-                    if ui
-                        .small_button("+Audio")
-                        .on_hover_text("Add audio track")
-                        .clicked()
-                    {
-                        add_audio_track = true;
-                    }
-                    if ui
-                        .small_button("+MIDI")
-                        .on_hover_text("Add MIDI track")
-                        .clicked()
-                    {
-                        add_midi_track = true;
-                    }
-                },
+                egui::Sense::hover(),
             );
+            let mut header_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(header_rect)
+                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            );
+            header_ui.add_space(4.0);
+            header_ui.heading("Tracks");
+            header_ui.add_space(4.0);
+            if header_ui
+                .small_button("+Audio")
+                .on_hover_text("Add audio track")
+                .clicked()
+            {
+                add_audio_track = true;
+            }
+            if header_ui
+                .small_button("+MIDI")
+                .on_hover_text("Add MIDI track")
+                .clicked()
+            {
+                add_midi_track = true;
+            }
             let mut track_changes: Vec<(TrackId, TrackShape, TrackShape, bool)> = Vec::new();
             for track_id in &self.project.track_order {
                 if let Some(track) = self.project.tracks.get(track_id) {
                     let before = TrackShape::of(track);
                     let mut after = before;
-                    let row = ui.allocate_ui_with_layout(
+                    // Reserve the full lane height before laying out the row.
+                    // `allocate_ui_with_layout` only advances by the content's
+                    // height, which would make the left rows shorter than the
+                    // arrange lanes and break vertical alignment.
+                    let (row_rect, row_response) = ui.allocate_exact_size(
                         egui::vec2(ui.available_width(), TRACK_HEIGHT),
-                        egui::Layout::left_to_right(egui::Align::Center),
-                        |ui| {
+                        egui::Sense::hover(),
+                    );
+                    let mut row_ui = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(row_rect)
+                            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                    );
+                    let row = egui::InnerResponse::new(
+                        (|ui: &mut egui::Ui| {
                         let color = egui::Color32::from_rgb(track.color.0, track.color.1, track.color.2);
                         ui.colored_label(color, "■");
                         ui.label(&track.name);
@@ -5888,7 +5902,8 @@ impl eframe::App for AppUI {
                         {
                             remove_track = Some(*track_id);
                         }
-                        },
+                        })(&mut row_ui),
+                        row_response,
                     );
                     row.response.context_menu(|ui| {
                         if ui.button("Track Effects…").clicked() {
