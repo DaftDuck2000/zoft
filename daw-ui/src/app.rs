@@ -411,6 +411,33 @@ fn piano_roll_snap_ticks(snap: SnapMode, beats_per_bar: u64) -> u64 {
     }
 }
 
+/// Fit the piano-roll view to the clip length and the notes' pitch range.
+fn fit_piano_roll_view(window: &mut PianoRollWindow, grid: egui::Rect, length: u64) {
+    let length = length.max(1) as f32;
+    window.pixels_per_tick = (grid.width() / length).clamp(0.0005, 2.0);
+    window.view_start_tick = 0.0;
+
+    let (min, max) = if window.notes.is_empty() {
+        (48u8, 72u8)
+    } else {
+        (
+            window.notes.iter().map(|note| note.pitch).min().unwrap_or(48),
+            window.notes.iter().map(|note| note.pitch).max().unwrap_or(72),
+        )
+    };
+    let low = min.saturating_sub(2);
+    let high = max.saturating_add(2).min(127);
+    let span = high.saturating_sub(low).saturating_add(1).max(1) as f32;
+    let pixels_per_semitone = (grid.height() / span).clamp(4.0, 24.0);
+    window.pixels_per_semitone = pixels_per_semitone;
+
+    let visible = (grid.height() / pixels_per_semitone).max(1.0);
+    let center = (low as f32 + high as f32) * 0.5;
+    window.view_low_pitch =
+        (center - visible * 0.5).clamp(0.0, (128.0 - visible).max(0.0));
+    window.needs_fit = false;
+}
+
 /// Convert a loop range in seconds to output-device frames. Returns `None`
 /// when looping is off or the range is empty.
 fn loop_range_frames(
@@ -1026,6 +1053,9 @@ struct NoteDrag {
     anchor_pitch: u8,
     /// Note indices and their values when the gesture started.
     originals: Vec<(usize, PianoRollNote)>,
+    /// Last pitch auditioned during this drag, so moving across semitones
+    /// retriggers the preview without spamming the synth every frame.
+    preview_pitch: Option<u8>,
     /// Clip snapshot for one undo entry when the gesture ends.
     before: MidiClip,
 }
@@ -1040,6 +1070,16 @@ struct PianoRollWindow {
     drag: Option<NoteDrag>,
     /// Length used for the next newly added note.
     last_length: u64,
+    /// First visible tick at the left edge of the grid.
+    view_start_tick: f64,
+    /// Horizontal zoom.
+    pixels_per_tick: f32,
+    /// Pitch at the bottom edge of the grid.
+    view_low_pitch: f32,
+    /// Vertical zoom.
+    pixels_per_semitone: f32,
+    /// Re-fit the view on the next frame.
+    needs_fit: bool,
 }
 
 impl PianoRollWindow {
@@ -1051,6 +1091,11 @@ impl PianoRollWindow {
             selected: BTreeSet::new(),
             drag: None,
             last_length: 960,
+            view_start_tick: 0.0,
+            pixels_per_tick: 0.1,
+            view_low_pitch: 48.0,
+            pixels_per_semitone: 16.0,
+            needs_fit: true,
         }
     }
 
@@ -1059,6 +1104,7 @@ impl PianoRollWindow {
         self.selected.clear();
         self.drag = None;
         self.initialized = true;
+        self.needs_fit = true;
     }
 }
 
@@ -1296,6 +1342,9 @@ struct AppUI {
     pending_insert_edit: Option<(TrackId, Vec<InsertSlot>)>,
     /// Floating piano-roll view for the selected MIDI clip.
     piano_roll: Option<PianoRollWindow>,
+    /// Pitch currently auditioned from the piano roll, with its start time so
+    /// clicks produce an audible note instead of a one-frame blip.
+    piano_roll_preview: Option<(u8, std::time::Instant)>,
     /// Where a trashed clip was last attached, so Restore can put it back.
     deleted_from: HashMap<ClipId, TrackId>,
     history: History<EditAction>,
@@ -1411,6 +1460,7 @@ impl AppUI {
             track_effects: None,
             pending_insert_edit: None,
             piano_roll: None,
+            piano_roll_preview: None,
             deleted_from: HashMap::new(),
             history: History::new(1000),
             undo_group: None,
@@ -1834,6 +1884,34 @@ impl AppUI {
             window.initialized = false;
             window.selected.clear();
             window.drag = None;
+        }
+        self.stop_piano_roll_preview();
+    }
+
+    /// Audition a note from the piano roll through the live synth. Clicks get a
+    /// short note; moving to a new pitch retriggers it.
+    fn preview_piano_roll_note(&mut self, pitch: u8, velocity: u8) {
+        self.stop_piano_roll_preview();
+        if !self.engine.is_running() {
+            let _ = self.engine.start();
+        }
+        self.engine.note_on(pitch, velocity.max(1));
+        self.piano_roll_preview = Some((pitch, std::time::Instant::now()));
+    }
+
+    fn stop_piano_roll_preview(&mut self) {
+        if let Some((pitch, _)) = self.piano_roll_preview.take() {
+            self.engine.note_off(pitch);
+        }
+    }
+
+    /// Stop a piano-roll preview after a short audible tail.
+    fn poll_piano_roll_preview(&mut self) {
+        if let Some((pitch, started)) = self.piano_roll_preview {
+            if started.elapsed() >= std::time::Duration::from_millis(300) {
+                self.engine.note_off(pitch);
+                self.piano_roll_preview = None;
+            }
         }
     }
 
@@ -4737,6 +4815,7 @@ impl AppUI {
             return;
         };
         let Some(clip) = self.project.midi_clips.get(window.clip_id).cloned() else {
+            self.stop_piano_roll_preview();
             self.piano_roll = None;
             return;
         };
@@ -4757,6 +4836,8 @@ impl AppUI {
         let mut undo_before: Option<MidiClip> = None;
         let mut delete_selected = false;
         let mut select_all = false;
+        let mut preview_note: Option<(u8, u8)> = None;
+        let mut zoom_request: Option<f32> = None;
 
         egui::Window::new("Piano Roll")
             .id(egui::Id::new(("piano_roll", window.clip_id)))
@@ -4770,6 +4851,15 @@ impl AppUI {
                     ui.weak(format!("{} ticks", length));
                     ui.separator();
                     ui.weak(format!("Snap: {}", snap_label));
+                    if ui.small_button("Fit").clicked() {
+                        window.needs_fit = true;
+                    }
+                    if ui.small_button("−").clicked() {
+                        zoom_request = Some(1.0 / 1.5);
+                    }
+                    if ui.small_button("+").clicked() {
+                        zoom_request = Some(1.5);
+                    }
                     if ui
                         .add_enabled(
                             !window.selected.is_empty(),
@@ -4787,7 +4877,7 @@ impl AppUI {
                     }
                 });
                 ui.weak(
-                    "Double-click to add · drag to move/resize · right-click to delete",
+                    "Double-click add · drag move/resize · right-click delete · wheel pan · Ctrl+wheel zoom",
                 );
 
                 let (response, painter) = ui.allocate_painter(
@@ -4809,35 +4899,116 @@ impl AppUI {
                     rect.max,
                 );
 
-                // Show at least two octaves so sparse takes still have context.
-                let (mut low, mut high) = if window.notes.is_empty() {
-                    (48u8, 72u8)
-                } else {
-                    (
-                        window.notes.iter().map(|note| note.pitch).min().unwrap_or(48),
-                        window.notes.iter().map(|note| note.pitch).max().unwrap_or(72),
-                    )
-                };
-                low = low.saturating_sub(2);
-                high = high.saturating_add(2).min(127);
-                while (high - low) < 23 {
-                    if low > 0 {
-                        low -= 1;
-                    }
-                    if high < 127 && (high - low) < 23 {
-                        high += 1;
+                if window.needs_fit {
+                    fit_piano_roll_view(&mut window, grid, length);
+                }
+                if let Some(factor) = zoom_request {
+                    let old = window.pixels_per_tick.max(0.0001);
+                    let new = (old * factor).clamp(0.0005, 4.0);
+                    let center_tick = window.view_start_tick
+                        + (grid.width() * 0.5) as f64 / old as f64;
+                    window.pixels_per_tick = new;
+                    window.view_start_tick =
+                        center_tick - (grid.width() * 0.5) as f64 / new as f64;
+                }
+
+                // Pan and zoom the view like the arrange timeline.
+                let hovered = ui.rect_contains_pointer(grid);
+                let (zoom_delta, scroll, view_pointer, middle_delta, view_modifiers) =
+                    ui.input(|i| {
+                        (
+                            i.zoom_delta(),
+                            i.smooth_scroll_delta,
+                            i.pointer.hover_pos(),
+                            if i.pointer.button_down(egui::PointerButton::Middle) {
+                                i.pointer.delta()
+                            } else {
+                                egui::Vec2::ZERO
+                            },
+                            i.modifiers,
+                        )
+                    });
+                if hovered {
+                    if (zoom_delta - 1.0).abs() > 0.001 {
+                        let px = view_pointer
+                            .map(|pos| pos.x)
+                            .unwrap_or(grid.center().x);
+                        let py = view_pointer
+                            .map(|pos| pos.y)
+                            .unwrap_or(grid.center().y);
+                        if view_modifiers.shift {
+                            let old = window.pixels_per_semitone;
+                            let new = (old * zoom_delta).clamp(4.0, 40.0);
+                            let anchor = window.view_low_pitch
+                                + (grid.bottom() - py) / old.max(0.0001);
+                            window.pixels_per_semitone = new;
+                            window.view_low_pitch =
+                                anchor - (grid.bottom() - py) / new.max(0.0001);
+                        } else {
+                            let old = window.pixels_per_tick;
+                            let new = (old * zoom_delta).clamp(0.0005, 4.0);
+                            let anchor = window.view_start_tick
+                                + (px - grid.left()) as f64 / old.max(0.0001) as f64;
+                            window.pixels_per_tick = new;
+                            window.view_start_tick =
+                                anchor - (px - grid.left()) as f64 / new.max(0.0001) as f64;
+                        }
+                    } else if scroll.x != 0.0 || scroll.y != 0.0 {
+                        // Wheel scrolls time like the arrange view; Shift+wheel
+                        // scrolls pitch.
+                        if view_modifiers.shift {
+                            window.view_low_pitch +=
+                                scroll.y / window.pixels_per_semitone.max(0.0001);
+                        } else {
+                            window.view_start_tick -= (scroll.x + scroll.y) as f64
+                                / window.pixels_per_tick.max(0.0001) as f64;
+                        }
                     }
                 }
-                let rows = (high - low + 1) as f32;
-                let row_height = grid.height() / rows;
+                if hovered && middle_delta != egui::Vec2::ZERO {
+                    window.view_start_tick -= middle_delta.x as f64
+                        / window.pixels_per_tick.max(0.0001) as f64;
+                    window.view_low_pitch +=
+                        middle_delta.y / window.pixels_per_semitone.max(0.0001);
+                }
+
+                // Clamp the view to the clip and the MIDI pitch range.
+                let visible_ticks =
+                    grid.width() / window.pixels_per_tick.max(0.0001);
+                let max_start = (length as f64 - visible_ticks as f64).max(0.0);
+                window.view_start_tick =
+                    window.view_start_tick.clamp(0.0, max_start);
+                let visible_pitches =
+                    (grid.height() / window.pixels_per_semitone.max(1.0)).max(1.0);
+                window.view_low_pitch = window
+                    .view_low_pitch
+                    .clamp(0.0, (128.0 - visible_pitches).max(0.0));
+
+                let low = window.view_low_pitch.floor().clamp(0.0, 127.0) as u8;
+                let high = (window.view_low_pitch + visible_pitches)
+                    .ceil()
+                    .clamp(0.0, 127.0) as u8;
+                let row_height = window.pixels_per_semitone;
+                let y_for_pitch = |pitch: f32| -> f32 {
+                    grid.bottom() - (pitch - window.view_low_pitch) * row_height
+                };
+                let x_for_tick = |tick: f64| -> f32 {
+                    grid.left()
+                        + (tick - window.view_start_tick) as f32
+                            * window.pixels_per_tick
+                };
 
                 painter.rect_filled(grid, 0.0, egui::Color32::from_gray(28));
                 for pitch in low..=high {
-                    let y0 = grid.top() + (high - pitch) as f32 * row_height;
+                    let y1 = y_for_pitch(pitch as f32);
+                    let y0 = y1 - row_height;
                     let row = egui::Rect::from_min_max(
-                        egui::pos2(grid.left(), y0),
-                        egui::pos2(grid.right(), y0 + row_height),
+                        egui::pos2(grid.left(), y0.max(grid.top())),
+                        egui::pos2(grid.right(), y1.min(grid.bottom())),
                     );
+                    if row.height() <= 0.0 {
+                        continue;
+                    }
                     let black = is_black_key(pitch);
                     painter.rect_filled(
                         row,
@@ -4850,8 +5021,8 @@ impl AppUI {
                     );
 
                     let key = egui::Rect::from_min_max(
-                        egui::pos2(keyboard.left(), y0),
-                        egui::pos2(keyboard.right(), y0 + row_height),
+                        egui::pos2(keyboard.left(), y0.max(grid.top())),
+                        egui::pos2(keyboard.right(), y1.min(grid.bottom())),
                     );
                     painter.rect_filled(
                         key,
@@ -4864,7 +5035,7 @@ impl AppUI {
                     );
                     if pitch % 12 == 0 {
                         painter.text(
-                            egui::pos2(keyboard.left() + 2.0, y0 + row_height * 0.5),
+                            egui::pos2(keyboard.left() + 2.0, key.center().y),
                             egui::Align2::LEFT_CENTER,
                             note_name(pitch),
                             egui::FontId::monospace(8.0),
@@ -4878,12 +5049,14 @@ impl AppUI {
                 }
 
                 // Snap subdivisions first, then beats and bars on top.
-                if snap_ticks > 1 && length / snap_ticks <= 500 {
-                    let mut tick = 0u64;
-                    while tick <= length {
+                let visible_start = window.view_start_tick.max(0.0);
+                let visible_end = (window.view_start_tick + visible_ticks as f64)
+                    .min(length as f64);
+                if snap_ticks > 1 && visible_ticks / snap_ticks as f32 <= 500.0 {
+                    let mut tick = ((visible_start as u64) / snap_ticks) * snap_ticks;
+                    while (tick as f64) <= visible_end {
                         if tick % beat_ticks != 0 {
-                            let x = grid.left()
-                                + (tick as f32 / length as f32) * grid.width();
+                            let x = x_for_tick(tick as f64);
                             painter.line_segment(
                                 [egui::pos2(x, grid.top()), egui::pos2(x, grid.bottom())],
                                 egui::Stroke::new(0.5_f32, egui::Color32::from_gray(42)),
@@ -4892,9 +5065,9 @@ impl AppUI {
                         tick += snap_ticks;
                     }
                 }
-                let mut tick = 0u64;
-                while tick <= length {
-                    let x = grid.left() + (tick as f32 / length as f32) * grid.width();
+                let mut tick = ((visible_start as u64) / beat_ticks) * beat_ticks;
+                while (tick as f64) <= visible_end {
+                    let x = x_for_tick(tick as f64);
                     let is_bar = tick % bar_ticks == 0;
                     painter.line_segment(
                         [egui::pos2(x, grid.top()), egui::pos2(x, grid.bottom())],
@@ -4911,13 +5084,16 @@ impl AppUI {
                 }
 
                 let pitch_at = |y: f32| -> u8 {
-                    let row = ((y - grid.top()) / row_height).floor();
-                    let row = row.clamp(0.0, (rows - 1.0).max(0.0)) as i32;
-                    (high as i32 - row).clamp(0, 127) as u8
+                    let y = y.clamp(grid.top(), grid.bottom() - 0.001);
+                    let pitch = window.view_low_pitch
+                        + (grid.bottom() - y) / row_height.max(0.0001);
+                    pitch.floor().clamp(0.0, 127.0) as u8
                 };
                 let tick_at = |x: f32| -> u64 {
-                    let fraction = ((x - grid.left()) / grid.width()).clamp(0.0, 1.0);
-                    (fraction as f64 * length as f64).round() as u64
+                    let tick = window.view_start_tick
+                        + ((x.clamp(grid.left(), grid.right()) - grid.left()) as f64
+                            / window.pixels_per_tick.max(0.0001) as f64);
+                    tick.round().clamp(0.0, length as f64) as u64
                 };
                 let snap_tick = |tick: u64| -> u64 {
                     if snap_ticks <= 1 {
@@ -4933,14 +5109,23 @@ impl AppUI {
                     if note.pitch < low || note.pitch > high {
                         continue;
                     }
-                    let x0 = grid.left()
-                        + (note.start as f32 / length as f32) * grid.width();
-                    let x1 =
-                        grid.left() + (note.end as f32 / length as f32) * grid.width();
-                    let y0 = grid.top() + (high - note.pitch) as f32 * row_height;
+                    let x0 = x_for_tick(note.start as f64);
+                    let x1 = x_for_tick(note.end as f64);
+                    if x1 < grid.left() || x0 > grid.right() {
+                        continue;
+                    }
+                    let y1 = y_for_pitch(note.pitch as f32);
+                    let y0 = y1 - row_height;
+                    if y1 < grid.top() || y0 > grid.bottom() {
+                        continue;
+                    }
+                    let left = x0.max(grid.left());
+                    let right = x1.max(x0 + 2.0).min(grid.right());
+                    let top = (y0 + 1.0).max(grid.top());
+                    let bottom = (y1 - 1.0).min(grid.bottom()).max(top + 1.0);
                     let note_rect = egui::Rect::from_min_max(
-                        egui::pos2(x0, y0 + 1.0),
-                        egui::pos2(x1.max(x0 + 2.0), y0 + row_height - 1.0),
+                        egui::pos2(left, top),
+                        egui::pos2(right.max(left + 1.0), bottom),
                     );
                     let selected = window.selected.contains(&index);
                     let level = 120 + (note.velocity as u16 * 90 / 127) as u8;
@@ -5031,6 +5216,10 @@ impl AppUI {
                             let index = window.notes.len() - 1;
                             window.selected.clear();
                             window.selected.insert(index);
+                            preview_note = Some((
+                                window.notes[index].pitch,
+                                window.notes[index].velocity,
+                            ));
                             commit = true;
                             handled_double = true;
                         }
@@ -5109,6 +5298,9 @@ impl AppUI {
                                         window.selected.insert(index);
                                     }
                                     if window.selected.contains(&index) {
+                                        if let Some(note) = window.notes.get(index) {
+                                            preview_note = Some((note.pitch, note.velocity));
+                                        }
                                         let originals = window
                                             .selected
                                             .iter()
@@ -5125,6 +5317,10 @@ impl AppUI {
                                             anchor_tick: tick_at(press_pos.x),
                                             anchor_pitch: pitch_at(press_pos.y),
                                             originals,
+                                            preview_pitch: window
+                                                .notes
+                                                .get(index)
+                                                .map(|note| note.pitch),
                                             before: clip.clone(),
                                         });
                                     }
@@ -5140,7 +5336,7 @@ impl AppUI {
                 }
 
                 if response.dragged() {
-                    if let Some(drag) = window.drag.as_ref() {
+                    if let Some(drag) = window.drag.as_mut() {
                         if let Some(pos) = response.interact_pointer_pos() {
                             let current_tick = tick_at(pos.x);
                             let current_pitch = pitch_at(pos.y);
@@ -5183,6 +5379,15 @@ impl AppUI {
                                                 + delta_pitch)
                                                 .clamp(0, 127)
                                                 as u8;
+                                        }
+                                    }
+                                    if let Some((index, _)) = drag.originals.first() {
+                                        if let Some(note) = window.notes.get(*index) {
+                                            if drag.preview_pitch != Some(note.pitch) {
+                                                preview_note =
+                                                    Some((note.pitch, note.velocity));
+                                                drag.preview_pitch = Some(note.pitch);
+                                            }
                                         }
                                     }
                                     commit = true;
@@ -5242,6 +5447,9 @@ impl AppUI {
                                         window.selected.clear();
                                         window.selected.insert(index);
                                     }
+                                    if let Some(note) = window.notes.get(index) {
+                                        preview_note = Some((note.pitch, note.velocity));
+                                    }
                                 }
                                 None => {
                                     if !modifiers.command && !modifiers.shift {
@@ -5262,6 +5470,7 @@ impl AppUI {
             if let Some(before) = before {
                 self.push_midi_clip_undo(window.clip_id, before);
             }
+            self.stop_piano_roll_preview();
             self.piano_roll = None;
             return;
         }
@@ -5271,6 +5480,9 @@ impl AppUI {
         }
         if let Some(before) = undo_before {
             self.push_midi_clip_undo(window.clip_id, before);
+        }
+        if let Some((pitch, velocity)) = preview_note {
+            self.preview_piano_roll_note(pitch, velocity);
         }
         self.piano_roll = Some(window);
     }
@@ -5897,16 +6109,20 @@ impl eframe::App for AppUI {
 
         // MIDI audition and capture. Events are drained every frame so the
         // live sine synth can respond even when the transport is stopped.
+        self.poll_piano_roll_preview();
         let audition = self.midi_audition_enabled();
+        let piano_roll_open =
+            self.piano_roll.is_some() || self.piano_roll_preview.is_some();
         if audition != self.midi_audition_on {
             self.midi_audition_on = audition;
             if !audition {
                 self.engine.all_notes_off();
             }
         }
-        if audition && !self.engine.is_running() {
+        if (audition || piano_roll_open) && !self.engine.is_running() {
             let _ = self.engine.start();
         } else if !audition
+            && !piano_roll_open
             && !self.playing
             && !self.recording
             && !self.monitoring_on
@@ -8175,6 +8391,8 @@ impl AppUI {
         self.audio_window = None;
         self.track_effects = None;
         self.pending_insert_edit = None;
+        self.piano_roll = None;
+        self.piano_roll_preview = None;
         self.clipboard = Vec::new();
         self.drag = None;
         self.recovery_offer = None;
@@ -9521,9 +9739,9 @@ mod tests {
         note_name, piano_roll_snap_ticks, processed_file_stem, punch_waiting,
         render_pitch_stretch, reverse_interleaved, saturate, take_lane_layout,
         tape_stretch_interleaved, tremolo, wav_file_info, wav_peak, write_piano_roll_notes,
-        write_wav_f32, write_wav_range, write_wav_range_with_envelope, project_from_template,
-        ClipShape, ClipSourceState, EditAction, FilterKind, MonitorMode, PianoRollNote, SnapMode,
-        Template, TrackShape,
+        write_wav_f32, write_wav_range, write_wav_range_with_envelope, fit_piano_roll_view,
+        project_from_template, ClipShape, ClipSourceState, EditAction, FilterKind, MonitorMode,
+        PianoRollNote, PianoRollWindow, SnapMode, Template, TrackShape,
     };
     use daw_core::audio_pool::AudioFileRef;
     use daw_core::clip::{
@@ -10453,6 +10671,30 @@ mod tests {
         assert_eq!(piano_roll_snap_ticks(SnapMode::Beat, 4), 960);
         assert_eq!(piano_roll_snap_ticks(SnapMode::Eighth, 4), 480);
         assert_eq!(piano_roll_snap_ticks(SnapMode::Sixteenth, 4), 240);
+    }
+
+    #[test]
+    fn piano_roll_fit_contains_the_clip_and_notes() {
+        let mut window = PianoRollWindow::new(ClipId::default());
+        window.notes = vec![PianoRollNote {
+            start: 0,
+            end: 480,
+            pitch: 72,
+            velocity: 100,
+            channel: 0,
+        }];
+        let grid = egui::Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(800.0, 400.0),
+        );
+        fit_piano_roll_view(&mut window, grid, 7680);
+
+        assert!(window.pixels_per_tick > 0.0);
+        assert!(window.view_start_tick >= 0.0);
+        assert!(window.view_low_pitch <= 72.0);
+        assert!(
+            window.view_low_pitch + 400.0 / window.pixels_per_semitone >= 72.0
+        );
     }
 
     #[test]
