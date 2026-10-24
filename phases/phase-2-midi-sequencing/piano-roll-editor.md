@@ -14,7 +14,7 @@ Full-featured piano roll: note entry/selection/editing, velocity lanes, CC lanes
 
 - [x] Note grid: Pitch (vertical) × Time (horizontal) with its own snap picker (Off, Bar, Beat, 1/8, 1/16, 1/32, 1/8T, 1/16T)
 - [x] Note entry: Double-click to add (new notes take the current snap length), drag the right edge to resize, right-click to delete
-- [x] Selection: Click, Ctrl/Shift+click, Select All
+- [x] Selection: Click, Ctrl/Shift+click, drag a marquee over empty space, Select All
 - [~] Note editing: Drag move and resize implemented; velocity drag pending
 - [x] Note audition: Clicking a note or dragging it to a new pitch plays it
 - [ ] Velocity lane: Bar graph per note, drag to edit, curve tool
@@ -150,7 +150,7 @@ enum CCEditMode {
 
 - [x] Notes render correctly at all zoom levels
 - [x] Double-click adds notes at the snap grid
-- [~] Selection rectangle selects multiple notes (click/Ctrl/Shift selection works)
+- [x] Selection rectangle selects multiple notes
 - [x] Drag moves notes (time and pitch) and resizes note lengths
 - [x] Notes audition when clicked or dragged to a new pitch
 - [x] Wheel/middle-drag pans the piano-roll view; Ctrl+wheel zooms
@@ -169,6 +169,7 @@ enum CCEditMode {
 - 2026-10-24: Piano-roll audition and navigation. Clicking a note plays it through the live synth, and dragging it to a new pitch retriggers the preview. The view now pans with the wheel (time), Shift+wheel (pitch) or middle-drag, zooms with Ctrl+wheel and the +/− buttons, and re-fits with Fit. The piano roll has its own snap picker (Off, Bar, Beat, 1/8, 1/16, 1/32, 1/8T, 1/16T), so note entry, dragging and resizing no longer depend on the arrange setting. Newly double-clicked notes are as long as the current snap value (Off falls back to the last used length)
 - 2026-10-24: Trimmed MIDI clip regions are shaded in the piano roll. Notes outside the clip's visible window stay editable and reappear when the clip edge is dragged back out in the arrange view
 - 2026-10-24: MIDI Tools now live in a left-side panel inside the piano-roll window. Quantize, transpose and velocity controls apply to the open clip as one undo step
+- 2026-10-24: Piano-roll velocity colours now span a wide blue → cyan → yellow gradient. Dragging on empty grid space draws a selection marquee that selects every intersecting note; Ctrl/Shift makes the marquee additive
 - YYYY-MM-DD: Pencil/Eraser/Select tools
 - YYYY-MM-DD: Note drag + resize
 - YYYY-MM-DD: Velocity lane

@@ -276,6 +276,36 @@ fn is_black_key(pitch: u8) -> bool {
     matches!(pitch % 12, 1 | 3 | 6 | 8 | 10)
 }
 
+/// Map MIDI velocity to a high-contrast blue → cyan → yellow gradient.
+fn velocity_color(velocity: u8) -> egui::Color32 {
+    fn lerp(a: u8, b: u8, t: f32) -> u8 {
+        (a as f32 + (b as f32 - a as f32) * t)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    }
+    let t = velocity.min(127) as f32 / 127.0;
+    let (r, g, b) = if t < 0.5 {
+        let u = t * 2.0;
+        (lerp(40, 45, u), lerp(70, 210, u), lerp(200, 215, u))
+    } else {
+        let u = (t - 0.5) * 2.0;
+        (lerp(45, 255, u), lerp(210, 220, u), lerp(215, 70, u))
+    };
+    egui::Color32::from_rgb(r, g, b)
+}
+
+/// Indices of note rectangles intersecting a marquee.
+fn notes_in_marquee(
+    note_rects: &[(usize, egui::Rect)],
+    marquee: egui::Rect,
+) -> BTreeSet<usize> {
+    note_rects
+        .iter()
+        .filter(|(_, rect)| rect.intersects(marquee))
+        .map(|(index, _)| *index)
+        .collect()
+}
+
 /// Scientific pitch name for a MIDI note number (`C4` = 60).
 fn note_name(pitch: u8) -> String {
     const NAMES: [&str; 12] = [
@@ -1310,6 +1340,9 @@ struct PianoRollWindow {
     snap: PianoRollSnap,
     /// Quantize/transpose/velocity controls shown in the left panel.
     tools: MidiToolsState,
+    /// Rubber-band note selection.
+    marquee: Option<(egui::Pos2, egui::Pos2)>,
+    marquee_additive: bool,
 }
 
 impl PianoRollWindow {
@@ -1328,6 +1361,8 @@ impl PianoRollWindow {
             needs_fit: true,
             snap: PianoRollSnap::from_arrange(snap),
             tools: MidiToolsState::default(),
+            marquee: None,
+            marquee_additive: false,
         }
     }
 
@@ -1335,6 +1370,8 @@ impl PianoRollWindow {
         self.notes = midi_clip_content_notes(clip);
         self.selected.clear();
         self.drag = None;
+        self.marquee = None;
+        self.marquee_additive = false;
         self.initialized = true;
         self.needs_fit = true;
     }
@@ -6489,16 +6526,17 @@ impl AppUI {
                         egui::pos2(right.max(left + 1.0), bottom),
                     );
                     let selected = window.selected.contains(&index);
-                    let level = 120 + (note.velocity as u16 * 90 / 127) as u8;
-                    painter.rect_filled(
-                        note_rect,
-                        2.0,
-                        if selected {
-                            egui::Color32::from_rgb(120, 220, 255)
-                        } else {
-                            egui::Color32::from_rgb(70, level, 220)
-                        },
-                    );
+                    let color = velocity_color(note.velocity);
+                    let fill = if selected {
+                        egui::Color32::from_rgb(
+                            color.r().saturating_add(35),
+                            color.g().saturating_add(35),
+                            color.b().saturating_add(35),
+                        )
+                    } else {
+                        color
+                    };
+                    painter.rect_filled(note_rect, 2.0, fill);
                     painter.rect_stroke(
                         note_rect,
                         2.0,
@@ -6692,7 +6730,11 @@ impl AppUI {
                                     }
                                 }
                                 None => {
-                                    if !modifiers.command && !modifiers.shift {
+                                    let additive =
+                                        modifiers.command || modifiers.shift;
+                                    window.marquee = Some((press_pos, press_pos));
+                                    window.marquee_additive = additive;
+                                    if !additive {
                                         window.selected.clear();
                                     }
                                 }
@@ -6702,7 +6744,11 @@ impl AppUI {
                 }
 
                 if response.dragged() {
-                    if let Some(drag) = window.drag.as_mut() {
+                    if let Some((start, _)) = window.marquee {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            window.marquee = Some((start, pos));
+                        }
+                    } else if let Some(drag) = window.drag.as_mut() {
                         if let Some(pos) = response.interact_pointer_pos() {
                             let current_tick = tick_at(pos.x);
                             let current_pitch = pitch_at(pos.y);
@@ -6787,7 +6833,19 @@ impl AppUI {
                 }
 
                 if response.drag_stopped() {
-                    if let Some(drag) = window.drag.take() {
+                    if let Some((start, end)) = window.marquee.take() {
+                        let marquee =
+                            egui::Rect::from_two_pos(start, end).intersect(grid);
+                        let hits = notes_in_marquee(&note_rects, marquee);
+                        if window.marquee_additive {
+                            for index in hits {
+                                window.selected.insert(index);
+                            }
+                        } else {
+                            window.selected = hits;
+                        }
+                        window.marquee_additive = false;
+                    } else if let Some(drag) = window.drag.take() {
                         let changed = drag.originals.iter().any(|(index, original)| {
                             window.notes.get(*index) != Some(original)
                         });
@@ -6825,6 +6883,23 @@ impl AppUI {
                             }
                         }
                     }
+                }
+                if let Some((start, end)) = window.marquee {
+                    let marquee =
+                        egui::Rect::from_two_pos(start, end).intersect(grid);
+                    painter.rect_filled(
+                        marquee,
+                        0.0,
+                        egui::Color32::from_rgba_unmultiplied(80, 140, 220, 40),
+                    );
+                    painter.rect_stroke(
+                        marquee,
+                        0.0,
+                        egui::Stroke::new(
+                            1.0_f32,
+                            egui::Color32::from_rgb(120, 170, 240),
+                        ),
+                    );
                 }
                     });
                 });
@@ -11182,9 +11257,9 @@ mod tests {
         write_piano_roll_notes, write_wav_f32, write_wav_range, write_wav_range_with_envelope,
         fit_piano_roll_view, piano_roll_new_note_length, midi_trim_end, midi_trim_start,
         split_midi_clip_at_tick, quantize_midi_notes, scale_midi_velocities,
-        transpose_midi_notes, project_from_template, ClipShape, ClipSourceState, EditAction,
-        FilterKind, MonitorMode, PianoRollNote, PianoRollSnap, PianoRollWindow, SnapMode,
-        Template, TrackShape,
+        transpose_midi_notes, velocity_color, notes_in_marquee, project_from_template,
+        ClipShape, ClipSourceState, EditAction, FilterKind, MonitorMode, PianoRollNote,
+        PianoRollSnap, PianoRollWindow, SnapMode, Template, TrackShape,
     };
     use daw_core::audio_pool::AudioFileRef;
     use daw_core::clip::{
@@ -11786,6 +11861,38 @@ mod tests {
             egui::Rect::from_min_max(egui::pos2(5.0, 0.0), egui::pos2(25.0, 10.0)),
         );
         assert_eq!(hits, vec![a, b]);
+    }
+
+    #[test]
+    fn note_marquee_selects_intersecting_notes() {
+        let rects = [
+            (
+                0,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(10.0, 10.0)),
+            ),
+            (
+                1,
+                egui::Rect::from_min_max(egui::pos2(20.0, 0.0), egui::pos2(30.0, 10.0)),
+            ),
+            (
+                2,
+                egui::Rect::from_min_max(egui::pos2(0.0, 20.0), egui::pos2(10.0, 30.0)),
+            ),
+        ];
+        let hits = notes_in_marquee(
+            &rects,
+            egui::Rect::from_min_max(egui::pos2(5.0, 5.0), egui::pos2(25.0, 15.0)),
+        );
+        assert_eq!(hits, std::collections::BTreeSet::from([0, 1]));
+    }
+
+    #[test]
+    fn velocity_colours_span_blue_to_yellow() {
+        let low = velocity_color(10);
+        let high = velocity_color(127);
+        assert!(low.b() > low.r());
+        assert!(high.r() > high.b());
+        assert_ne!(low, high);
     }
 
     #[test]
