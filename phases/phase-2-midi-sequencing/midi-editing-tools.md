@@ -131,7 +131,7 @@ fn velocity_curve(events: &mut [MidiEvent], params: &ToolParams) {
 
 ## Progress Log
 
-- 2026-10-24: MIDI Tools window with quantize (Bar/Beat/1/8/1/16/1/32/1/8T/1/16T, 0-100% strength), transpose (±24 semitones and octave buttons) and velocity scaling (0-200%). Applies to every selected MIDI clip as one undo step; trimmed notes are included
+- 2026-10-24: MIDI Tools panel inside the piano roll. The left side of the piano-roll window now provides quantize (Bar/Beat/1/8/1/16/1/32/1/8T/1/16T, 0-100% strength), transpose (±24 semitones and octave buttons) and velocity scaling (0-200%). Tools apply to the clip open in the piano roll as one undo step; trimmed notes are included
 - YYYY-MM-DD: Humanize
 - YYYY-MM-DD: Scale conform
 - YYYY-MM-DD: Legato

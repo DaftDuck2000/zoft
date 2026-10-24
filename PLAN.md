@@ -59,7 +59,7 @@
 |----|---------|--------|------|--------|-------|
 | 2.1 | MIDI Track Record/Playback | `[~]` | 2w | | Input enumeration + live monitor, MIDI clip recording/playback (sine voice), live audition, arrange note previews, non-destructive cropping, moving, split/duplicate, audio-style multi-selection, mixed audio/MIDI group moves |
 | 2.2 | Piano Roll Editor | `[~]` | 4w | | Editable notes (add/move/resize/delete, multi-select, undo, audition), snap-length note entry, own snap picker, pan/zoom, arrange preview; velocity/CC lanes left |
-| 2.3 | MIDI Editing Tools | `[~]` | 2w | | Quantize (grid/strength/tuplets), transpose, velocity scale in MIDI Tools; humanize/scale/legato/note-length pending |
+| 2.3 | MIDI Editing Tools | `[~]` | 2w | | Quantize (grid/strength/tuplets), transpose, velocity scale in the piano-roll side panel; humanize/scale/legato/note-length pending |
 | 2.4 | MIDI Effect Plugins | `[ ]` | 2w | | Arpeggiator, chord, velocity |
 | 2.5 | Notation View (Stretch) | `[ ]` | 3w | | Basic score display |
 

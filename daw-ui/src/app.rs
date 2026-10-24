@@ -1308,6 +1308,8 @@ struct PianoRollWindow {
     needs_fit: bool,
     /// Snap resolution chosen in the piano-roll header.
     snap: PianoRollSnap,
+    /// Quantize/transpose/velocity controls shown in the left panel.
+    tools: MidiToolsState,
 }
 
 impl PianoRollWindow {
@@ -1325,6 +1327,7 @@ impl PianoRollWindow {
             pixels_per_semitone: 16.0,
             needs_fit: true,
             snap: PianoRollSnap::from_arrange(snap),
+            tools: MidiToolsState::default(),
         }
     }
 
@@ -1339,14 +1342,14 @@ impl PianoRollWindow {
 
 /// State of the floating MIDI tools window (quantize, transpose, velocity).
 #[derive(Debug, Clone, Copy)]
-struct MidiToolsWindow {
+struct MidiToolsState {
     quantize_snap: PianoRollSnap,
     quantize_strength: f32,
     transpose: i32,
     velocity_factor: f32,
 }
 
-impl Default for MidiToolsWindow {
+impl Default for MidiToolsState {
     fn default() -> Self {
         Self {
             quantize_snap: PianoRollSnap::Beat,
@@ -1625,8 +1628,6 @@ struct AppUI {
     pending_insert_edit: Option<(TrackId, Vec<InsertSlot>)>,
     /// Floating piano-roll view for the selected MIDI clip.
     piano_roll: Option<PianoRollWindow>,
-    /// Floating MIDI tools window for the selected MIDI clips.
-    midi_tools: Option<MidiToolsWindow>,
     /// Pitch currently auditioned from the piano roll, with its start time so
     /// clicks produce an audible note instead of a one-frame blip.
     piano_roll_preview: Option<(u8, std::time::Instant)>,
@@ -1748,7 +1749,6 @@ impl AppUI {
             track_effects: None,
             pending_insert_edit: None,
             piano_roll: None,
-            midi_tools: None,
             piano_roll_preview: None,
             deleted_from: HashMap::new(),
             history: History::new(1000),
@@ -2179,12 +2179,13 @@ impl AppUI {
     }
 
     /// Apply a MIDI note transform to every selected MIDI clip as one undo step.
-    fn apply_midi_note_edit(
+    /// Apply a MIDI note transform to a specific set of clips.
+    fn apply_midi_note_edit_to_clips(
         &mut self,
+        ids: Vec<ClipId>,
         label: &str,
         edit: impl Fn(&mut [PianoRollNote]),
     ) {
-        let ids = self.midi_selection_ids();
         if ids.is_empty() {
             return;
         }
@@ -5995,156 +5996,6 @@ impl AppUI {
         }
     }
 
-    /// Floating MIDI tools: quantize, transpose and velocity scaling for the
-    /// selected MIDI clips.
-    fn show_midi_tools(&mut self, ctx: &egui::Context) {
-        let Some(mut window) = self.midi_tools else {
-            return;
-        };
-        let selected = self.selected_midi_clips.len();
-        let beats_per_bar = self.time_signature().0.max(1) as u64;
-        let mut open = true;
-        let mut do_quantize = false;
-        let mut do_transpose = false;
-        let mut do_velocity = false;
-
-        egui::Window::new("MIDI Tools")
-            .id(egui::Id::new("midi_tools"))
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .default_width(380.0)
-            .show(ctx, |ui| {
-                if selected == 0 {
-                    ui.weak("Select one or more MIDI clips in the arrange view.");
-                } else {
-                    ui.label(format!("{} selected MIDI clip(s)", selected));
-                }
-                ui.separator();
-
-                ui.heading("Quantize");
-                ui.horizontal(|ui| {
-                    ui.label("Grid:");
-                    egui::ComboBox::from_id_salt("midi_tools_quantize_grid")
-                        .selected_text(window.quantize_snap.label())
-                        .width(76.0)
-                        .show_ui(ui, |ui| {
-                            for snap in PianoRollSnap::ALL {
-                                if snap != PianoRollSnap::Off {
-                                    ui.selectable_value(
-                                        &mut window.quantize_snap,
-                                        snap,
-                                        snap.label(),
-                                    );
-                                }
-                            }
-                        });
-                });
-                let mut strength = window.quantize_strength * 100.0;
-                if ui
-                    .add(
-                        egui::Slider::new(&mut strength, 0.0..=100.0)
-                            .text("Strength")
-                            .suffix("%"),
-                    )
-                    .changed()
-                {
-                    window.quantize_strength = strength / 100.0;
-                }
-                if ui
-                    .add_enabled(
-                        selected > 0
-                            && window.quantize_snap != PianoRollSnap::Off
-                            && window.quantize_strength > 0.0,
-                        egui::Button::new("Quantize"),
-                    )
-                    .clicked()
-                {
-                    do_quantize = true;
-                }
-
-                ui.separator();
-                ui.heading("Transpose");
-                ui.add(
-                    egui::Slider::new(&mut window.transpose, -24..=24)
-                        .text("Semitones")
-                        .step_by(1.0),
-                );
-                ui.horizontal(|ui| {
-                    if ui.small_button("-12").clicked() {
-                        window.transpose -= 12;
-                    }
-                    if ui.small_button("+12").clicked() {
-                        window.transpose += 12;
-                    }
-                    window.transpose = window.transpose.clamp(-24, 24);
-                });
-                if ui
-                    .add_enabled(
-                        selected > 0 && window.transpose != 0,
-                        egui::Button::new("Transpose"),
-                    )
-                    .clicked()
-                {
-                    do_transpose = true;
-                }
-
-                ui.separator();
-                ui.heading("Velocity");
-                let mut velocity_percent = window.velocity_factor * 100.0;
-                if ui
-                    .add(
-                        egui::Slider::new(&mut velocity_percent, 0.0..=200.0)
-                            .text("Scale")
-                            .suffix("%"),
-                    )
-                    .changed()
-                {
-                    window.velocity_factor = velocity_percent / 100.0;
-                }
-                if ui
-                    .add_enabled(
-                        selected > 0
-                            && (window.velocity_factor - 1.0).abs() > 1e-3,
-                        egui::Button::new("Apply Velocity"),
-                    )
-                    .clicked()
-                {
-                    do_velocity = true;
-                }
-
-                ui.add_space(4.0);
-                ui.weak(
-                    "Tools apply to every note in the selected MIDI clips, including trimmed regions.",
-                );
-            });
-
-        if !open {
-            self.midi_tools = None;
-            return;
-        }
-        if do_quantize {
-            let grid = window.quantize_snap.ticks(beats_per_bar);
-            let strength = window.quantize_strength;
-            self.apply_midi_note_edit("Quantize MIDI", |notes| {
-                quantize_midi_notes(notes, grid, strength);
-            });
-        }
-        if do_transpose {
-            let semitones = window.transpose;
-            self.apply_midi_note_edit("Transpose MIDI", |notes| {
-                transpose_midi_notes(notes, semitones);
-            });
-        }
-        if do_velocity {
-            let factor = window.velocity_factor;
-            self.apply_midi_note_edit("Scale MIDI velocity", |notes| {
-                scale_midi_velocities(notes, factor);
-            });
-        }
-        self.midi_tools = Some(window);
-    }
-
     /// Editable piano-roll view: pitch stripes, beat/bar grid, note selection,
     /// drag move/resize, double-click entry and right-click delete.
     fn show_piano_roll(&mut self, ctx: &egui::Context) {
@@ -6185,12 +6036,15 @@ impl AppUI {
         let mut select_all = false;
         let mut preview_note: Option<(u8, u8)> = None;
         let mut zoom_request: Option<f32> = None;
+        let mut do_quantize = false;
+        let mut do_transpose = false;
+        let mut do_velocity = false;
 
         egui::Window::new("Piano Roll")
             .id(egui::Id::new(("piano_roll", window.clip_id)))
             .open(&mut open)
-            .default_size([920.0, 520.0])
-            .min_size([420.0, 260.0])
+            .default_size([1180.0, 560.0])
+            .min_size([720.0, 300.0])
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(format!("{} notes", window.notes.len()));
@@ -6238,6 +6092,107 @@ impl AppUI {
                     "Double-click add · drag move/resize · right-click delete · wheel pan · Ctrl+wheel zoom",
                 );
                 let snap_ticks = window.snap.ticks(beats_per_bar);
+
+                ui.horizontal_top(|ui| {
+                    ui.vertical(|ui| {
+                        ui.set_width(210.0);
+                        ui.heading("MIDI Tools");
+                        ui.weak("Applies to this clip.");
+                        ui.separator();
+
+                        ui.heading("Quantize");
+                        ui.horizontal(|ui| {
+                            ui.label("Grid:");
+                            egui::ComboBox::from_id_salt("piano_roll_quantize_grid")
+                                .selected_text(window.tools.quantize_snap.label())
+                                .width(76.0)
+                                .show_ui(ui, |ui| {
+                                    for snap in PianoRollSnap::ALL {
+                                        if snap != PianoRollSnap::Off {
+                                            ui.selectable_value(
+                                                &mut window.tools.quantize_snap,
+                                                snap,
+                                                snap.label(),
+                                            );
+                                        }
+                                    }
+                                });
+                        });
+                        let mut strength = window.tools.quantize_strength * 100.0;
+                        if ui
+                            .add(
+                                egui::Slider::new(&mut strength, 0.0..=100.0)
+                                    .text("Strength")
+                                    .suffix("%"),
+                            )
+                            .changed()
+                        {
+                            window.tools.quantize_strength = strength / 100.0;
+                        }
+                        if ui
+                            .add_enabled(
+                                window.tools.quantize_snap != PianoRollSnap::Off
+                                    && window.tools.quantize_strength > 0.0,
+                                egui::Button::new("Quantize"),
+                            )
+                            .clicked()
+                        {
+                            do_quantize = true;
+                        }
+
+                        ui.separator();
+                        ui.heading("Transpose");
+                        ui.add(
+                            egui::Slider::new(&mut window.tools.transpose, -24..=24)
+                                .text("Semitones")
+                                .step_by(1.0),
+                        );
+                        ui.horizontal(|ui| {
+                            if ui.small_button("-12").clicked() {
+                                window.tools.transpose -= 12;
+                            }
+                            if ui.small_button("+12").clicked() {
+                                window.tools.transpose += 12;
+                            }
+                            window.tools.transpose =
+                                window.tools.transpose.clamp(-24, 24);
+                        });
+                        if ui
+                            .add_enabled(
+                                window.tools.transpose != 0,
+                                egui::Button::new("Transpose"),
+                            )
+                            .clicked()
+                        {
+                            do_transpose = true;
+                        }
+
+                        ui.separator();
+                        ui.heading("Velocity");
+                        let mut velocity_percent =
+                            window.tools.velocity_factor * 100.0;
+                        if ui
+                            .add(
+                                egui::Slider::new(&mut velocity_percent, 0.0..=200.0)
+                                    .text("Scale")
+                                    .suffix("%"),
+                            )
+                            .changed()
+                        {
+                            window.tools.velocity_factor = velocity_percent / 100.0;
+                        }
+                        if ui
+                            .add_enabled(
+                                (window.tools.velocity_factor - 1.0).abs() > 1e-3,
+                                egui::Button::new("Apply Velocity"),
+                            )
+                            .clicked()
+                        {
+                            do_velocity = true;
+                        }
+                    });
+                    ui.separator();
+                    ui.vertical(|ui| {
 
                 let (response, painter) = ui.allocate_painter(
                     ui.available_size(),
@@ -6871,6 +6826,8 @@ impl AppUI {
                         }
                     }
                 }
+                    });
+                });
             });
 
         if !open || close {
@@ -6891,6 +6848,34 @@ impl AppUI {
         }
         if let Some(before) = undo_before {
             self.push_midi_clip_undo(window.clip_id, before);
+        }
+        if do_quantize {
+            let grid = window.tools.quantize_snap.ticks(beats_per_bar);
+            let strength = window.tools.quantize_strength;
+            self.apply_midi_note_edit_to_clips(
+                vec![window.clip_id],
+                "Quantize MIDI",
+                |notes| quantize_midi_notes(notes, grid, strength),
+            );
+            window.initialized = false;
+        }
+        if do_transpose {
+            let semitones = window.tools.transpose;
+            self.apply_midi_note_edit_to_clips(
+                vec![window.clip_id],
+                "Transpose MIDI",
+                |notes| transpose_midi_notes(notes, semitones),
+            );
+            window.initialized = false;
+        }
+        if do_velocity {
+            let factor = window.tools.velocity_factor;
+            self.apply_midi_note_edit_to_clips(
+                vec![window.clip_id],
+                "Scale MIDI velocity",
+                |notes| scale_midi_velocities(notes, factor),
+            );
+            window.initialized = false;
         }
         if let Some((pitch, velocity)) = preview_note {
             self.preview_piano_roll_note(pitch, velocity);
@@ -8054,18 +8039,6 @@ impl eframe::App for AppUI {
                         self.piano_roll = Some(PianoRollWindow::new(clip_id, self.snap_mode));
                     }
                 }
-                if ui
-                    .add_enabled(
-                        !self.selected_midi_clips.is_empty(),
-                        egui::Button::new("MIDI…"),
-                    )
-                    .on_hover_text(
-                        "Quantize, transpose and velocity tools for selected MIDI clips",
-                    )
-                    .clicked()
-                {
-                    self.midi_tools = Some(MidiToolsWindow::default());
-                }
                 ui.separator();
                 ui.label("Snap:");
                 egui::ComboBox::from_id_salt("snap_mode")
@@ -9074,7 +9047,6 @@ impl eframe::App for AppUI {
 
         self.show_audio_window(ctx);
         self.show_track_effects(ctx);
-        self.show_midi_tools(ctx);
         self.show_piano_roll(ctx);
         self.show_history_window(ctx);
 
@@ -9859,7 +9831,6 @@ impl AppUI {
         self.track_effects = None;
         self.pending_insert_edit = None;
         self.piano_roll = None;
-        self.midi_tools = None;
         self.piano_roll_preview = None;
         self.clipboard = Vec::new();
         self.midi_clipboard = Vec::new();
