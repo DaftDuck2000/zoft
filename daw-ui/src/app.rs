@@ -306,6 +306,25 @@ fn notes_in_marquee(
         .collect()
 }
 
+const CC_CONTROLLERS: [(u8, &str); 8] = [
+    (1, "Mod Wheel"),
+    (2, "Breath"),
+    (7, "Volume"),
+    (10, "Pan"),
+    (11, "Expression"),
+    (64, "Sustain"),
+    (71, "Resonance"),
+    (74, "Cutoff"),
+];
+
+fn cc_controller_label(controller: u8) -> &'static str {
+    CC_CONTROLLERS
+        .iter()
+        .find(|(id, _)| *id == controller)
+        .map(|(_, label)| *label)
+        .unwrap_or("Controller")
+}
+
 /// Scientific pitch name for a MIDI note number (`C4` = 60).
 fn note_name(pitch: u8) -> String {
     const NAMES: [&str; 12] = [
@@ -324,6 +343,59 @@ struct PianoRollNote {
     pitch: u8,
     velocity: u8,
     channel: u8,
+}
+
+/// One editable control-change point in the piano roll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MidiCcPoint {
+    tick: u64,
+    value: u8,
+    channel: u8,
+}
+
+/// Extract control-change points for one controller in content coordinates.
+fn midi_clip_cc_points(clip: &MidiClip, controller: u8) -> Vec<MidiCcPoint> {
+    let mut points: Vec<MidiCcPoint> = clip
+        .events
+        .iter()
+        .filter_map(|event| match event.message {
+            MidiMessage::ControlChange {
+                channel,
+                controller: event_controller,
+                value,
+            } if event_controller == controller => Some(MidiCcPoint {
+                tick: event.tick,
+                value,
+                channel,
+            }),
+            _ => None,
+        })
+        .collect();
+    points.sort_by_key(|point| (point.tick, point.channel));
+    points
+}
+
+/// Replace the control-change points for one controller, preserving notes and
+/// other controllers.
+fn write_midi_cc_points(clip: &mut MidiClip, controller: u8, points: &[MidiCcPoint]) {
+    clip.events.retain(|event| {
+        !matches!(
+            event.message,
+            MidiMessage::ControlChange {
+                controller: event_controller,
+                ..
+            } if event_controller == controller
+        )
+    });
+    for point in points {
+        clip.events.push(MidiEvent::control_change(
+            point.tick,
+            point.channel,
+            controller,
+            point.value,
+        ));
+    }
+    clip.events.sort_by_key(|event| event.tick);
 }
 
 /// Pair note-on/off events in a MIDI clip into editable notes in **content
@@ -1345,6 +1417,11 @@ struct PianoRollWindow {
     marquee_additive: bool,
     /// Clip snapshot while dragging a velocity bar.
     velocity_drag_before: Option<MidiClip>,
+    /// Selected control-change lane and its visibility.
+    cc_controller: u8,
+    show_cc_lane: bool,
+    /// Clip snapshot while drawing control-change points.
+    cc_drag_before: Option<MidiClip>,
 }
 
 impl PianoRollWindow {
@@ -1366,6 +1443,9 @@ impl PianoRollWindow {
             marquee: None,
             marquee_additive: false,
             velocity_drag_before: None,
+            cc_controller: 1,
+            show_cc_lane: true,
+            cc_drag_before: None,
         }
     }
 
@@ -1376,6 +1456,7 @@ impl PianoRollWindow {
         self.marquee = None;
         self.marquee_additive = false;
         self.velocity_drag_before = None;
+        self.cc_drag_before = None;
         self.initialized = true;
         self.needs_fit = true;
     }
@@ -6080,12 +6161,13 @@ impl AppUI {
         let mut do_quantize = false;
         let mut do_transpose = false;
         let mut do_velocity = false;
+        let mut cc_undo_before: Option<MidiClip> = None;
 
         egui::Window::new("Piano Roll")
             .id(egui::Id::new(("piano_roll", window.clip_id)))
             .open(&mut open)
-            .default_size([1180.0, 560.0])
-            .min_size([720.0, 480.0])
+            .default_size([1180.0, 700.0])
+            .min_size([720.0, 600.0])
             .show(ctx, |ui| {
                 let content_bottom = ui.max_rect().bottom();
                 ui.horizontal(|ui| {
@@ -6140,10 +6222,17 @@ impl AppUI {
                 // window instead of staying a fixed strip.
                 let editor_height = (content_bottom
                     - ui.cursor().top()
-                    - ui.spacing().item_spacing.y)
+                    - ui.spacing().item_spacing.y
+                    - 12.0)
                     .max(220.0);
                 let velocity_lane_height =
                     (editor_height * 0.22).clamp(100.0, 180.0);
+                let cc_lane_height = if window.show_cc_lane {
+                    (editor_height * 0.18).clamp(80.0, 160.0)
+                } else {
+                    0.0
+                };
+                let lane_spacing = if window.show_cc_lane { 12.0 } else { 6.0 };
 
                 ui.horizontal_top(|ui| {
                     ui.vertical(|ui| {
@@ -6242,12 +6331,40 @@ impl AppUI {
                         {
                             do_velocity = true;
                         }
+
+                        ui.separator();
+                        ui.heading("Controllers");
+                        ui.checkbox(&mut window.show_cc_lane, "Show CC lane");
+                        if window.show_cc_lane {
+                            ui.horizontal(|ui| {
+                                ui.label("CC:");
+                                egui::ComboBox::from_id_salt(
+                                    "piano_roll_cc_controller",
+                                )
+                                .selected_text(cc_controller_label(
+                                    window.cc_controller,
+                                ))
+                                .width(130.0)
+                                .show_ui(ui, |ui| {
+                                    for (controller, label) in CC_CONTROLLERS {
+                                        ui.selectable_value(
+                                            &mut window.cc_controller,
+                                            controller,
+                                            label,
+                                        );
+                                    }
+                                });
+                            });
+                        }
                     });
                     ui.separator();
                     ui.vertical(|ui| {
 
-                let grid_height =
-                    (editor_height - velocity_lane_height - 6.0).max(120.0);
+                let grid_height = (editor_height
+                    - velocity_lane_height
+                    - cc_lane_height
+                    - lane_spacing)
+                    .max(120.0);
                 let (response, painter) = ui.allocate_painter(
                     egui::vec2(ui.available_width(), grid_height),
                     egui::Sense::click_and_drag(),
@@ -7046,6 +7163,126 @@ impl AppUI {
                         commit = true;
                     }
                 }
+                if window.show_cc_lane {
+                    ui.add_space(6.0);
+                    let (cc_response, cc_painter) = ui.allocate_painter(
+                        egui::vec2(ui.available_width(), cc_lane_height),
+                        egui::Sense::click_and_drag(),
+                    );
+                    let cc_rect = cc_response.rect;
+                    let cc_grid = egui::Rect::from_min_max(
+                        egui::pos2(grid.left(), cc_rect.top()),
+                        egui::pos2(grid.right(), cc_rect.bottom()),
+                    );
+                    let mut cc_points =
+                        midi_clip_cc_points(&clip, window.cc_controller);
+
+                    if cc_response.drag_started_by(egui::PointerButton::Primary) {
+                        window.cc_drag_before = Some(clip.clone());
+                    }
+                    if cc_response.dragged_by(egui::PointerButton::Primary) {
+                        if let Some(pos) = cc_response.interact_pointer_pos() {
+                            if cc_grid.contains(pos) {
+                                let tick = snap_tick(tick_at(pos.x));
+                                let value = (((cc_grid.bottom() - pos.y)
+                                    / cc_grid.height().max(1.0))
+                                    * 127.0)
+                                    .round()
+                                    .clamp(0.0, 127.0)
+                                    as u8;
+                                cc_points.retain(|point| point.tick != tick);
+                                cc_points.push(MidiCcPoint {
+                                    tick,
+                                    value,
+                                    channel: 0,
+                                });
+                                cc_points.sort_by_key(|point| point.tick);
+                                if let Some(target) =
+                                    self.project.midi_clips.get_mut(window.clip_id)
+                                {
+                                    write_midi_cc_points(
+                                        target,
+                                        window.cc_controller,
+                                        &cc_points,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    if cc_response.drag_stopped_by(egui::PointerButton::Primary) {
+                        cc_undo_before = window.cc_drag_before.take();
+                    }
+
+                    cc_painter.rect_filled(cc_rect, 0.0, egui::Color32::from_gray(24));
+                    cc_painter.text(
+                        egui::pos2(cc_rect.left() + 3.0, cc_rect.top() + 3.0),
+                        egui::Align2::LEFT_TOP,
+                        format!(
+                            "CC {} · {}",
+                            window.cc_controller,
+                            cc_controller_label(window.cc_controller)
+                        ),
+                        egui::FontId::proportional(9.0),
+                        egui::Color32::from_gray(180),
+                    );
+                    for (fraction, label) in
+                        [(0.0_f32, "0"), (0.5, "64"), (1.0, "127")]
+                    {
+                        let y = cc_grid.bottom() - fraction * cc_grid.height();
+                        cc_painter.line_segment(
+                            [
+                                egui::pos2(cc_grid.left(), y),
+                                egui::pos2(cc_grid.right(), y),
+                            ],
+                            egui::Stroke::new(0.5_f32, egui::Color32::from_gray(48)),
+                        );
+                        cc_painter.text(
+                            egui::pos2(cc_grid.left() - 4.0, y),
+                            egui::Align2::RIGHT_CENTER,
+                            label,
+                            egui::FontId::monospace(7.0),
+                            egui::Color32::from_gray(130),
+                        );
+                    }
+
+                    let mut screen_points = Vec::new();
+                    for point in &cc_points {
+                        let x = x_for_tick(point.tick as f64);
+                        if x < cc_grid.left() - 4.0 || x > cc_grid.right() + 4.0 {
+                            continue;
+                        }
+                        let y = cc_grid.bottom()
+                            - (point.value as f32 / 127.0)
+                                * (cc_grid.height() - 6.0).max(1.0);
+                        screen_points.push(egui::pos2(x, y));
+                    }
+                    if screen_points.len() > 1 {
+                        cc_painter.add(egui::Shape::line(
+                            screen_points.clone(),
+                            egui::Stroke::new(
+                                1.5_f32,
+                                egui::Color32::from_rgb(90, 200, 255),
+                            ),
+                        ));
+                    }
+                    for point in &screen_points {
+                        cc_painter.circle_filled(
+                            *point,
+                            2.5,
+                            egui::Color32::from_rgb(150, 230, 255),
+                        );
+                    }
+
+                    if cc_response.hovered() {
+                        if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
+                            if cc_grid.contains(pos) {
+                                ui.output_mut(|output| {
+                                    output.cursor_icon = egui::CursorIcon::Crosshair
+                                });
+                            }
+                        }
+                    }
+                }
                     });
                 });
             });
@@ -7067,6 +7304,9 @@ impl AppUI {
             self.write_piano_roll_to_project(&window);
         }
         if let Some(before) = undo_before {
+            self.push_midi_clip_undo(window.clip_id, before);
+        }
+        if let Some(before) = cc_undo_before {
             self.push_midi_clip_undo(window.clip_id, before);
         }
         if do_quantize {
@@ -11406,9 +11646,10 @@ mod tests {
         write_piano_roll_notes, write_wav_f32, write_wav_range, write_wav_range_with_envelope,
         fit_piano_roll_view, piano_roll_new_note_length, midi_trim_end, midi_trim_start,
         split_midi_clip_at_tick, quantize_midi_notes, scale_midi_velocities,
-        transpose_midi_notes, velocity_color, notes_in_marquee, project_from_template,
-        ClipShape, ClipSourceState, EditAction, FilterKind, MonitorMode, PianoRollNote,
-        PianoRollSnap, PianoRollWindow, SnapMode, Template, TrackShape,
+        transpose_midi_notes, velocity_color, notes_in_marquee, midi_clip_cc_points,
+        write_midi_cc_points, MidiCcPoint, project_from_template, ClipShape, ClipSourceState,
+        EditAction, FilterKind, MonitorMode, PianoRollNote, PianoRollSnap, PianoRollWindow,
+        SnapMode, Template, TrackShape,
     };
     use daw_core::audio_pool::AudioFileRef;
     use daw_core::clip::{
@@ -12612,6 +12853,44 @@ mod tests {
 
         assert!(split_midi_clip_at_tick(&clip, 960).is_none());
         assert!(split_midi_clip_at_tick(&clip, 2880).is_none());
+    }
+
+    #[test]
+    fn cc_points_round_trip_and_preserve_other_controllers() {
+        let mut clip = MidiClip::new(TimelinePos::default(), 960);
+        clip.add_event(MidiEvent::control_change(0, 0, 1, 64));
+        clip.add_event(MidiEvent::control_change(240, 0, 1, 100));
+        clip.add_event(MidiEvent::control_change(0, 0, 7, 90));
+        clip.add_event(MidiEvent::note_on(0, 0, 60, 100));
+
+        assert_eq!(
+            midi_clip_cc_points(&clip, 1),
+            vec![
+                MidiCcPoint {
+                    tick: 0,
+                    value: 64,
+                    channel: 0
+                },
+                MidiCcPoint {
+                    tick: 240,
+                    value: 100,
+                    channel: 0
+                },
+            ]
+        );
+
+        let replacement = [MidiCcPoint {
+            tick: 480,
+            value: 20,
+            channel: 0,
+        }];
+        write_midi_cc_points(&mut clip, 1, &replacement);
+        assert_eq!(midi_clip_cc_points(&clip, 1), replacement.to_vec());
+        assert_eq!(midi_clip_cc_points(&clip, 7).len(), 1);
+        assert!(clip.events.iter().any(|event| matches!(
+            event.message,
+            daw_core::clip::MidiMessage::NoteOn { note: 60, .. }
+        )));
     }
 
     #[test]
