@@ -13,7 +13,7 @@ Full-featured piano roll: note entry/selection/editing, velocity lanes, CC lanes
 ## Requirements
 
 - [x] Note grid: Pitch (vertical) × Time (horizontal) with its own snap picker (Off, Bar, Beat, 1/8, 1/16, 1/32, 1/8T, 1/16T)
-- [x] Note entry: Double-click to add, drag the right edge to resize, right-click to delete
+- [x] Note entry: Double-click to add (new notes take the current snap length), drag the right edge to resize, right-click to delete
 - [x] Selection: Click, Ctrl/Shift+click, Select All
 - [~] Note editing: Drag move and resize implemented; velocity drag pending
 - [x] Note audition: Clicking a note or dragging it to a new pitch plays it
@@ -165,7 +165,7 @@ enum CCEditMode {
 - 2026-10-24: Basic read-only piano roll. Double-click a MIDI clip (or use Arrange → Piano Roll…) to open a window with pitch stripes, a C-labelled keyboard, beat/bar grid lines and note rectangles sized by tick position/duration and coloured by velocity. Editing, zoom/scroll, velocity/CC lanes and the tool palette are still to come
 - 2026-10-24: MIDI clips now show a miniature piano-roll preview directly in the arrange lane, with pitch-normalized note lanes and velocity-based opacity, so takes can be read without opening the full piano-roll window
 - 2026-10-24: Piano roll is editable. Double-click empty grid space adds a note at the Arrange snap setting, drag moves selected notes in time and pitch, dragging a note's right edge resizes it, and right-click/Delete removes notes. Ctrl/Shift+click builds a multi-note selection and Select All selects the clip. Every gesture is undoable through a new `MidiClip` history action. Velocity/CC lanes and the tool palette remain
-- 2026-10-24: Piano-roll audition and navigation. Clicking a note plays it through the live synth, and dragging it to a new pitch retriggers the preview. The view now pans with the wheel (time), Shift+wheel (pitch) or middle-drag, zooms with Ctrl+wheel and the +/− buttons, and re-fits with Fit. The piano roll has its own snap picker (Off, Bar, Beat, 1/8, 1/16, 1/32, 1/8T, 1/16T), so note entry, dragging and resizing no longer depend on the arrange setting
+- 2026-10-24: Piano-roll audition and navigation. Clicking a note plays it through the live synth, and dragging it to a new pitch retriggers the preview. The view now pans with the wheel (time), Shift+wheel (pitch) or middle-drag, zooms with Ctrl+wheel and the +/− buttons, and re-fits with Fit. The piano roll has its own snap picker (Off, Bar, Beat, 1/8, 1/16, 1/32, 1/8T, 1/16T), so note entry, dragging and resizing no longer depend on the arrange setting. Newly double-clicked notes are as long as the current snap value (Off falls back to the last used length)
 - YYYY-MM-DD: Pencil/Eraser/Select tools
 - YYYY-MM-DD: Note drag + resize
 - YYYY-MM-DD: Velocity lane

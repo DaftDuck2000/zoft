@@ -400,6 +400,20 @@ fn write_piano_roll_notes(clip: &mut MidiClip, notes: &[PianoRollNote]) {
     clip.events = events;
 }
 
+/// Length used when double-clicking a new piano-roll note: the current snap
+/// value, falling back to the last-used length when snapping is off.
+fn piano_roll_new_note_length(
+    snap: PianoRollSnap,
+    snap_ticks: u64,
+    last_length: u64,
+) -> u64 {
+    if snap == PianoRollSnap::Off {
+        last_length.max(1)
+    } else {
+        snap_ticks.max(1)
+    }
+}
+
 /// Fit the piano-roll view to the clip length and the notes' pitch range.
 fn fit_piano_roll_view(window: &mut PianoRollWindow, grid: egui::Rect, length: u64) {
     let length = length.max(1) as f32;
@@ -5262,7 +5276,12 @@ impl AppUI {
                         {
                             let start = snap_tick(tick_at(pos.x))
                                 .min(length.saturating_sub(1));
-                            let wanted = window.last_length.max(1);
+                            let wanted = piano_roll_new_note_length(
+                                window.snap,
+                                snap_ticks,
+                                window.last_length,
+                            );
+                            window.last_length = wanted;
                             let end = start
                                 .saturating_add(wanted)
                                 .min(length)
@@ -9803,8 +9822,9 @@ mod tests {
         render_pitch_stretch, reverse_interleaved, saturate, take_lane_layout,
         tape_stretch_interleaved, tremolo, wav_file_info, wav_peak, write_piano_roll_notes,
         write_wav_f32, write_wav_range, write_wav_range_with_envelope, fit_piano_roll_view,
-        project_from_template, ClipShape, ClipSourceState, EditAction, FilterKind, MonitorMode,
-        PianoRollNote, PianoRollSnap, PianoRollWindow, SnapMode, Template, TrackShape,
+        piano_roll_new_note_length, project_from_template, ClipShape, ClipSourceState, EditAction,
+        FilterKind, MonitorMode, PianoRollNote, PianoRollSnap, PianoRollWindow, SnapMode,
+        Template, TrackShape,
     };
     use daw_core::audio_pool::AudioFileRef;
     use daw_core::clip::{
@@ -10728,8 +10748,7 @@ mod tests {
     }
 
     #[test]
-    fn piano_roll_snap_ticks_follow_the_header_choice() {
-        assert_eq!(PianoRollSnap::Off.ticks(4), 1);
+    fn piano_roll_snap_ticks_follow_the_header_choice() {        assert_eq!(PianoRollSnap::Off.ticks(4), 1);
         assert_eq!(PianoRollSnap::Bar.ticks(4), 3840);
         assert_eq!(PianoRollSnap::Beat.ticks(4), 960);
         assert_eq!(PianoRollSnap::Eighth.ticks(4), 480);
@@ -10737,6 +10756,22 @@ mod tests {
         assert_eq!(PianoRollSnap::ThirtySecond.ticks(4), 120);
         assert_eq!(PianoRollSnap::EighthTriplet.ticks(4), 320);
         assert_eq!(PianoRollSnap::SixteenthTriplet.ticks(4), 160);
+    }
+
+    #[test]
+    fn piano_roll_new_note_length_uses_the_snap() {
+        assert_eq!(
+            piano_roll_new_note_length(PianoRollSnap::Sixteenth, 240, 960),
+            240
+        );
+        assert_eq!(
+            piano_roll_new_note_length(PianoRollSnap::EighthTriplet, 320, 960),
+            320
+        );
+        assert_eq!(
+            piano_roll_new_note_length(PianoRollSnap::Off, 1, 960),
+            960
+        );
     }
 
     #[test]
