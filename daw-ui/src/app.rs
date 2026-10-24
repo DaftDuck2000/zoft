@@ -1397,6 +1397,7 @@ fn prepare_playable_clips(specs: Vec<PlaybackClipSpec>) -> Vec<PlayableClip> {
     playable
 }
 
+#[derive(Clone)]
 struct ClipDragMember {
     clip_id: ClipId,
     from_shape: ClipShape,
@@ -1414,6 +1415,8 @@ struct ClipDrag {
     grab_offset_secs: f64,
     /// Other selected clips moved together when `mode` is `Move`.
     members: Vec<ClipDragMember>,
+    /// Selected MIDI clips moved together with the audio group.
+    midi_members: Vec<MidiMoveMember>,
 }
 
 /// One MIDI clip moved as part of a multi-selection drag.
@@ -1437,6 +1440,8 @@ struct MidiClipDrag {
     grab_offset_ticks: i64,
     /// Other selected MIDI clips moved together when `mode` is `Move`.
     members: Vec<MidiMoveMember>,
+    /// Selected audio clips moved together with the MIDI group.
+    audio_members: Vec<ClipDragMember>,
 }
 
 /// Decoded mono windows used for sample-accurate rendering at high zoom.
@@ -2196,14 +2201,10 @@ impl AppUI {
     fn add_to_selection(&mut self, clip_id: ClipId) {
         self.selected_clips.insert(clip_id);
         self.selected_clip = Some(clip_id);
-        self.selected_midi_clip = None;
-        self.selected_midi_clips.clear();
     }
 
     /// Ctrl/Cmd-click: add the clip, or remove it if it was already selected.
     fn toggle_selection(&mut self, clip_id: ClipId) {
-        self.selected_midi_clip = None;
-        self.selected_midi_clips.clear();
         if self.selected_clips.remove(&clip_id) {
             if self.selected_clip == Some(clip_id) {
                 self.selected_clip = self.selected_clips.iter().next().copied();
@@ -2227,16 +2228,12 @@ impl AppUI {
     }
 
     fn add_to_midi_selection(&mut self, clip_id: ClipId) {
-        self.selected_clip = None;
-        self.selected_clips.clear();
         self.selected_midi_clips.insert(clip_id);
         self.selected_midi_clip = Some(clip_id);
     }
 
     /// Ctrl/Cmd-click for MIDI clips.
     fn toggle_midi_selection(&mut self, clip_id: ClipId) {
-        self.selected_clip = None;
-        self.selected_clips.clear();
         if self.selected_midi_clips.remove(&clip_id) {
             if self.selected_midi_clip == Some(clip_id) {
                 self.selected_midi_clip =
@@ -2419,51 +2416,43 @@ impl AppUI {
     /// Mute or unmute every selected clip as one undo step.
     fn toggle_selected_clips_muted(&mut self) {
         let midi_ids = self.midi_selection_ids();
-        if !midi_ids.is_empty() {
-            let all_muted = midi_ids.iter().all(|id| {
-                self.project
-                    .midi_clips
-                    .get(*id)
-                    .map_or(true, |clip| clip.muted)
-            });
-            let muted = !all_muted;
-            self.begin_undo_group(if muted { "Mute MIDI clips" } else { "Unmute MIDI clips" });
-            for id in midi_ids {
-                let Some(clip) = self.project.midi_clips.get(id).cloned() else {
-                    continue;
-                };
-                if clip.muted == muted {
-                    continue;
-                }
-                let mut to = clip.clone();
-                to.muted = muted;
-                let action = EditAction::MidiClip {
-                    clip_id: id,
-                    from: clip,
-                    to,
-                };
-                self.apply_action(&action, true);
-                self.push_undo(action, false);
-            }
-            self.end_undo_group();
-            self.after_edit();
-            self.refresh_playback_if_playing();
+        let audio_ids = self.selection_ids();
+        if midi_ids.is_empty() && audio_ids.is_empty() {
             return;
         }
 
-        let ids = self.selection_ids();
-        if ids.is_empty() {
-            return;
-        }
-        let all_muted = ids.iter().all(|id| {
+        let midi_all_muted = midi_ids.iter().all(|id| {
+            self.project
+                .midi_clips
+                .get(*id)
+                .map_or(true, |clip| clip.muted)
+        });
+        let audio_all_muted = audio_ids.iter().all(|id| {
             self.project
                 .audio_clips
                 .get(*id)
                 .map_or(true, |clip| clip.muted)
         });
-        let muted = !all_muted;
-        self.begin_undo_group(if muted { "Mute takes" } else { "Unmute takes" });
-        for id in ids {
+        let muted = !(midi_all_muted && audio_all_muted);
+        self.begin_undo_group(if muted { "Mute clips" } else { "Unmute clips" });
+        for id in midi_ids {
+            let Some(clip) = self.project.midi_clips.get(id).cloned() else {
+                continue;
+            };
+            if clip.muted == muted {
+                continue;
+            }
+            let mut to = clip.clone();
+            to.muted = muted;
+            let action = EditAction::MidiClip {
+                clip_id: id,
+                from: clip,
+                to,
+            };
+            self.apply_action(&action, true);
+            self.push_undo(action, false);
+        }
+        for id in audio_ids {
             self.set_clip_muted(id, muted);
         }
         self.end_undo_group();
@@ -2868,6 +2857,24 @@ impl AppUI {
             }
         }
 
+        let mut midi_members = Vec::new();
+        if mode == DragMode::Move {
+            for midi_id in self.midi_selection_ids() {
+                let Some(midi_track) = self.midi_clip_track(midi_id) else {
+                    continue;
+                };
+                let Some(midi_clip) = self.project.midi_clips.get(midi_id) else {
+                    continue;
+                };
+                midi_members.push(MidiMoveMember {
+                    clip_id: midi_id,
+                    from_track: midi_track,
+                    from_pos: midi_clip.timeline_position,
+                    last_track: midi_track,
+                });
+            }
+        }
+
         self.drag = Some(ClipDrag {
             clip_id,
             mode,
@@ -2876,6 +2883,7 @@ impl AppUI {
             last_track: track_id,
             grab_offset_secs: (view.t(rect, pos.x) - clip_start).max(0.0),
             members,
+            midi_members,
         });
     }
 
@@ -2953,8 +2961,42 @@ impl AppUI {
                             max_index = max_index.max(index as i64);
                         }
                     }
+                    for member in &drag.midi_members {
+                        if let Some(index) = self.track_index(member.from_track) {
+                            min_index = min_index.min(index as i64);
+                            max_index = max_index.max(index as i64);
+                        }
+                    }
                     let raw_delta = raw_target_index as i64 - from_index as i64;
-                    let track_delta = raw_delta.clamp(-min_index, last_index - max_index);
+                    let mut track_delta =
+                        raw_delta.clamp(-min_index, last_index - max_index);
+                    // MIDI clips can only land on MIDI/instrument tracks. If a
+                    // mixed selection would put one somewhere invalid, keep the
+                    // whole group on its current tracks and move in time only.
+                    let midi_valid = drag.midi_members.iter().all(|member| {
+                        let Some(member_index) =
+                            self.track_index(member.from_track)
+                        else {
+                            return false;
+                        };
+                        let target_index = (member_index as i64 + track_delta)
+                            .clamp(0, last_index)
+                            as usize;
+                        self.project
+                            .track_order
+                            .get(target_index)
+                            .and_then(|id| self.project.tracks.get(id))
+                            .map(|track| {
+                                matches!(
+                                    track.track_type,
+                                    TrackType::Midi | TrackType::Instrument
+                                )
+                            })
+                            .unwrap_or(false)
+                    });
+                    if !midi_valid {
+                        track_delta = 0;
+                    }
                     let target_index = (from_index as i64 + track_delta) as usize;
                     if let Some(target_track) = self.project.track_order.get(target_index).copied()
                     {
@@ -2974,6 +3016,11 @@ impl AppUI {
                     .members
                     .iter()
                     .map(|member| member.from_shape.position.sample)
+                    .chain(drag.midi_members.iter().map(|member| {
+                        self.project
+                            .tempo_map
+                            .tick_to_sample(member.from_pos.tick, project_sr)
+                    }))
                     .chain(std::iter::once(drag.from_shape.position.sample))
                     .min()
                     .unwrap_or(0);
@@ -3026,6 +3073,49 @@ impl AppUI {
                             if target_track != member.last_track {
                                 self.detach_clip(member.last_track, member.clip_id);
                                 self.attach_clip(target_track, member.clip_id);
+                                member.last_track = target_track;
+                            }
+                        }
+                    }
+                }
+
+                for member in drag.midi_members.iter_mut() {
+                    let from_sample = self
+                        .project
+                        .tempo_map
+                        .tick_to_sample(member.from_pos.tick, project_sr);
+                    let new_sample =
+                        (from_sample as i64 + delta_samples).max(0) as u64;
+                    let new_tick = self
+                        .project
+                        .tempo_map
+                        .sample_to_tick(new_sample, project_sr);
+                    if let Some(clip) = self.project.midi_clips.get_mut(member.clip_id)
+                    {
+                        clip.timeline_position.tick = new_tick;
+                        clip.timeline_position.sample = new_sample;
+                    }
+                    if let Some(member_from_index) =
+                        self.track_index(member.from_track)
+                    {
+                        let last_index = self
+                            .project
+                            .track_order
+                            .len()
+                            .saturating_sub(1)
+                            as i64;
+                        let target_index =
+                            (member_from_index as i64 + track_delta)
+                                .clamp(0, last_index)
+                                as usize;
+                        if let Some(target_track) = self
+                            .project
+                            .track_order
+                            .get(target_index)
+                            .copied()
+                        {
+                            if target_track != member.last_track {
+                                self.place_midi_clip(member.clip_id, target_track);
                                 member.last_track = target_track;
                             }
                         }
@@ -3117,6 +3207,22 @@ impl AppUI {
                             clip_id: member.clip_id,
                             from_track: member.from_track,
                             from_pos: member.from_shape.position,
+                            to_track: member.last_track,
+                            to_pos: clip.timeline_position,
+                        });
+                    }
+                }
+                for member in &drag.midi_members {
+                    let Some(clip) = self.project.midi_clips.get(member.clip_id) else {
+                        continue;
+                    };
+                    if member.last_track != member.from_track
+                        || clip.timeline_position != member.from_pos
+                    {
+                        actions.push(EditAction::MoveMidi {
+                            clip_id: member.clip_id,
+                            from_track: member.from_track,
+                            from_pos: member.from_pos,
                             to_track: member.last_track,
                             to_pos: clip.timeline_position,
                         });
@@ -3215,6 +3321,27 @@ impl AppUI {
                 });
             }
         }
+
+        let mut audio_members = Vec::new();
+        if mode == DragMode::Move {
+            for audio_id in self.selection_ids() {
+                let Some(track_id) = self.clip_track(audio_id) else {
+                    continue;
+                };
+                let Some(audio_clip) = self.project.audio_clips.get(audio_id) else {
+                    continue;
+                };
+                if audio_clip.locked {
+                    continue;
+                }
+                audio_members.push(ClipDragMember {
+                    clip_id: audio_id,
+                    from_shape: ClipShape::of(audio_clip),
+                    from_track: track_id,
+                    last_track: track_id,
+                });
+            }
+        }
         self.midi_drag = Some(MidiClipDrag {
             clip_id,
             mode,
@@ -3223,6 +3350,7 @@ impl AppUI {
             last_track: from_track,
             grab_offset_ticks,
             members,
+            audio_members,
         });
     }
 
@@ -3240,6 +3368,7 @@ impl AppUI {
         };
         let before = drag.before.clone();
         let project_sr = self.project.sample_rate.max(1) as f64;
+        let bpm = self.project.tempo_map.default_bpm();
         let beats_per_bar = self.time_signature().0.max(1) as u64;
         let pointer_sample = (view.t(rect, pos.x).max(0.0) * project_sr).round() as u64;
         let pointer_tick = self
@@ -3268,15 +3397,29 @@ impl AppUI {
                 } else {
                     snap_tick(raw_start)
                 };
-                let mut delta_ticks =
-                    new_start as i64 - before.timeline_position.tick as i64;
-                if let Some(min_tick) = drag
-                    .members
-                    .iter()
-                    .map(|member| member.from_pos.tick)
-                    .min()
-                {
-                    delta_ticks = delta_ticks.max(-(min_tick as i64));
+                let from_sample = self
+                    .project
+                    .tempo_map
+                    .tick_to_sample(before.timeline_position.tick, project_sr);
+                let target_sample = self
+                    .project
+                    .tempo_map
+                    .tick_to_sample(new_start, project_sr);
+                let mut delta_samples =
+                    target_sample as i64 - from_sample as i64;
+                let mut min_start = u64::MAX;
+                for member in &drag.members {
+                    min_start = min_start.min(
+                        self.project
+                            .tempo_map
+                            .tick_to_sample(member.from_pos.tick, project_sr),
+                    );
+                }
+                for member in &drag.audio_members {
+                    min_start = min_start.min(member.from_shape.position.sample);
+                }
+                if min_start != u64::MAX {
+                    delta_samples = clamp_group_delta(min_start, delta_samples);
                 }
 
                 // Compute a shared vertical delta, but only if every selected
@@ -3302,14 +3445,32 @@ impl AppUI {
                             self.track_index(drag.from_track),
                             self.track_index(target_id),
                         ) {
-                            let candidate =
-                                target_index as i64 - from_index as i64;
                             let last_index = self
                                 .project
                                 .track_order
                                 .len()
                                 .saturating_sub(1)
                                 as i64;
+                            let mut min_index = from_index as i64;
+                            let mut max_index = from_index as i64;
+                            for member in &drag.members {
+                                if let Some(index) =
+                                    self.track_index(member.from_track)
+                                {
+                                    min_index = min_index.min(index as i64);
+                                    max_index = max_index.max(index as i64);
+                                }
+                            }
+                            for member in &drag.audio_members {
+                                if let Some(index) =
+                                    self.track_index(member.from_track)
+                                {
+                                    min_index = min_index.min(index as i64);
+                                    max_index = max_index.max(index as i64);
+                                }
+                            }
+                            let candidate = (target_index as i64 - from_index as i64)
+                                .clamp(-min_index, last_index - max_index);
                             let all_valid = drag.members.iter().all(|member| {
                                 let Some(from_index) =
                                     self.track_index(member.from_track)
@@ -3339,12 +3500,16 @@ impl AppUI {
                 }
 
                 for member in &mut drag.members {
-                    let new_tick = (member.from_pos.tick as i64 + delta_ticks)
-                        .max(0) as u64;
-                    let new_sample = self
+                    let member_from_sample = self
                         .project
                         .tempo_map
-                        .tick_to_sample(new_tick, project_sr);
+                        .tick_to_sample(member.from_pos.tick, project_sr);
+                    let new_sample =
+                        (member_from_sample as i64 + delta_samples).max(0) as u64;
+                    let new_tick = self
+                        .project
+                        .tempo_map
+                        .sample_to_tick(new_sample, project_sr);
                     if let Some(clip) =
                         self.project.midi_clips.get_mut(member.clip_id)
                     {
@@ -3377,6 +3542,43 @@ impl AppUI {
                     }
                     if member.clip_id == drag.clip_id {
                         drag.last_track = member.last_track;
+                    }
+                }
+
+                for member in drag.audio_members.iter_mut() {
+                    let new_sample = (member.from_shape.position.sample as i64
+                        + delta_samples)
+                        .max(0) as u64;
+                    if let Some(clip) =
+                        self.project.audio_clips.get_mut(member.clip_id)
+                    {
+                        clip.timeline_position =
+                            TimelinePos::from_sample(new_sample, project_sr, bpm);
+                    }
+                    if track_delta != 0 {
+                        if let Some(from_index) = self.track_index(member.from_track) {
+                            let last_index = self
+                                .project
+                                .track_order
+                                .len()
+                                .saturating_sub(1)
+                                as i64;
+                            let target_index = (from_index as i64 + track_delta)
+                                .clamp(0, last_index)
+                                as usize;
+                            if let Some(target_track) = self
+                                .project
+                                .track_order
+                                .get(target_index)
+                                .copied()
+                            {
+                                if target_track != member.last_track {
+                                    self.detach_clip(member.last_track, member.clip_id);
+                                    self.attach_clip(target_track, member.clip_id);
+                                    member.last_track = target_track;
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -3433,6 +3635,22 @@ impl AppUI {
                     });
                 }
             }
+            for member in &drag.audio_members {
+                let Some(clip) = self.project.audio_clips.get(member.clip_id) else {
+                    continue;
+                };
+                if member.last_track != member.from_track
+                    || clip.timeline_position != member.from_shape.position
+                {
+                    actions.push(EditAction::Move {
+                        clip_id: member.clip_id,
+                        from_track: member.from_track,
+                        from_pos: member.from_shape.position,
+                        to_track: member.last_track,
+                        to_pos: clip.timeline_position,
+                    });
+                }
+            }
             if !actions.is_empty() {
                 if actions.len() == 1 {
                     self.push_undo(actions.pop().unwrap(), false);
@@ -3440,7 +3658,7 @@ impl AppUI {
                     self.push_undo(
                         EditAction::Group {
                             actions,
-                            label: "Move MIDI clips".to_string(),
+                            label: "Move clips".to_string(),
                         },
                         false,
                     );
@@ -3464,14 +3682,17 @@ impl AppUI {
 
     /// Split the selected clip at the playhead.
     fn split_selected_clip(&mut self) {
-        if let Some(midi_id) = self.selected_midi_clip {
-            self.split_midi_clip_at(midi_id, self.playhead_secs);
+        let midi_id = self.selected_midi_clip;
+        let audio_id = self.selected_clip;
+        if midi_id.is_none() && audio_id.is_none() {
             return;
         }
-        let Some(clip_id) = self.selected_clip else {
-            return;
-        };
-        self.split_clip_at(clip_id, self.playhead_secs);
+        if let Some(midi_id) = midi_id {
+            self.split_midi_clip_at(midi_id, self.playhead_secs);
+        }
+        if let Some(audio_id) = audio_id {
+            self.split_clip_at(audio_id, self.playhead_secs);
+        }
     }
 
     /// Split a MIDI clip at `split_secs` into two non-destructive halves.
@@ -4311,43 +4532,45 @@ impl AppUI {
     }
 
     fn copy_selected_clip(&mut self) {
+        let audio_ids = self.selection_ids();
+        if audio_ids.is_empty() {
+            self.clipboard.clear();
+        } else {
+            let mut clips: Vec<AudioClip> = audio_ids
+                .into_iter()
+                .filter_map(|id| self.project.audio_clips.get(id).cloned())
+                .filter(|clip| !clip.locked)
+                .collect();
+            // Keep a stable left-to-right order so paste preserves the layout.
+            clips.sort_by_key(|clip| clip.timeline_position.sample);
+            self.clipboard = clips;
+        }
+
         let midi_ids = self.midi_selection_ids();
-        if !midi_ids.is_empty() {
+        if midi_ids.is_empty() {
+            self.midi_clipboard.clear();
+        } else {
             let mut clips: Vec<MidiClip> = midi_ids
                 .into_iter()
                 .filter_map(|id| self.project.midi_clips.get(id).cloned())
                 .collect();
             clips.sort_by_key(|clip| clip.timeline_position.tick);
             self.midi_clipboard = clips;
-            self.clipboard.clear();
-            return;
         }
-
-        let mut clips: Vec<AudioClip> = self
-            .selection_ids()
-            .into_iter()
-            .filter_map(|id| self.project.audio_clips.get(id).cloned())
-            .filter(|clip| !clip.locked)
-            .collect();
-        // Keep a stable left-to-right order so paste preserves the layout.
-        clips.sort_by_key(|clip| clip.timeline_position.sample);
-        self.clipboard = clips;
-        self.midi_clipboard.clear();
     }
 
     fn paste_clip(&mut self) {
+        let audio_track = self
+            .selected_clip
+            .and_then(|id| self.clip_track(id))
+            .or_else(|| self.project.track_order.first().copied());
         if !self.midi_clipboard.is_empty() {
             self.paste_midi_clips();
-            return;
         }
         if self.clipboard.is_empty() {
             return;
         }
-        let track_id = self
-            .selected_clip
-            .and_then(|id| self.clip_track(id))
-            .or_else(|| self.project.track_order.first().copied());
-        let Some(track_id) = track_id else {
+        let Some(track_id) = audio_track else {
             self.error_message = Some("No track to paste into.".to_string());
             return;
         };
@@ -4466,11 +4689,13 @@ impl AppUI {
 
     fn duplicate_selected_clip(&mut self) {
         let midi_ids = self.midi_selection_ids();
-        if !midi_ids.is_empty() {
-            self.duplicate_midi_clips(midi_ids);
+        let ids = self.selection_ids();
+        if midi_ids.is_empty() && ids.is_empty() {
             return;
         }
-        let ids = self.selection_ids();
+        if !midi_ids.is_empty() {
+            self.duplicate_midi_clips(midi_ids);
+        }
         if ids.is_empty() {
             return;
         }
@@ -8322,7 +8547,11 @@ impl eframe::App for AppUI {
                     i.pointer.press_origin(),
                 )
             });
-            let additive = ui.input(|input| input.modifiers.command || input.modifiers.ctrl);
+            let additive = ui.input(|input| {
+                input.modifiers.command
+                    || input.modifiers.ctrl
+                    || input.modifiers.shift
+            });
             if primary_clicked && hovered {
                 if let Some(pos) = pointer_pos {
                     let clicked_midi = midi_clip_rects
@@ -8420,30 +8649,18 @@ impl eframe::App for AppUI {
                     let audio_hits = clips_in_marquee(&clip_rects, marquee);
                     let midi_hits = midi_clips_in_marquee(&midi_clip_rects, marquee);
                     if self.marquee_additive {
-                        if !midi_hits.is_empty() {
-                            self.selected_clip = None;
-                            self.selected_clips.clear();
-                            for clip_id in midi_hits {
-                                self.add_to_midi_selection(clip_id);
-                            }
-                        } else {
-                            self.selected_midi_clip = None;
-                            self.selected_midi_clips.clear();
-                            for clip_id in audio_hits {
-                                self.add_to_selection(clip_id);
-                            }
+                        for clip_id in audio_hits {
+                            self.add_to_selection(clip_id);
                         }
-                    } else if !midi_hits.is_empty() {
-                        self.selected_clip = None;
-                        self.selected_clips.clear();
+                        for clip_id in midi_hits {
+                            self.add_to_midi_selection(clip_id);
+                        }
+                    } else {
+                        self.selected_clips = audio_hits.iter().copied().collect();
+                        self.selected_clip = audio_hits.last().copied();
                         self.selected_midi_clips =
                             midi_hits.iter().copied().collect();
                         self.selected_midi_clip = midi_hits.last().copied();
-                    } else {
-                        self.selected_midi_clip = None;
-                        self.selected_midi_clips.clear();
-                        self.selected_clips = audio_hits.iter().copied().collect();
-                        self.selected_clip = audio_hits.last().copied();
                     }
                     self.marquee_additive = false;
                 } else if self.midi_drag.is_some() {
@@ -8555,14 +8772,13 @@ impl eframe::App for AppUI {
                 };
                 ui.label(status);
                 ui.separator();
-                let sel = if !self.selected_midi_clips.is_empty() {
-                    if self.selected_midi_clips.len() > 1 {
-                        format!("{} MIDI clips", self.selected_midi_clips.len())
-                    } else {
-                        "MIDI clip".to_string()
-                    }
-                } else if self.selected_clips.len() > 1 {
-                    format!("{} clips", self.selected_clips.len())
+                let sel = if self.selected_clips.len() + self.selected_midi_clips.len() > 1 {
+                    format!(
+                        "{} clips",
+                        self.selected_clips.len() + self.selected_midi_clips.len()
+                    )
+                } else if !self.selected_midi_clips.is_empty() {
+                    "MIDI clip".to_string()
                 } else {
                     self.selected_clip
                         .and_then(|id| self.project.audio_clips.get(id))
