@@ -1419,6 +1419,7 @@ struct PianoRollWindow {
     velocity_drag_before: Option<MidiClip>,
     /// Selected control-change lane and its visibility.
     cc_controller: u8,
+    show_velocity_lane: bool,
     show_cc_lane: bool,
     /// Clip snapshot while drawing control-change points.
     cc_drag_before: Option<MidiClip>,
@@ -1444,6 +1445,7 @@ impl PianoRollWindow {
             marquee_additive: false,
             velocity_drag_before: None,
             cc_controller: 1,
+            show_velocity_lane: true,
             show_cc_lane: true,
             cc_drag_before: None,
         }
@@ -6225,14 +6227,19 @@ impl AppUI {
                     - ui.spacing().item_spacing.y
                     - 12.0)
                     .max(220.0);
-                let velocity_lane_height =
-                    (editor_height * 0.22).clamp(100.0, 180.0);
+                let velocity_lane_height = if window.show_velocity_lane {
+                    (editor_height * 0.22).clamp(100.0, 180.0)
+                } else {
+                    0.0
+                };
                 let cc_lane_height = if window.show_cc_lane {
                     (editor_height * 0.18).clamp(80.0, 160.0)
                 } else {
                     0.0
                 };
-                let lane_spacing = if window.show_cc_lane { 12.0 } else { 6.0 };
+                let visible_lanes =
+                    window.show_velocity_lane as u8 + window.show_cc_lane as u8;
+                let lane_spacing = 6.0 * visible_lanes as f32;
 
                 ui.horizontal_top(|ui| {
                     ui.vertical(|ui| {
@@ -6310,6 +6317,10 @@ impl AppUI {
 
                         ui.separator();
                         ui.heading("Velocity");
+                        ui.checkbox(
+                            &mut window.show_velocity_lane,
+                            "Show velocity lane",
+                        );
                         let mut velocity_percent =
                             window.tools.velocity_factor * 100.0;
                         if ui
@@ -7035,11 +7046,12 @@ impl AppUI {
                         ),
                     );
                 }
-                ui.add_space(6.0);
-                let (vel_response, vel_painter) = ui.allocate_painter(
-                    egui::vec2(ui.available_width(), velocity_lane_height),
-                    egui::Sense::click_and_drag(),
-                );
+                if window.show_velocity_lane {
+                    ui.add_space(6.0);
+                    let (vel_response, vel_painter) = ui.allocate_painter(
+                        egui::vec2(ui.available_width(), velocity_lane_height),
+                        egui::Sense::click_and_drag(),
+                    );
                 let vel_rect = vel_response.rect;
                 let vel_grid = egui::Rect::from_min_max(
                     egui::pos2(grid.left(), vel_rect.top()),
@@ -7162,6 +7174,7 @@ impl AppUI {
                         undo_before = Some(before);
                         commit = true;
                     }
+                }
                 }
                 if window.show_cc_lane {
                     ui.add_space(6.0);

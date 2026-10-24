@@ -17,7 +17,7 @@ Full-featured piano roll: note entry/selection/editing, velocity lanes, CC lanes
 - [x] Selection: Click, Ctrl/Shift+click, drag a marquee over empty space, Select All
 - [~] Note editing: Drag move and resize implemented; velocity drag pending
 - [x] Note audition: Clicking a note or dragging it to a new pitch plays it
-- [~] Velocity lane: Bar graph per note with drag-to-edit; curve tool pending
+- [~] Velocity lane: Bar graph per note with drag-to-edit, toggleable; curve tool pending
 - [~] CC lanes: One selectable controller lane with draw/edit; multiple simultaneous lanes pending
 - [ ] Tool palette: Select, Pencil, Eraser, Mute, Scissors, Glue, Velocity, Line
 - [x] MIDI Tools side panel: quantize, transpose and velocity scaling for the open clip
@@ -174,6 +174,7 @@ enum CCEditMode {
 - 2026-10-24: Fixed the piano-roll window slowly growing to fill the screen. Grid height is now independent of the window's current size, breaking egui's content/window auto-resize feedback loop
 - 2026-10-24: The velocity lane is taller and now scales with the piano-roll window height, so resizing the window gives both the note grid and velocity editor more room without re-triggering auto-growth
 - 2026-10-24: Added a selectable CC lane below the velocity lane. Choose Mod Wheel, Breath, Volume, Pan, Expression, Sustain, Resonance or Cutoff, then click/drag to draw control points. Other controllers and notes are preserved, and each drag is one undo step
+- 2026-10-24: The velocity lane can now be hidden with a Show velocity lane toggle, matching the CC lane. Hiding either lane gives the note grid more room, and the window remains stable
 - YYYY-MM-DD: Pencil/Eraser/Select tools
 - YYYY-MM-DD: Note drag + resize
 - YYYY-MM-DD: Velocity lane
