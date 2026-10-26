@@ -20,8 +20,8 @@ MIDI transformation tools: quantize, humanize, transpose, scale conform, legato,
 - [x] Velocity Tools: Scale, compress, expand, curve and randomize
 - [x] Note Length: Set fixed length; scale/legato/staccato variants pending
 - [~] Randomize: Pitch, velocity and timing implemented; note density pending
-- [ ] Split Notes: At pitch, at velocity, at channel
-- [ ] Join Notes: Adjacent same-pitch notes
+- [~] Split Notes: Split at the playhead implemented; pitch/velocity/channel split pending
+- [x] Join Notes: Adjacent same-pitch notes with an adjustable gap
 - [x] Mirror/Reverse: Time reverse, pitch mirror
 - [x] Batch apply: To the current MIDI clip selection
 
@@ -126,6 +126,8 @@ fn velocity_curve(events: &mut [MidiEvent], params: &ToolParams) {
 - [x] Legato creates smooth transitions
 - [x] Velocity shaping compresses, expands, curves and randomizes dynamics
 - [x] Randomize varies pitch, velocity and timing without changing durations
+- [x] Join merges adjacent same-pitch notes within the chosen gap
+- [x] Split at the playhead divides every note crossing it
 - [x] Reverse and mirror transform note positions and pitches
 - [ ] All tools support preview
 - [x] Batch apply to selection/clip/track/project
@@ -138,5 +140,6 @@ fn velocity_curve(events: &mut [MidiEvent], params: &ToolParams) {
 - 2026-10-26: Added Scale Conform with root note and major/minor/mode/pentatonic/blues scales. Notes move to the nearest scale degree while preserving their register
 - 2026-10-26: Added a Transform tool with time reverse, pitch mirror around an adjustable center note, and seeded randomize for pitch, velocity and timing. Note durations are preserved and each action is one undo step
 - 2026-10-26: Added quantize swing (0-100%, second grid position moves up to two thirds through the pair) and velocity shaping modes: scale, compress toward 64, expand away from 64, gamma curve and seeded randomize
+- 2026-10-26: Added a Notes tool with join (same pitch/channel, adjustable gap) and split at the playhead. The piano roll now draws the project playhead and split divides every note crossing it
 - YYYY-MM-DD: Split/Join/Mirror
 - YYYY-MM-DD: Tool panel UI + presets

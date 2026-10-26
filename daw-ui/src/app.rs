@@ -787,6 +787,54 @@ fn randomize_midi_notes(
     }
 }
 
+/// Merge adjacent notes with the same pitch and channel. `max_gap` is the
+/// largest silence that may remain inside a joined note.
+fn join_midi_notes(notes: &mut Vec<PianoRollNote>, max_gap: u64) {
+    if notes.len() < 2 {
+        return;
+    }
+    notes.sort_by_key(|note| (note.pitch, note.channel, note.start, note.end));
+    let mut joined: Vec<PianoRollNote> = Vec::with_capacity(notes.len());
+    for note in notes.drain(..) {
+        if let Some(last) = joined.last_mut() {
+            if last.pitch == note.pitch
+                && last.channel == note.channel
+                && note.start <= last.end.saturating_add(max_gap)
+            {
+                last.end = last.end.max(note.end);
+                continue;
+            }
+        }
+        joined.push(note);
+    }
+    joined.sort_by_key(|note| (note.start, note.pitch, note.channel));
+    *notes = joined;
+}
+
+/// Split every note that crosses `tick` into two notes. Notes that start or
+/// end exactly on the tick are left alone.
+fn split_midi_notes_at_tick(notes: &mut Vec<PianoRollNote>, tick: u64) {
+    let mut split_notes = Vec::new();
+    for note in notes.iter_mut() {
+        if note.start < tick && tick < note.end {
+            let end = note.end;
+            note.end = tick;
+            split_notes.push(PianoRollNote {
+                start: tick,
+                end,
+                pitch: note.pitch,
+                velocity: note.velocity,
+                channel: note.channel,
+            });
+        }
+    }
+    if split_notes.is_empty() {
+        return;
+    }
+    notes.extend(split_notes);
+    notes.sort_by_key(|note| (note.start, note.pitch, note.channel));
+}
+
 /// Snap resolution in ticks used for MIDI clip trimming in the arrange view.
 fn timeline_snap_ticks(snap: SnapMode, beats_per_bar: u64) -> u64 {
     match snap {
@@ -1676,19 +1724,21 @@ enum MidiToolTab {
     Humanize,
     Legato,
     NoteLength,
+    Notes,
     Transform,
     Velocity,
     Controllers,
 }
 
 impl MidiToolTab {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::Quantize,
         Self::Transpose,
         Self::Scale,
         Self::Humanize,
         Self::Legato,
         Self::NoteLength,
+        Self::Notes,
         Self::Transform,
         Self::Velocity,
         Self::Controllers,
@@ -1702,6 +1752,7 @@ impl MidiToolTab {
             Self::Humanize => "Humanize",
             Self::Legato => "Legato",
             Self::NoteLength => "Note Length",
+            Self::Notes => "Notes",
             Self::Transform => "Transform",
             Self::Velocity => "Velocity",
             Self::Controllers => "CC Lane",
@@ -1832,6 +1883,7 @@ struct MidiToolsState {
     humanize_velocity: f32,
     legato_gap: f32,
     note_length: f32,
+    join_gap: f32,
     randomize_pitch: f32,
     randomize_velocity: f32,
     randomize_timing: f32,
@@ -1857,6 +1909,7 @@ impl Default for MidiToolsState {
             humanize_velocity: 0.0,
             legato_gap: 0.0,
             note_length: 480.0,
+            join_gap: 0.0,
             randomize_pitch: 0.0,
             randomize_velocity: 0.0,
             randomize_timing: 0.0,
@@ -2689,7 +2742,7 @@ impl AppUI {
         &mut self,
         ids: Vec<ClipId>,
         label: &str,
-        edit: impl Fn(&mut [PianoRollNote]),
+        edit: impl Fn(&mut Vec<PianoRollNote>),
     ) {
         if ids.is_empty() {
             return;
@@ -6533,6 +6586,18 @@ impl AppUI {
         let beats_per_bar = numerator.max(1) as u64;
         let beat_ticks = 960u64;
         let bar_ticks = beat_ticks * beats_per_bar.max(1);
+        let sample_rate = self.project.sample_rate.max(1) as f64;
+        let playhead_sample =
+            (self.playhead_secs.max(0.0) * sample_rate).round() as u64;
+        let playhead_tick = self
+            .project
+            .tempo_map
+            .sample_to_tick(playhead_sample, sample_rate);
+        let playhead_content = playhead_tick as i64
+            - clip.timeline_position.tick as i64
+            + clip.content_offset as i64;
+        let playhead_content_tick =
+            (playhead_content >= 0).then_some(playhead_content as u64);
         let mut open = true;
         let mut close = false;
         let mut commit = false;
@@ -6548,6 +6613,8 @@ impl AppUI {
         let mut do_humanize = false;
         let mut do_legato = false;
         let mut do_note_length = false;
+        let mut do_join = false;
+        let mut do_split = false;
         let mut do_reverse = false;
         let mut do_mirror = false;
         let mut do_randomize = false;
@@ -6850,6 +6917,53 @@ impl AppUI {
                                 );
                                 if ui.button("Set Length").clicked() {
                                     do_note_length = true;
+                                }
+                            }
+                            MidiToolTab::Notes => {
+                                ui.weak("Join or split notes.");
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut window.tools.join_gap,
+                                        0.0..=960.0,
+                                    )
+                                    .text("Join gap")
+                                    .suffix(" ticks")
+                                    .step_by(1.0),
+                                );
+                                if ui
+                                    .add_enabled(
+                                        window.notes.len() >= 2,
+                                        egui::Button::new("Join Notes"),
+                                    )
+                                    .clicked()
+                                {
+                                    do_join = true;
+                                }
+                                ui.separator();
+                                ui.weak("Split notes crossing the playhead.");
+                                match playhead_content_tick {
+                                    Some(tick) if tick < length => {
+                                        ui.weak(format!(
+                                            "Playhead: {} ticks",
+                                            tick
+                                        ));
+                                    }
+                                    _ => {
+                                        ui.weak("Playhead is outside this clip.");
+                                    }
+                                }
+                                let split_available = playhead_content_tick
+                                    .map_or(false, |tick| {
+                                        tick > 0 && tick < length
+                                    });
+                                if ui
+                                    .add_enabled(
+                                        split_available,
+                                        egui::Button::new("Split at Playhead"),
+                                    )
+                                    .clicked()
+                                {
+                                    do_split = true;
                                 }
                             }
                             MidiToolTab::Transform => {
@@ -7396,6 +7510,22 @@ impl AppUI {
                         ),
                     );
                     note_rects.push((index, note_rect));
+                }
+
+                if let Some(tick) = playhead_content_tick {
+                    let x = x_for_tick(tick as f64);
+                    if x >= grid.left() && x <= grid.right() {
+                        painter.line_segment(
+                            [
+                                egui::pos2(x, grid.top()),
+                                egui::pos2(x, grid.bottom()),
+                            ],
+                            egui::Stroke::new(
+                                1.5_f32,
+                                egui::Color32::from_rgb(255, 100, 70),
+                            ),
+                        );
+                    }
                 }
 
                 let hover_pos = ui.input(|i| i.pointer.hover_pos());
@@ -8120,6 +8250,25 @@ impl AppUI {
                 |notes| set_midi_note_length(notes, length),
             );
             window.initialized = false;
+        }
+        if do_join {
+            let gap = window.tools.join_gap.round().clamp(0.0, 960.0) as u64;
+            self.apply_midi_note_edit_to_clips(
+                vec![window.clip_id],
+                "Join MIDI notes",
+                |notes| join_midi_notes(notes, gap),
+            );
+            window.initialized = false;
+        }
+        if do_split {
+            if let Some(tick) = playhead_content_tick {
+                self.apply_midi_note_edit_to_clips(
+                    vec![window.clip_id],
+                    "Split MIDI notes",
+                    |notes| split_midi_notes_at_tick(notes, tick),
+                );
+                window.initialized = false;
+            }
         }
         if do_reverse {
             let span = length;
@@ -12467,6 +12616,7 @@ mod tests {
         transpose_midi_notes, scale_conform_midi_notes, velocity_color, notes_in_marquee,
         midi_clip_cc_points, write_midi_cc_points, humanize_midi_notes, legato_midi_notes,
         set_midi_note_length, reverse_midi_notes, mirror_midi_notes, randomize_midi_notes,
+        join_midi_notes, split_midi_notes_at_tick,
         MidiCcPoint, project_from_template, ClipShape, ClipSourceState,
         EditAction, FilterKind, MonitorMode, PianoRollNote, PianoRollSnap, PianoRollWindow,
         SnapMode, Template, TrackShape,
@@ -13754,6 +13904,116 @@ mod tests {
         set_midi_note_length(&mut notes, 360);
         assert_eq!(notes[0].end, 360);
         assert_eq!(notes[1].end, 840);
+    }
+
+    #[test]
+    fn join_midi_notes_merges_same_pitch_and_respects_gap() {
+        let make = || {
+            vec![
+                PianoRollNote {
+                    start: 0,
+                    end: 240,
+                    pitch: 60,
+                    velocity: 100,
+                    channel: 0,
+                },
+                PianoRollNote {
+                    start: 240,
+                    end: 480,
+                    pitch: 60,
+                    velocity: 80,
+                    channel: 0,
+                },
+                PianoRollNote {
+                    start: 600,
+                    end: 840,
+                    pitch: 60,
+                    velocity: 70,
+                    channel: 0,
+                },
+                PianoRollNote {
+                    start: 240,
+                    end: 480,
+                    pitch: 64,
+                    velocity: 90,
+                    channel: 0,
+                },
+                PianoRollNote {
+                    start: 240,
+                    end: 480,
+                    pitch: 60,
+                    velocity: 60,
+                    channel: 1,
+                },
+            ]
+        };
+
+        let mut notes = make();
+        join_midi_notes(&mut notes, 0);
+        assert_eq!(notes.len(), 4);
+        let joined = notes
+            .iter()
+            .find(|note| {
+                note.pitch == 60 && note.channel == 0 && note.start == 0
+            })
+            .expect("joined note");
+        assert_eq!((joined.start, joined.end, joined.velocity), (0, 480, 100));
+
+        let mut notes = make();
+        join_midi_notes(&mut notes, 120);
+        assert_eq!(notes.len(), 3);
+        let joined = notes
+            .iter()
+            .find(|note| {
+                note.pitch == 60 && note.channel == 0 && note.start == 0
+            })
+            .expect("joined note");
+        assert_eq!((joined.start, joined.end), (0, 840));
+    }
+
+    #[test]
+    fn split_midi_notes_at_tick_duplicates_crossing_notes() {
+        let mut notes = vec![
+            PianoRollNote {
+                start: 0,
+                end: 960,
+                pitch: 60,
+                velocity: 100,
+                channel: 0,
+            },
+            PianoRollNote {
+                start: 480,
+                end: 1440,
+                pitch: 64,
+                velocity: 80,
+                channel: 0,
+            },
+            PianoRollNote {
+                start: 960,
+                end: 1200,
+                pitch: 67,
+                velocity: 90,
+                channel: 0,
+            },
+        ];
+        split_midi_notes_at_tick(&mut notes, 960);
+        assert_eq!(
+            notes
+                .iter()
+                .map(|note| (note.start, note.end, note.pitch))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, 960, 60),
+                (480, 960, 64),
+                (960, 1440, 64),
+                (960, 1200, 67),
+            ]
+        );
+        assert_eq!(notes[2].velocity, 80);
+
+        let before = notes.clone();
+        split_midi_notes_at_tick(&mut notes, 960);
+        assert_eq!(notes, before);
     }
 
     #[test]
