@@ -13,12 +13,12 @@ MIDI transformation tools: quantize, humanize, transpose, scale conform, legato,
 ## Requirements
 
 - [x] Quantize: Notes to grid with strength (0-100%) and tuplet grids; swing pending
-- [ ] Humanize: Random timing/velocity offset
+- [x] Humanize: Random timing/velocity offset
 - [x] Transpose: Semitones and octave buttons; scale-aware transpose pending
 - [ ] Scale Conform: Force notes to scale (major, minor, modes, custom)
-- [ ] Legato: Extend notes to next note start (with gap option)
+- [x] Legato: Extend notes to next note start (with gap option)
 - [~] Velocity Tools: Scale implemented; compress, expand, curve, randomize pending
-- [ ] Note Length: Set fixed, scale, legato, staccato
+- [x] Note Length: Set fixed length; scale/legato/staccato variants pending
 - [ ] Randomize: Pitch, velocity, timing, note density
 - [ ] Split Notes: At pitch, at velocity, at channel
 - [ ] Join Notes: Adjacent same-pitch notes
@@ -120,10 +120,10 @@ fn velocity_curve(events: &mut [MidiEvent], params: &ToolParams) {
 ## Acceptance Criteria
 
 - [~] Quantize with strength/swing works musically
-- [ ] Humanize adds natural variation
+- [x] Humanize adds natural variation
 - [x] Transpose preserves chord quality
 - [ ] Scale conform maps notes correctly
-- [ ] Legato creates smooth transitions
+- [x] Legato creates smooth transitions
 - [~] Velocity curve shapes dynamics
 - [ ] All tools support preview
 - [x] Batch apply to selection/clip/track/project
@@ -132,7 +132,7 @@ fn velocity_curve(events: &mut [MidiEvent], params: &ToolParams) {
 ## Progress Log
 
 - 2026-10-24: MIDI Tools panel inside the piano roll. The left side of the piano-roll window now provides quantize (Bar/Beat/1/8/1/16/1/32/1/8T/1/16T, 0-100% strength), transpose (±24 semitones and octave buttons) and velocity scaling (0-200%). Tools apply to the clip open in the piano roll as one undo step; trimmed notes are included
-- YYYY-MM-DD: Humanize
+- 2026-10-26: Added humanize (random timing and velocity), legato (extend toward the next note with an adjustable gap) and fixed note length to the piano-roll MIDI Tools panel. Each tool applies to the open clip as one undo step
 - YYYY-MM-DD: Scale conform
 - YYYY-MM-DD: Legato
 - YYYY-MM-DD: Velocity tools

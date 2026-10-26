@@ -175,6 +175,7 @@ enum CCEditMode {
 - 2026-10-24: The velocity lane is taller and now scales with the piano-roll window height, so resizing the window gives both the note grid and velocity editor more room without re-triggering auto-growth
 - 2026-10-24: Added a selectable CC lane below the velocity lane. Choose Mod Wheel, Breath, Volume, Pan, Expression, Sustain, Resonance or Cutoff, then click/drag to draw control points. Other controllers and notes are preserved, and each drag is one undo step
 - 2026-10-24: The velocity lane can now be hidden with a Show velocity lane toggle, matching the CC lane. Hiding either lane gives the note grid more room, and the window remains stable
+- 2026-10-26: MIDI Tools gained humanize (timing/velocity jitter), legato (extend toward the next note with a gap) and fixed note length. The left panel is scrollable so the additional tools don't affect window sizing
 - YYYY-MM-DD: Pencil/Eraser/Select tools
 - YYYY-MM-DD: Note drag + resize
 - YYYY-MM-DD: Velocity lane

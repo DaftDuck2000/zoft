@@ -584,6 +584,68 @@ fn scale_midi_velocities(notes: &mut [PianoRollNote], factor: f32) {
     }
 }
 
+/// Small deterministic LCG used by the humanize tool.
+fn humanize_random(state: &mut u64) -> f32 {
+    *state = state
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
+    ((*state >> 40) as f32) / ((1u64 << 24) as f32)
+}
+
+/// Add random timing and velocity offsets while preserving note durations.
+fn humanize_midi_notes(
+    notes: &mut [PianoRollNote],
+    timing_ticks: u64,
+    velocity_amount: u8,
+    seed: u64,
+) {
+    if timing_ticks == 0 && velocity_amount == 0 {
+        return;
+    }
+    let mut state = seed;
+    for note in notes {
+        let duration = note.end.saturating_sub(note.start).max(1);
+        if timing_ticks > 0 {
+            let jitter = humanize_random(&mut state) * 2.0 - 1.0;
+            let offset = (jitter * timing_ticks as f32).round() as i64;
+            let start = (note.start as i64 + offset).max(0) as u64;
+            note.start = start;
+            note.end = start.saturating_add(duration);
+        }
+        if velocity_amount > 0 {
+            let jitter = humanize_random(&mut state) * 2.0 - 1.0;
+            let offset = (jitter * velocity_amount as f32).round() as i32;
+            note.velocity = (note.velocity as i32 + offset).clamp(1, 127) as u8;
+        }
+    }
+}
+
+/// Extend each note toward the next note start, leaving an optional gap.
+fn legato_midi_notes(notes: &mut [PianoRollNote], gap_ticks: u64) {
+    let starts: Vec<u64> = notes.iter().map(|note| note.start).collect();
+    for note in notes.iter_mut() {
+        if let Some(next) = starts
+            .iter()
+            .copied()
+            .filter(|start| *start > note.start)
+            .min()
+        {
+            let target = next.saturating_sub(gap_ticks);
+            if target > note.start {
+                note.end = note.end.max(target);
+            }
+        }
+    }
+}
+
+/// Give every note the same duration.
+fn set_midi_note_length(notes: &mut [PianoRollNote], length: u64) {
+    let length = length.max(1);
+    for note in notes {
+        note.end = note.start.saturating_add(length);
+    }
+}
+
 /// Snap resolution in ticks used for MIDI clip trimming in the arrange view.
 fn timeline_snap_ticks(snap: SnapMode, beats_per_bar: u64) -> u64 {
     match snap {
@@ -1471,6 +1533,10 @@ struct MidiToolsState {
     quantize_strength: f32,
     transpose: i32,
     velocity_factor: f32,
+    humanize_timing: f32,
+    humanize_velocity: f32,
+    legato_gap: f32,
+    note_length: f32,
 }
 
 impl Default for MidiToolsState {
@@ -1480,6 +1546,10 @@ impl Default for MidiToolsState {
             quantize_strength: 1.0,
             transpose: 0,
             velocity_factor: 1.0,
+            humanize_timing: 0.0,
+            humanize_velocity: 0.0,
+            legato_gap: 0.0,
+            note_length: 480.0,
         }
     }
 }
@@ -6163,6 +6233,9 @@ impl AppUI {
         let mut do_quantize = false;
         let mut do_transpose = false;
         let mut do_velocity = false;
+        let mut do_humanize = false;
+        let mut do_legato = false;
+        let mut do_note_length = false;
         let mut cc_undo_before: Option<MidiClip> = None;
 
         egui::Window::new("Piano Roll")
@@ -6244,6 +6317,9 @@ impl AppUI {
                 ui.horizontal_top(|ui| {
                     ui.vertical(|ui| {
                         ui.set_width(210.0);
+                        egui::ScrollArea::vertical()
+                            .max_height(editor_height)
+                            .show(ui, |ui| {
                         ui.heading("MIDI Tools");
                         ui.weak("Applies to this clip.");
                         ui.separator();
@@ -6344,6 +6420,59 @@ impl AppUI {
                         }
 
                         ui.separator();
+                        ui.heading("Humanize");
+                        ui.add(
+                            egui::Slider::new(
+                                &mut window.tools.humanize_timing,
+                                0.0..=240.0,
+                            )
+                            .text("Timing")
+                            .suffix(" ticks"),
+                        );
+                        ui.add(
+                            egui::Slider::new(
+                                &mut window.tools.humanize_velocity,
+                                0.0..=64.0,
+                            )
+                            .text("Velocity"),
+                        );
+                        if ui
+                            .add_enabled(
+                                window.tools.humanize_timing > 0.0
+                                    || window.tools.humanize_velocity > 0.0,
+                                egui::Button::new("Humanize"),
+                            )
+                            .clicked()
+                        {
+                            do_humanize = true;
+                        }
+
+                        ui.separator();
+                        ui.heading("Legato");
+                        ui.add(
+                            egui::Slider::new(&mut window.tools.legato_gap, 0.0..=240.0)
+                                .text("Gap")
+                                .suffix(" ticks"),
+                        );
+                        if ui.button("Legato").clicked() {
+                            do_legato = true;
+                        }
+
+                        ui.separator();
+                        ui.heading("Note Length");
+                        ui.add(
+                            egui::Slider::new(
+                                &mut window.tools.note_length,
+                                30.0..=3840.0,
+                            )
+                            .text("Length")
+                            .suffix(" ticks"),
+                        );
+                        if ui.button("Set Length").clicked() {
+                            do_note_length = true;
+                        }
+
+                        ui.separator();
                         ui.heading("Controllers");
                         ui.checkbox(&mut window.show_cc_lane, "Show CC lane");
                         if window.show_cc_lane {
@@ -6367,6 +6496,7 @@ impl AppUI {
                                 });
                             });
                         }
+                        });
                     });
                     ui.separator();
                     ui.vertical(|ui| {
@@ -7347,6 +7477,38 @@ impl AppUI {
                 vec![window.clip_id],
                 "Scale MIDI velocity",
                 |notes| scale_midi_velocities(notes, factor),
+            );
+            window.initialized = false;
+        }
+        if do_humanize {
+            let timing = window.tools.humanize_timing.round().max(0.0) as u64;
+            let velocity = window.tools.humanize_velocity.round().clamp(0.0, 127.0) as u8;
+            let seed = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos() as u64)
+                .unwrap_or(1);
+            self.apply_midi_note_edit_to_clips(
+                vec![window.clip_id],
+                "Humanize MIDI",
+                |notes| humanize_midi_notes(notes, timing, velocity, seed),
+            );
+            window.initialized = false;
+        }
+        if do_legato {
+            let gap = window.tools.legato_gap.round().max(0.0) as u64;
+            self.apply_midi_note_edit_to_clips(
+                vec![window.clip_id],
+                "Legato MIDI",
+                |notes| legato_midi_notes(notes, gap),
+            );
+            window.initialized = false;
+        }
+        if do_note_length {
+            let length = window.tools.note_length.round().max(1.0) as u64;
+            self.apply_midi_note_edit_to_clips(
+                vec![window.clip_id],
+                "Set MIDI note length",
+                |notes| set_midi_note_length(notes, length),
             );
             window.initialized = false;
         }
@@ -11660,9 +11822,10 @@ mod tests {
         fit_piano_roll_view, piano_roll_new_note_length, midi_trim_end, midi_trim_start,
         split_midi_clip_at_tick, quantize_midi_notes, scale_midi_velocities,
         transpose_midi_notes, velocity_color, notes_in_marquee, midi_clip_cc_points,
-        write_midi_cc_points, MidiCcPoint, project_from_template, ClipShape, ClipSourceState,
-        EditAction, FilterKind, MonitorMode, PianoRollNote, PianoRollSnap, PianoRollWindow,
-        SnapMode, Template, TrackShape,
+        write_midi_cc_points, humanize_midi_notes, legato_midi_notes, set_midi_note_length,
+        MidiCcPoint, project_from_template, ClipShape, ClipSourceState, EditAction, FilterKind,
+        MonitorMode, PianoRollNote, PianoRollSnap, PianoRollWindow, SnapMode, Template,
+        TrackShape,
     };
     use daw_core::audio_pool::AudioFileRef;
     use daw_core::clip::{
@@ -12718,6 +12881,98 @@ mod tests {
         assert_eq!(notes[0].velocity, 127);
         scale_midi_velocities(&mut notes, 0.0);
         assert_eq!(notes[0].velocity, 1);
+    }
+
+    #[test]
+    fn humanize_preserves_durations_and_stays_in_range() {
+        let mut notes = vec![
+            PianoRollNote {
+                start: 1000,
+                end: 1480,
+                pitch: 60,
+                velocity: 100,
+                channel: 0,
+            },
+            PianoRollNote {
+                start: 2000,
+                end: 2480,
+                pitch: 64,
+                velocity: 60,
+                channel: 0,
+            },
+        ];
+        humanize_midi_notes(&mut notes, 120, 20, 42);
+        for note in &notes {
+            assert_eq!(note.end - note.start, 480);
+            assert!(note.velocity >= 1 && note.velocity <= 127);
+            assert!((note.start as i64 - 1000).abs() <= 120 || (note.start as i64 - 2000).abs() <= 120);
+        }
+    }
+
+    #[test]
+    fn legato_extends_notes_toward_the_next_start() {
+        let make = || {
+            vec![
+                PianoRollNote {
+                    start: 0,
+                    end: 240,
+                    pitch: 60,
+                    velocity: 100,
+                    channel: 0,
+                },
+                PianoRollNote {
+                    start: 480,
+                    end: 720,
+                    pitch: 62,
+                    velocity: 100,
+                    channel: 0,
+                },
+                PianoRollNote {
+                    start: 960,
+                    end: 1200,
+                    pitch: 64,
+                    velocity: 100,
+                    channel: 0,
+                },
+            ]
+        };
+
+        let mut notes = make();
+        legato_midi_notes(&mut notes, 0);
+        assert_eq!(
+            notes.iter().map(|note| note.end).collect::<Vec<_>>(),
+            vec![480, 960, 1200]
+        );
+
+        let mut notes = make();
+        legato_midi_notes(&mut notes, 120);
+        assert_eq!(
+            notes.iter().map(|note| note.end).collect::<Vec<_>>(),
+            vec![360, 840, 1200]
+        );
+    }
+
+    #[test]
+    fn set_note_length_sets_every_note_end() {
+        let mut notes = vec![
+            PianoRollNote {
+                start: 0,
+                end: 240,
+                pitch: 60,
+                velocity: 100,
+                channel: 0,
+            },
+            PianoRollNote {
+                start: 480,
+                end: 720,
+                pitch: 64,
+                velocity: 100,
+                channel: 0,
+            },
+        ];
+        set_midi_note_length(&mut notes, 360);
+        assert_eq!(notes[0].end, 360);
+        assert_eq!(notes[1].end, 840);
     }
 
     #[test]
