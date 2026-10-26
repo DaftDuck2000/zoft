@@ -18,7 +18,7 @@ Full-featured piano roll: note entry/selection/editing, velocity lanes, CC lanes
 - [~] Note editing: Drag move and resize implemented; velocity drag pending
 - [x] Note audition: Clicking a note or dragging it to a new pitch plays it
 - [~] Velocity lane: Bar graph per note with drag-to-edit, toggleable; curve tool pending
-- [~] CC lanes: One selectable controller lane with draw/edit; multiple simultaneous lanes pending
+- [~] CC lanes: One selectable controller lane (off by default) with draw/edit; multiple simultaneous lanes pending
 - [ ] Tool palette: Select, Pencil, Eraser, Mute, Scissors, Glue, Velocity, Line
 - [x] MIDI Tools side panel: quantize, transpose and velocity scaling for the open clip
 - [x] Zoom: Ctrl+wheel and +/− buttons; Fit resets the view
@@ -177,6 +177,7 @@ enum CCEditMode {
 - 2026-10-24: The velocity lane can now be hidden with a Show velocity lane toggle, matching the CC lane. Hiding either lane gives the note grid more room, and the window remains stable
 - 2026-10-26: MIDI Tools gained humanize (timing/velocity jitter), legato (extend toward the next note with a gap) and fixed note length. The left panel is scrollable so the additional tools don't affect window sizing
 - 2026-10-26: Decluttered the MIDI Tools side panel with a tool selector (Quantize, Transpose, Humanize, Legato, Note Length, Velocity, CC Lane). Only the selected tool's controls are shown at a time
+- 2026-10-26: Quantize is the default selected tool and the CC lane starts hidden, so the piano roll opens with a clean grid and one focused tool panel
 - YYYY-MM-DD: Pencil/Eraser/Select tools
 - YYYY-MM-DD: Note drag + resize
 - YYYY-MM-DD: Velocity lane

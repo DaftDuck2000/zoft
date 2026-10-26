@@ -1508,7 +1508,7 @@ impl PianoRollWindow {
             velocity_drag_before: None,
             cc_controller: 1,
             show_velocity_lane: true,
-            show_cc_lane: true,
+            show_cc_lane: false,
             cc_drag_before: None,
         }
     }
