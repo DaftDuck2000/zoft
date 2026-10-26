@@ -10469,6 +10469,28 @@ impl eframe::App for AppUI {
                                     "{:.0}%",
                                     after.volume * 100.0
                                 ));
+                                ui.label("Pan");
+                                let mut pan = after.pan.to_linear();
+                                if add_sized_wheel_slider(
+                                    ui,
+                                    egui::vec2(64.0, 18.0),
+                                    &mut pan,
+                                    -1.0..=1.0,
+                                    |slider| slider.show_value(false),
+                                )
+                                .on_hover_text("Track pan")
+                                .changed()
+                                {
+                                    after.pan = PanLaw::from_linear(pan);
+                                }
+                                let pan_text = if pan.abs() < 0.005 {
+                                    "C".to_string()
+                                } else if pan < 0.0 {
+                                    format!("L{:.0}", -pan * 100.0)
+                                } else {
+                                    format!("R{:.0}", pan * 100.0)
+                                };
+                                ui.label(pan_text);
                                 if ui
                                     .small_button("×")
                                     .on_hover_text("Remove track")
@@ -10513,12 +10535,14 @@ impl eframe::App for AppUI {
                         egui::Stroke::new(1.0_f32, egui::Color32::from_gray(50)),
                     );
                     if after != before {
-                        let volume_only = after.mute == before.mute
+                        let slider_only = after.mute == before.mute
                             && after.solo == before.solo
                             && after.record_arm == before.record_arm
                             && after.monitor_mode == before.monitor_mode
-                            && (after.volume - before.volume).abs() > f32::EPSILON;
-                        track_changes.push((*track_id, before, after, volume_only));
+                            && ((after.volume - before.volume).abs()
+                                > f32::EPSILON
+                                || after.pan != before.pan);
+                        track_changes.push((*track_id, before, after, slider_only));
                     }
                 }
             }
@@ -10529,8 +10553,10 @@ impl eframe::App for AppUI {
                 self.push_undo(EditAction::TrackState { track_id, from, to }, merge);
                 self.after_edit();
                 if merge {
-                    // Defer the mixer reload until the pointer is released.
-                    self.needs_audio_refresh = true;
+                    // Update fader/pan gains on the live mixer without
+                    // reloading clips from disk.
+                    let tracks = self.collect_playable_tracks();
+                    self.engine.set_playback_tracks(tracks);
                 } else {
                     self.refresh_playback_if_playing();
                 }

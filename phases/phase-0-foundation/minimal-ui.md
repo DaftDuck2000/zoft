@@ -47,7 +47,7 @@ struct UiState {
 **Track List** (left panel)
 - Drag to reorder
 - Right-click: add audio/MIDI/instrument/bus track
-- Track header: color swatch, name, M/S/R/Arm buttons, volume fader (mini)
+- Track header: color swatch, name, M/S/R/Arm buttons, volume and pan faders (mini)
 
 **Transport Bar** (top)
 - Buttons: ◄◄ | ►/❚❚ | ►► | ● (record)
@@ -106,7 +106,7 @@ struct UiState {
 - [ ] **Markers UI**: Flag icons on ruler, click to jump
 - [ ] **Track reordering**: Drag tracks to reorder in track list
 - [ ] **Track context menu**: Right-click to add/remove/duplicate tracks
-- [✓] **Track header controls**: M/S/R, monitor mode, volume fader; pan available in the FX Rack
+- [✓] **Track header controls**: M/S/R, monitor mode, volume and pan faders
 - [~] **Transport bar enhancements**: Tap tempo and Bars/Time ruler dropdown done; ◄◄ | ►► buttons not yet
 - [✓] **Metronome toggle**: Click toggle; count-in not yet
 - [ ] **Dark/light theme toggle**: User preference (dark default only)

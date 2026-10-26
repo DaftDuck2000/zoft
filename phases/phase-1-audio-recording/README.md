@@ -54,7 +54,7 @@
 **Playback (sound output)** - Pulled forward from M1 milestone
 - `daw-engine/src/playback.rs`: real-time mixer (clip gain, track mute/solo/volume, fades, sample-rate conversion) feeding the CPAL output callback
 - Engine API: `set_playback_clips`, `clear_playback`, `playback_position_frames`
-- Track list has per-track volume sliders and M/S buttons; mute, solo and volume are applied by the mixer and recorded in undo history
+- Track list has per-track volume and pan sliders plus M/S buttons; mute, solo, volume and pan are applied by the mixer and recorded in undo history
 - UI loads the project's clips on play; the playhead follows the engine's sample clock
 - Playback refreshes (edits, undo/redo, loop changes) build the next mixer on a background worker, so the UI and playhead never block on WAV I/O; stale results are discarded, and the old mixer is dropped outside the audio-callback lock
 - Playhead and timeline may extend past the last clip; the view auto-follows during playback
