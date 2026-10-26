@@ -19,7 +19,7 @@ MIDI transformation tools: quantize, humanize, transpose, scale conform, legato,
 - [x] Legato: Extend notes to next note start (with gap option)
 - [x] Velocity Tools: Scale, compress, expand, curve and randomize
 - [x] Note Length: Set fixed length; scale/legato/staccato variants pending
-- [~] Randomize: Pitch, velocity and timing implemented; note density pending
+- [x] Randomize: Pitch, velocity, timing and density
 - [~] Split Notes: Split at the playhead implemented; pitch/velocity/channel split pending
 - [x] Join Notes: Adjacent same-pitch notes with an adjustable gap
 - [x] Mirror/Reverse: Time reverse, pitch mirror
@@ -125,7 +125,7 @@ fn velocity_curve(events: &mut [MidiEvent], params: &ToolParams) {
 - [x] Scale conform maps notes correctly
 - [x] Legato creates smooth transitions
 - [x] Velocity shaping compresses, expands, curves and randomizes dynamics
-- [x] Randomize varies pitch, velocity and timing without changing durations
+- [x] Randomize varies pitch, velocity, timing and density without changing remaining note durations
 - [x] Join merges adjacent same-pitch notes within the chosen gap
 - [x] Split at the playhead divides every note crossing it
 - [x] Reverse and mirror transform note positions and pitches
@@ -141,5 +141,6 @@ fn velocity_curve(events: &mut [MidiEvent], params: &ToolParams) {
 - 2026-10-26: Added a Transform tool with time reverse, pitch mirror around an adjustable center note, and seeded randomize for pitch, velocity and timing. Note durations are preserved and each action is one undo step
 - 2026-10-26: Added quantize swing (0-100%, second grid position moves up to two thirds through the pair) and velocity shaping modes: scale, compress toward 64, expand away from 64, gamma curve and seeded randomize
 - 2026-10-26: Added a Notes tool with join (same pitch/channel, adjustable gap) and split at the playhead. The piano roll now draws a draggable project playhead with a bar/beat ruler, and split divides every note crossing it
+- 2026-10-26: Randomize gained a Thin control that removes a seeded percentage of notes, completing the density part of the tool
 - YYYY-MM-DD: Split/Join/Mirror
 - YYYY-MM-DD: Tool panel UI + presets

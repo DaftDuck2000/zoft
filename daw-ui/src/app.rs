@@ -835,6 +835,17 @@ fn split_midi_notes_at_tick(notes: &mut Vec<PianoRollNote>, tick: u64) {
     notes.sort_by_key(|note| (note.start, note.pitch, note.channel));
 }
 
+/// Remove notes randomly while preserving the rest. `keep` is the probability
+/// that a note survives, from 0 to 1.
+fn thin_midi_notes(notes: &mut Vec<PianoRollNote>, keep: f32, seed: u64) {
+    let keep = keep.clamp(0.0, 1.0);
+    if keep >= 1.0 {
+        return;
+    }
+    let mut state = seed;
+    notes.retain(|_| humanize_random(&mut state) < keep);
+}
+
 /// Snap resolution in ticks used for MIDI clip trimming in the arrange view.
 fn timeline_snap_ticks(snap: SnapMode, beats_per_bar: u64) -> u64 {
     match snap {
@@ -1887,6 +1898,7 @@ struct MidiToolsState {
     randomize_pitch: f32,
     randomize_velocity: f32,
     randomize_timing: f32,
+    randomize_density: f32,
     mirror_center: u8,
 }
 
@@ -1913,6 +1925,7 @@ impl Default for MidiToolsState {
             randomize_pitch: 0.0,
             randomize_velocity: 0.0,
             randomize_timing: 0.0,
+            randomize_density: 0.0,
             mirror_center: 60,
         }
     }
@@ -6969,7 +6982,7 @@ impl AppUI {
                                 }
                             }
                             MidiToolTab::Transform => {
-                                ui.weak("Reverse, mirror or randomize notes.");
+                                ui.weak("Reverse, mirror, thin or randomize notes.");
                                 if ui.button("Reverse").clicked() {
                                     do_reverse = true;
                                 }
@@ -7014,11 +7027,21 @@ impl AppUI {
                                     .suffix(" ticks")
                                     .step_by(1.0),
                                 );
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut window.tools.randomize_density,
+                                        0.0..=100.0,
+                                    )
+                                    .text("Thin")
+                                    .suffix("%")
+                                    .step_by(1.0),
+                                );
                                 if ui
                                     .add_enabled(
                                         window.tools.randomize_pitch > 0.0
                                             || window.tools.randomize_velocity > 0.0
-                                            || window.tools.randomize_timing > 0.0,
+                                            || window.tools.randomize_timing > 0.0
+                                            || window.tools.randomize_density > 0.0,
                                         egui::Button::new("Randomize"),
                                     )
                                     .clicked()
@@ -8435,6 +8458,7 @@ impl AppUI {
             let pitch = window.tools.randomize_pitch.round().clamp(0.0, 12.0) as u8;
             let velocity = window.tools.randomize_velocity.round().clamp(0.0, 64.0) as u8;
             let timing = window.tools.randomize_timing.round().clamp(0.0, 240.0) as u64;
+            let keep = 1.0 - window.tools.randomize_density.clamp(0.0, 100.0) / 100.0;
             let seed = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|duration| duration.as_nanos() as u64)
@@ -8442,7 +8466,14 @@ impl AppUI {
             self.apply_midi_note_edit_to_clips(
                 vec![window.clip_id],
                 "Randomize MIDI",
-                |notes| randomize_midi_notes(notes, pitch, velocity, timing, seed),
+                |notes| {
+                    randomize_midi_notes(notes, pitch, velocity, timing, seed);
+                    thin_midi_notes(
+                        notes,
+                        keep,
+                        seed.wrapping_add(0x9e37_79b9_7f4a_7c15),
+                    );
+                },
             );
             window.initialized = false;
         }
@@ -12759,7 +12790,7 @@ mod tests {
         transpose_midi_notes, scale_conform_midi_notes, velocity_color, notes_in_marquee,
         midi_clip_cc_points, write_midi_cc_points, humanize_midi_notes, legato_midi_notes,
         set_midi_note_length, reverse_midi_notes, mirror_midi_notes, randomize_midi_notes,
-        join_midi_notes, split_midi_notes_at_tick,
+        join_midi_notes, split_midi_notes_at_tick, thin_midi_notes,
         MidiCcPoint, project_from_template, ClipShape, ClipSourceState,
         EditAction, FilterKind, MonitorMode, PianoRollNote, PianoRollSnap, PianoRollWindow,
         SnapMode, Template, TrackShape,
@@ -14157,6 +14188,39 @@ mod tests {
         let before = notes.clone();
         split_midi_notes_at_tick(&mut notes, 960);
         assert_eq!(notes, before);
+    }
+
+    #[test]
+    fn thin_midi_notes_keeps_a_seeded_subset() {
+        let make = || {
+            (0..8)
+                .map(|index| PianoRollNote {
+                    start: index * 240,
+                    end: index * 240 + 120,
+                    pitch: 60 + index as u8,
+                    velocity: 100,
+                    channel: 0,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let mut notes = make();
+        thin_midi_notes(&mut notes, 1.0, 7);
+        assert_eq!(notes, make());
+
+        let mut notes = make();
+        thin_midi_notes(&mut notes, 0.0, 7);
+        assert!(notes.is_empty());
+
+        let mut first = make();
+        thin_midi_notes(&mut first, 0.5, 42);
+        let mut second = make();
+        thin_midi_notes(&mut second, 0.5, 42);
+        assert_eq!(first, second);
+        let original = make();
+        assert!(first
+            .iter()
+            .all(|note| original.iter().any(|source| source == note)));
     }
 
     #[test]
