@@ -19,10 +19,10 @@ MIDI transformation tools: quantize, humanize, transpose, scale conform, legato,
 - [x] Legato: Extend notes to next note start (with gap option)
 - [~] Velocity Tools: Scale implemented; compress, expand, curve, randomize pending
 - [x] Note Length: Set fixed length; scale/legato/staccato variants pending
-- [ ] Randomize: Pitch, velocity, timing, note density
+- [~] Randomize: Pitch, velocity and timing implemented; note density pending
 - [ ] Split Notes: At pitch, at velocity, at channel
 - [ ] Join Notes: Adjacent same-pitch notes
-- [ ] Mirror/Reverse: Time reverse, pitch mirror
+- [x] Mirror/Reverse: Time reverse, pitch mirror
 - [x] Batch apply: To the current MIDI clip selection
 
 ## Technical Details
@@ -124,6 +124,8 @@ fn velocity_curve(events: &mut [MidiEvent], params: &ToolParams) {
 - [x] Transpose preserves chord quality
 - [x] Scale conform maps notes correctly
 - [x] Legato creates smooth transitions
+- [x] Randomize varies pitch, velocity and timing without changing durations
+- [x] Reverse and mirror transform note positions and pitches
 - [~] Velocity curve shapes dynamics
 - [ ] All tools support preview
 - [x] Batch apply to selection/clip/track/project
@@ -134,7 +136,7 @@ fn velocity_curve(events: &mut [MidiEvent], params: &ToolParams) {
 - 2026-10-24: MIDI Tools panel inside the piano roll. The left side of the piano-roll window now provides quantize (Bar/Beat/1/8/1/16/1/32/1/8T/1/16T, 0-100% strength), transpose (±24 semitones and octave buttons) and velocity scaling (0-200%). Tools apply to the clip open in the piano roll as one undo step; trimmed notes are included
 - 2026-10-26: Added humanize (random timing and velocity), legato (extend toward the next note with an adjustable gap) and fixed note length to the piano-roll MIDI Tools panel. Each tool applies to the open clip as one undo step
 - 2026-10-26: Added Scale Conform with root note and major/minor/mode/pentatonic/blues scales. Notes move to the nearest scale degree while preserving their register
+- 2026-10-26: Added a Transform tool with time reverse, pitch mirror around an adjustable center note, and seeded randomize for pitch, velocity and timing. Note durations are preserved and each action is one undo step
 - YYYY-MM-DD: Velocity tools
-- YYYY-MM-DD: Randomize
 - YYYY-MM-DD: Split/Join/Mirror
 - YYYY-MM-DD: Tool panel UI + presets

@@ -178,6 +178,7 @@ enum CCEditMode {
 - 2026-10-26: MIDI Tools gained humanize (timing/velocity jitter), legato (extend toward the next note with a gap) and fixed note length. The left panel is scrollable so the additional tools don't affect window sizing
 - 2026-10-26: Decluttered the MIDI Tools side panel. A Tools… menu with checkboxes lets the user show any combination of tools; Quantize is shown by default and other tools stay hidden until checked
 - 2026-10-26: Added Scale Conform with root and scale selection; notes snap to the nearest scale degree while preserving register
+- 2026-10-26: Added a Transform tool for time reverse, pitch mirror and seeded randomize of pitch, velocity and timing
 - 2026-10-26: Quantize is the default selected tool and the CC lane starts hidden, so the piano roll opens with a clean grid and one focused tool panel
 - YYYY-MM-DD: Pencil/Eraser/Select tools
 - YYYY-MM-DD: Note drag + resize

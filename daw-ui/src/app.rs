@@ -678,6 +678,61 @@ fn set_midi_note_length(notes: &mut [PianoRollNote], length: u64) {
     }
 }
 
+/// Reverse note positions within a span, preserving each note's duration.
+fn reverse_midi_notes(notes: &mut [PianoRollNote], span_ticks: u64) {
+    let span = span_ticks.max(1);
+    for note in notes {
+        let duration = note.end.saturating_sub(note.start).max(1);
+        let start = span.saturating_sub(note.end);
+        note.start = start;
+        note.end = (start.saturating_add(duration))
+            .min(span)
+            .max(start + 1);
+    }
+}
+
+/// Reflect pitches around a center note.
+fn mirror_midi_notes(notes: &mut [PianoRollNote], center: u8) {
+    let center = center as i16;
+    for note in notes {
+        note.pitch = (2 * center - note.pitch as i16).clamp(0, 127) as u8;
+    }
+}
+
+/// Randomize pitch, velocity and timing while preserving note durations.
+fn randomize_midi_notes(
+    notes: &mut [PianoRollNote],
+    pitch_amount: u8,
+    velocity_amount: u8,
+    timing_ticks: u64,
+    seed: u64,
+) {
+    if pitch_amount == 0 && velocity_amount == 0 && timing_ticks == 0 {
+        return;
+    }
+    let mut state = seed;
+    for note in notes {
+        let duration = note.end.saturating_sub(note.start).max(1);
+        if pitch_amount > 0 {
+            let jitter = humanize_random(&mut state) * 2.0 - 1.0;
+            let offset = (jitter * pitch_amount as f32).round() as i16;
+            note.pitch = (note.pitch as i16 + offset).clamp(0, 127) as u8;
+        }
+        if velocity_amount > 0 {
+            let jitter = humanize_random(&mut state) * 2.0 - 1.0;
+            let offset = (jitter * velocity_amount as f32).round() as i32;
+            note.velocity = (note.velocity as i32 + offset).clamp(1, 127) as u8;
+        }
+        if timing_ticks > 0 {
+            let jitter = humanize_random(&mut state) * 2.0 - 1.0;
+            let offset = (jitter * timing_ticks as f32).round() as i64;
+            let start = (note.start as i64 + offset).max(0) as u64;
+            note.start = start;
+            note.end = start.saturating_add(duration);
+        }
+    }
+}
+
 /// Snap resolution in ticks used for MIDI clip trimming in the arrange view.
 fn timeline_snap_ticks(snap: SnapMode, beats_per_bar: u64) -> u64 {
     match snap {
@@ -1567,18 +1622,20 @@ enum MidiToolTab {
     Humanize,
     Legato,
     NoteLength,
+    Transform,
     Velocity,
     Controllers,
 }
 
 impl MidiToolTab {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::Quantize,
         Self::Transpose,
         Self::Scale,
         Self::Humanize,
         Self::Legato,
         Self::NoteLength,
+        Self::Transform,
         Self::Velocity,
         Self::Controllers,
     ];
@@ -1591,6 +1648,7 @@ impl MidiToolTab {
             Self::Humanize => "Humanize",
             Self::Legato => "Legato",
             Self::NoteLength => "Note Length",
+            Self::Transform => "Transform",
             Self::Velocity => "Velocity",
             Self::Controllers => "CC Lane",
         }
@@ -1675,6 +1733,10 @@ struct MidiToolsState {
     humanize_velocity: f32,
     legato_gap: f32,
     note_length: f32,
+    randomize_pitch: f32,
+    randomize_velocity: f32,
+    randomize_timing: f32,
+    mirror_center: u8,
 }
 
 impl Default for MidiToolsState {
@@ -1691,6 +1753,10 @@ impl Default for MidiToolsState {
             humanize_velocity: 0.0,
             legato_gap: 0.0,
             note_length: 480.0,
+            randomize_pitch: 0.0,
+            randomize_velocity: 0.0,
+            randomize_timing: 0.0,
+            mirror_center: 60,
         }
     }
 }
@@ -6378,6 +6444,9 @@ impl AppUI {
         let mut do_humanize = false;
         let mut do_legato = false;
         let mut do_note_length = false;
+        let mut do_reverse = false;
+        let mut do_mirror = false;
+        let mut do_randomize = false;
         let mut cc_undo_before: Option<MidiClip> = None;
 
         egui::Window::new("Piano Roll")
@@ -6669,6 +6738,64 @@ impl AppUI {
                                 );
                                 if ui.button("Set Length").clicked() {
                                     do_note_length = true;
+                                }
+                            }
+                            MidiToolTab::Transform => {
+                                ui.weak("Reverse, mirror or randomize notes.");
+                                if ui.button("Reverse").clicked() {
+                                    do_reverse = true;
+                                }
+                                ui.separator();
+                                let center = window.tools.mirror_center;
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut window.tools.mirror_center,
+                                        0..=127,
+                                    )
+                                    .text(format!(
+                                        "Mirror center ({})",
+                                        note_name(center)
+                                    )),
+                                );
+                                if ui.button("Mirror Pitch").clicked() {
+                                    do_mirror = true;
+                                }
+                                ui.separator();
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut window.tools.randomize_pitch,
+                                        0.0..=12.0,
+                                    )
+                                    .text("Pitch ±")
+                                    .step_by(1.0),
+                                );
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut window.tools.randomize_velocity,
+                                        0.0..=64.0,
+                                    )
+                                    .text("Velocity ±")
+                                    .step_by(1.0),
+                                );
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut window.tools.randomize_timing,
+                                        0.0..=240.0,
+                                    )
+                                    .text("Timing ±")
+                                    .suffix(" ticks")
+                                    .step_by(1.0),
+                                );
+                                if ui
+                                    .add_enabled(
+                                        window.tools.randomize_pitch > 0.0
+                                            || window.tools.randomize_velocity > 0.0
+                                            || window.tools.randomize_timing > 0.0,
+                                        egui::Button::new("Randomize"),
+                                    )
+                                    .clicked()
+                                {
+                                    do_randomize = true;
                                 }
                             }
                             MidiToolTab::Velocity => {
@@ -7762,6 +7889,39 @@ impl AppUI {
                 vec![window.clip_id],
                 "Set MIDI note length",
                 |notes| set_midi_note_length(notes, length),
+            );
+            window.initialized = false;
+        }
+        if do_reverse {
+            let span = length;
+            self.apply_midi_note_edit_to_clips(
+                vec![window.clip_id],
+                "Reverse MIDI",
+                |notes| reverse_midi_notes(notes, span),
+            );
+            window.initialized = false;
+        }
+        if do_mirror {
+            let center = window.tools.mirror_center;
+            self.apply_midi_note_edit_to_clips(
+                vec![window.clip_id],
+                "Mirror MIDI pitch",
+                |notes| mirror_midi_notes(notes, center),
+            );
+            window.initialized = false;
+        }
+        if do_randomize {
+            let pitch = window.tools.randomize_pitch.round().clamp(0.0, 12.0) as u8;
+            let velocity = window.tools.randomize_velocity.round().clamp(0.0, 64.0) as u8;
+            let timing = window.tools.randomize_timing.round().clamp(0.0, 240.0) as u64;
+            let seed = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos() as u64)
+                .unwrap_or(1);
+            self.apply_midi_note_edit_to_clips(
+                vec![window.clip_id],
+                "Randomize MIDI",
+                |notes| randomize_midi_notes(notes, pitch, velocity, timing, seed),
             );
             window.initialized = false;
         }
@@ -12076,7 +12236,8 @@ mod tests {
         split_midi_clip_at_tick, quantize_midi_notes, scale_midi_velocities,
         transpose_midi_notes, scale_conform_midi_notes, velocity_color, notes_in_marquee,
         midi_clip_cc_points, write_midi_cc_points, humanize_midi_notes, legato_midi_notes,
-        set_midi_note_length, MidiCcPoint, project_from_template, ClipShape, ClipSourceState,
+        set_midi_note_length, reverse_midi_notes, mirror_midi_notes, randomize_midi_notes,
+        MidiCcPoint, project_from_template, ClipShape, ClipSourceState,
         EditAction, FilterKind, MonitorMode, PianoRollNote, PianoRollSnap, PianoRollWindow,
         SnapMode, Template, TrackShape,
     };
@@ -13271,6 +13432,128 @@ mod tests {
         set_midi_note_length(&mut notes, 360);
         assert_eq!(notes[0].end, 360);
         assert_eq!(notes[1].end, 840);
+    }
+
+    #[test]
+    fn reverse_midi_notes_flips_positions_and_keeps_durations() {
+        let mut notes = vec![
+            PianoRollNote {
+                start: 0,
+                end: 480,
+                pitch: 60,
+                velocity: 100,
+                channel: 0,
+            },
+            PianoRollNote {
+                start: 960,
+                end: 1440,
+                pitch: 64,
+                velocity: 100,
+                channel: 0,
+            },
+            PianoRollNote {
+                start: 1920,
+                end: 2400,
+                pitch: 67,
+                velocity: 100,
+                channel: 0,
+            },
+        ];
+        reverse_midi_notes(&mut notes, 2400);
+        assert_eq!(
+            notes
+                .iter()
+                .map(|note| (note.start, note.end, note.pitch))
+                .collect::<Vec<_>>(),
+            vec![(1920, 2400, 60), (960, 1440, 64), (0, 480, 67)]
+        );
+    }
+
+    #[test]
+    fn mirror_midi_notes_reflects_around_center_and_clamps() {
+        let mut notes = vec![
+            PianoRollNote {
+                start: 0,
+                end: 240,
+                pitch: 60,
+                velocity: 100,
+                channel: 0,
+            },
+            PianoRollNote {
+                start: 240,
+                end: 480,
+                pitch: 64,
+                velocity: 100,
+                channel: 0,
+            },
+            PianoRollNote {
+                start: 480,
+                end: 720,
+                pitch: 72,
+                velocity: 100,
+                channel: 0,
+            },
+            PianoRollNote {
+                start: 720,
+                end: 960,
+                pitch: 0,
+                velocity: 100,
+                channel: 0,
+            },
+        ];
+        mirror_midi_notes(&mut notes, 60);
+        assert_eq!(
+            notes.iter().map(|note| note.pitch).collect::<Vec<_>>(),
+            vec![60, 56, 48, 120]
+        );
+    }
+
+    #[test]
+    fn randomize_midi_notes_is_seeded_and_stays_in_range() {
+        let make = || {
+            vec![
+                PianoRollNote {
+                    start: 0,
+                    end: 240,
+                    pitch: 60,
+                    velocity: 100,
+                    channel: 0,
+                },
+                PianoRollNote {
+                    start: 480,
+                    end: 720,
+                    pitch: 64,
+                    velocity: 90,
+                    channel: 0,
+                },
+                PianoRollNote {
+                    start: 960,
+                    end: 1200,
+                    pitch: 67,
+                    velocity: 80,
+                    channel: 0,
+                },
+            ]
+        };
+
+        let mut first = make();
+        randomize_midi_notes(&mut first, 2, 10, 60, 99);
+        let mut second = make();
+        randomize_midi_notes(&mut second, 2, 10, 60, 99);
+        assert_eq!(first, second);
+
+        for (index, note) in first.iter().enumerate() {
+            assert_eq!(note.end - note.start, 240);
+            let original = &make()[index];
+            assert!((note.pitch as i16 - original.pitch as i16).abs() <= 2);
+            assert!(
+                (note.velocity as i16 - original.velocity as i16).abs() <= 10
+            );
+            assert!(
+                (note.start as i64 - original.start as i64).abs() <= 60
+            );
+            assert!(note.velocity >= 1 && note.velocity <= 127);
+        }
     }
 
     #[test]
