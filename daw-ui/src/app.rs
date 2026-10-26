@@ -846,8 +846,10 @@ fn thin_midi_notes(notes: &mut Vec<PianoRollNote>, keep: f32, seed: u64) {
     notes.retain(|_| humanize_random(&mut state) < keep);
 }
 
-/// Build the dimmed notes from other MIDI clips on the same track, mapped into
-/// the current clip's content coordinates.
+/// Build the dimmed notes from other MIDI clips in the project, mapped into the
+/// current clip's content coordinates. This mirrors FL Studio's ghost channels
+/// and out-of-pattern ghost notes: other instruments/tracks are visible as
+/// timing references while editing.
 fn ghost_notes_for_clip(
     project: &Project,
     clip_id: ClipId,
@@ -856,41 +858,38 @@ fn ghost_notes_for_clip(
     let Some(clip) = project.midi_clips.get(clip_id) else {
         return Vec::new();
     };
-    let Some(track) = project.track_order.iter().find_map(|id| {
-        project
-            .tracks
-            .get(id)
-            .filter(|track| track.midi_clips.contains(&clip_id))
-    }) else {
-        return Vec::new();
-    };
     let mut ghosts = Vec::new();
-    for other_id in &track.midi_clips {
-        if *other_id == clip_id {
-            continue;
-        }
-        let Some(other) = project.midi_clips.get(*other_id) else {
+    for track_id in &project.track_order {
+        let Some(track) = project.tracks.get(track_id) else {
             continue;
         };
-        for note in midi_clip_content_notes(other) {
-            let timeline_tick = other.timeline_position.tick as i64
-                + note.start as i64
-                - other.content_offset as i64;
-            let content_tick = timeline_tick
-                - clip.timeline_position.tick as i64
-                + clip.content_offset as i64;
-            let duration = note.end.saturating_sub(note.start).max(1);
-            let end_tick = content_tick + duration as i64;
-            if end_tick <= 0 || content_tick >= length as i64 {
+        for other_id in &track.midi_clips {
+            if *other_id == clip_id {
                 continue;
             }
-            let start = content_tick.max(0) as u64;
-            let end = end_tick.max(start as i64 + 1) as u64;
-            ghosts.push(PianoRollNote {
-                start,
-                end,
-                ..note
-            });
+            let Some(other) = project.midi_clips.get(*other_id) else {
+                continue;
+            };
+            for note in midi_clip_content_notes(other) {
+                let timeline_tick = other.timeline_position.tick as i64
+                    + note.start as i64
+                    - other.content_offset as i64;
+                let content_tick = timeline_tick
+                    - clip.timeline_position.tick as i64
+                    + clip.content_offset as i64;
+                let duration = note.end.saturating_sub(note.start).max(1);
+                let end_tick = content_tick + duration as i64;
+                if end_tick <= 0 || content_tick >= length as i64 {
+                    continue;
+                }
+                let start = content_tick.max(0) as u64;
+                let end = end_tick.max(start as i64 + 1) as u64;
+                ghosts.push(PianoRollNote {
+                    start,
+                    end,
+                    ..note
+                });
+            }
         }
     }
     ghosts
@@ -6708,7 +6707,7 @@ impl AppUI {
                     ));
                     ui.checkbox(&mut window.show_ghost_notes, "Ghosts")
                         .on_hover_text(
-                            "Show notes from other clips on this track",
+                            "Show notes from other tracks/clips as timing references",
                         );
                     ui.separator();
                     ui.label("Snap:");
@@ -14290,7 +14289,7 @@ mod tests {
     }
 
     #[test]
-    fn ghost_notes_map_same_track_clips_into_content_coordinates() {
+    fn ghost_notes_include_other_tracks_and_filter_outside_clip() {
         let mut project = Project::new("Ghosts");
         let mut track = daw_core::track::Track::new_midi("Ghost track");
         let mut current = MidiClip::new(TimelinePos::new(960, 0), 1920);
@@ -14306,20 +14305,33 @@ mod tests {
 
         let mut different_track =
             daw_core::track::Track::new_midi("Different track");
-        let mut hidden = MidiClip::new(TimelinePos::default(), 1920);
-        hidden.add_event(MidiEvent::note_on(1200, 0, 67, 100));
-        hidden.add_event(MidiEvent::note_off(1440, 0, 67, 0));
-        let hidden_id = project.midi_clips.insert(hidden);
-        different_track.add_midi_clip(hidden_id);
+        let mut other_track_clip = MidiClip::new(TimelinePos::default(), 1920);
+        other_track_clip.add_event(MidiEvent::note_on(1200, 0, 67, 100));
+        other_track_clip.add_event(MidiEvent::note_off(1440, 0, 67, 0));
+        let other_track_id = project.midi_clips.insert(other_track_clip);
+        different_track.add_midi_clip(other_track_id);
+
+        let mut far_track = daw_core::track::Track::new_midi("Far track");
+        let mut far_clip = MidiClip::new(TimelinePos::default(), 1920);
+        far_clip.add_event(MidiEvent::note_on(5000, 0, 72, 100));
+        far_clip.add_event(MidiEvent::note_off(5240, 0, 72, 0));
+        let far_id = project.midi_clips.insert(far_clip);
+        far_track.add_midi_clip(far_id);
 
         project.add_track(track);
         project.add_track(different_track);
+        project.add_track(far_track);
 
-        let ghosts = ghost_notes_for_clip(&project, current_id, 1920);
-        assert_eq!(ghosts.len(), 1);
+        let mut ghosts = ghost_notes_for_clip(&project, current_id, 1920);
+        ghosts.sort_by_key(|note| note.pitch);
+        assert_eq!(ghosts.len(), 2);
         assert_eq!(
             (ghosts[0].start, ghosts[0].end, ghosts[0].pitch),
             (720, 960, 60)
+        );
+        assert_eq!(
+            (ghosts[1].start, ghosts[1].end, ghosts[1].pitch),
+            (720, 960, 67)
         );
     }
 
