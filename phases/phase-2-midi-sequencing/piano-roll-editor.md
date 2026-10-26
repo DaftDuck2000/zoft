@@ -21,7 +21,7 @@ Full-featured piano roll: note entry/selection/editing, velocity lanes, CC lanes
 - [~] CC lanes: One selectable controller lane (off by default) with draw/edit; multiple simultaneous lanes pending
 - [ ] Tool palette: Select, Pencil, Eraser, Mute, Scissors, Glue, Velocity, Line
 - [x] MIDI Tools side panel: quantize, transpose, scale, velocity, note join/split and transform tools for the open clip
-- [x] Playhead: Project playhead line with split-notes-at-playhead action
+- [x] Playhead: Bar/beat ruler, draggable project playhead line and split-notes-at-playhead action
 - [x] Zoom: Ctrl+wheel and +/− buttons; Fit resets the view
 - [x] Scroll: Wheel pans time, Shift+wheel pans pitch, middle-drag pans both
 - [ ] Fit selection, horizontal/vertical scrollbars
@@ -182,6 +182,7 @@ enum CCEditMode {
 - 2026-10-26: Added a Transform tool for time reverse, pitch mirror and seeded randomize of pitch, velocity and timing
 - 2026-10-26: Quantize gained swing, and the Velocity tool gained compress, expand, curve and randomize modes alongside scaling
 - 2026-10-26: Added the project playhead to the piano roll plus a Notes tool for joining same-pitch notes and splitting notes at the playhead
+- 2026-10-26: Added a bar/beat ruler. Clicking or dragging the ruler, or dragging the playhead line anywhere in the grid, seeks the project playhead and pauses playback like the arrange timeline
 - 2026-10-26: Quantize is the default selected tool and the CC lane starts hidden, so the piano roll opens with a clean grid and one focused tool panel
 - YYYY-MM-DD: Pencil/Eraser/Select tools
 - YYYY-MM-DD: Note drag + resize

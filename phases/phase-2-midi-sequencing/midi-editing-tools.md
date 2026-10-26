@@ -140,6 +140,6 @@ fn velocity_curve(events: &mut [MidiEvent], params: &ToolParams) {
 - 2026-10-26: Added Scale Conform with root note and major/minor/mode/pentatonic/blues scales. Notes move to the nearest scale degree while preserving their register
 - 2026-10-26: Added a Transform tool with time reverse, pitch mirror around an adjustable center note, and seeded randomize for pitch, velocity and timing. Note durations are preserved and each action is one undo step
 - 2026-10-26: Added quantize swing (0-100%, second grid position moves up to two thirds through the pair) and velocity shaping modes: scale, compress toward 64, expand away from 64, gamma curve and seeded randomize
-- 2026-10-26: Added a Notes tool with join (same pitch/channel, adjustable gap) and split at the playhead. The piano roll now draws the project playhead and split divides every note crossing it
+- 2026-10-26: Added a Notes tool with join (same pitch/channel, adjustable gap) and split at the playhead. The piano roll now draws a draggable project playhead with a bar/beat ruler, and split divides every note crossing it
 - YYYY-MM-DD: Split/Join/Mirror
 - YYYY-MM-DD: Tool panel UI + presets

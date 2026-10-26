@@ -38,7 +38,8 @@ moved as one group. The MIDI Tools panel in the piano roll adds quantize with
 swing, transpose, scale conform, velocity shaping (scale, compress, expand,
 curve and randomize), humanize, legato, fixed note length, note join, split at
 the playhead, reverse, pitch mirror and randomize, with a Tools… menu to choose
-which tool sections are visible. The piano roll draws the project playhead.
+which tool sections are visible. The piano roll has a bar/beat ruler and a
+draggable playhead line.
 Toggleable velocity and CC lanes handle per-note dynamics and controller
 automation. Trimming is non-destructive and the piano roll shades trimmed
 regions. Every track type now has a real-time insert chain (saturation, filter,

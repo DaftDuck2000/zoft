@@ -6619,6 +6619,7 @@ impl AppUI {
         let mut do_mirror = false;
         let mut do_randomize = false;
         let mut cc_undo_before: Option<MidiClip> = None;
+        let mut seek_content_tick: Option<u64> = None;
 
         egui::Window::new("Piano Roll")
             .id(egui::Id::new(("piano_roll", window.clip_id)))
@@ -6627,6 +6628,7 @@ impl AppUI {
             .min_size([720.0, 600.0])
             .show(ctx, |ui| {
                 let content_bottom = ui.max_rect().bottom();
+                let mut display_playhead_tick = playhead_content_tick;
                 ui.horizontal(|ui| {
                     ui.label(format!("{} notes", window.notes.len()));
                     ui.separator();
@@ -7201,14 +7203,26 @@ impl AppUI {
                 }
 
                 let keyboard_width = 48.0;
+                let ruler_height = 18.0;
+                let ruler = egui::Rect::from_min_max(
+                    egui::pos2(rect.left() + keyboard_width, rect.top()),
+                    egui::pos2(rect.right(), rect.top() + ruler_height),
+                );
                 let keyboard = egui::Rect::from_min_max(
-                    rect.min,
+                    egui::pos2(rect.left(), rect.top() + ruler_height),
                     egui::pos2(rect.left() + keyboard_width, rect.bottom()),
                 );
                 let grid = egui::Rect::from_min_max(
-                    egui::pos2(rect.left() + keyboard_width, rect.top()),
+                    egui::pos2(rect.left() + keyboard_width, rect.top() + ruler_height),
                     rect.max,
                 );
+                let ruler_response = ui
+                    .interact(
+                        ruler,
+                        ui.id().with(("piano_roll_ruler", window.clip_id)),
+                        egui::Sense::click_and_drag(),
+                    )
+                    .on_hover_text("Drag to move the playhead");
 
                 if window.needs_fit {
                     fit_piano_roll_view(&mut window, grid, length);
@@ -7310,7 +7324,38 @@ impl AppUI {
                             * window.pixels_per_tick
                 };
 
+                let playhead_x = playhead_content_tick
+                    .map(|tick| x_for_tick(tick as f64))
+                    .filter(|x| *x >= grid.left() && *x <= grid.right());
+                let playhead_response = playhead_x.map(|x| {
+                    ui.interact(
+                        egui::Rect::from_min_max(
+                            egui::pos2(x - 6.0, ruler.top()),
+                            egui::pos2(x + 6.0, grid.bottom()),
+                        ),
+                        ui.id().with(("piano_roll_playhead", window.clip_id)),
+                        egui::Sense::drag(),
+                    )
+                    .on_hover_text("Drag to move the playhead")
+                });
+
                 painter.rect_filled(grid, 0.0, egui::Color32::from_gray(28));
+                painter.rect_filled(ruler, 0.0, egui::Color32::from_gray(22));
+                painter.rect_filled(
+                    egui::Rect::from_min_max(
+                        rect.min,
+                        egui::pos2(keyboard.right(), ruler.bottom()),
+                    ),
+                    0.0,
+                    egui::Color32::from_gray(18),
+                );
+                painter.line_segment(
+                    [
+                        egui::pos2(ruler.left(), ruler.bottom()),
+                        egui::pos2(ruler.right(), ruler.bottom()),
+                    ],
+                    egui::Stroke::new(1.0_f32, egui::Color32::from_gray(70)),
+                );
                 for pitch in low..=high {
                     let y1 = y_for_pitch(pitch as f32);
                     let y0 = y1 - row_height;
@@ -7441,6 +7486,43 @@ impl AppUI {
                     tick += beat_ticks;
                 }
 
+                let mut ruler_tick =
+                    ((window.view_start_tick.max(0.0) as u64) / beat_ticks) * beat_ticks;
+                let bar_width = bar_ticks as f32 * window.pixels_per_tick;
+                while (ruler_tick as f64)
+                    <= window.view_start_tick + visible_ticks as f64
+                {
+                    let x = x_for_tick(ruler_tick as f64);
+                    let is_bar = ruler_tick % bar_ticks == 0;
+                    painter.line_segment(
+                        [
+                            egui::pos2(
+                                x,
+                                if is_bar {
+                                    ruler.top() + 4.0
+                                } else {
+                                    ruler.bottom() - 5.0
+                                },
+                            ),
+                            egui::pos2(x, ruler.bottom()),
+                        ],
+                        egui::Stroke::new(
+                            if is_bar { 1.0_f32 } else { 0.5_f32 },
+                            egui::Color32::from_gray(if is_bar { 120 } else { 75 }),
+                        ),
+                    );
+                    if is_bar && bar_width >= 24.0 {
+                        painter.text(
+                            egui::pos2(x + 3.0, ruler.top() + 1.0),
+                            egui::Align2::LEFT_TOP,
+                            format!("{}", ruler_tick / bar_ticks + 1),
+                            egui::FontId::monospace(8.0),
+                            egui::Color32::from_gray(170),
+                        );
+                    }
+                    ruler_tick += beat_ticks;
+                }
+
                 let pitch_at = |y: f32| -> u8 {
                     let y = y.clamp(grid.top(), grid.bottom() - 0.001);
                     let pitch = window.view_low_pitch
@@ -7460,6 +7542,24 @@ impl AppUI {
                         ((tick + snap_ticks / 2) / snap_ticks) * snap_ticks
                     }
                 };
+
+                if let Some(response) = &playhead_response {
+                    if response.dragged_by(egui::PointerButton::Primary) {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            seek_content_tick = Some(tick_at(pos.x));
+                        }
+                    }
+                }
+                if ruler_response.dragged_by(egui::PointerButton::Primary)
+                    || ruler_response.clicked_by(egui::PointerButton::Primary)
+                {
+                    if let Some(pos) = ruler_response.interact_pointer_pos() {
+                        seek_content_tick = Some(tick_at(pos.x));
+                    }
+                }
+                if let Some(tick) = seek_content_tick {
+                    display_playhead_tick = Some(tick);
+                }
 
                 let mut note_rects: Vec<(usize, egui::Rect)> =
                     Vec::with_capacity(window.notes.len());
@@ -7512,19 +7612,26 @@ impl AppUI {
                     note_rects.push((index, note_rect));
                 }
 
-                if let Some(tick) = playhead_content_tick {
+                if let Some(tick) = display_playhead_tick {
                     let x = x_for_tick(tick as f64);
                     if x >= grid.left() && x <= grid.right() {
+                        let color = egui::Color32::from_rgb(255, 100, 70);
                         painter.line_segment(
                             [
-                                egui::pos2(x, grid.top()),
+                                egui::pos2(x, ruler.top()),
                                 egui::pos2(x, grid.bottom()),
                             ],
-                            egui::Stroke::new(
-                                1.5_f32,
-                                egui::Color32::from_rgb(255, 100, 70),
-                            ),
+                            egui::Stroke::new(1.5_f32, color),
                         );
+                        painter.add(egui::Shape::convex_polygon(
+                            vec![
+                                egui::pos2(x - 5.0, ruler.top()),
+                                egui::pos2(x + 5.0, ruler.top()),
+                                egui::pos2(x, ruler.top() + 6.0),
+                            ],
+                            color,
+                            egui::Stroke::NONE,
+                        ));
                     }
                 }
 
@@ -7545,8 +7652,23 @@ impl AppUI {
                     }
                     None
                 };
+                let playhead_hit = |pos: egui::Pos2| -> bool {
+                    playhead_x.map_or(false, |x| {
+                        (pos.x - x).abs() <= 6.0
+                            && pos.y >= ruler.top()
+                            && pos.y <= grid.bottom()
+                    })
+                };
 
-                if let Some(pos) = hover_pos {
+                if playhead_response
+                    .as_ref()
+                    .map_or(false, |response| response.hovered())
+                    || ruler_response.hovered()
+                {
+                    ui.output_mut(|output| {
+                        output.cursor_icon = egui::CursorIcon::ResizeHorizontal;
+                    });
+                } else if let Some(pos) = hover_pos {
                     if response.hovered() {
                         if let Some((_, mode)) = hit_test(pos) {
                             let icon = match mode {
@@ -7569,6 +7691,7 @@ impl AppUI {
                 if double_clicked && !modifiers.command && !modifiers.shift {
                     if let Some(pos) = pointer_pos {
                         if grid.contains(pos)
+                            && !playhead_hit(pos)
                             && hit_test(pos).is_none()
                             && clip.length > 0
                         {
@@ -7662,7 +7785,13 @@ impl AppUI {
                         let press_pos = ui
                             .input(|i| i.pointer.press_origin())
                             .unwrap_or(pos);
-                        if !grid.contains(press_pos) {
+                        if ruler.contains(press_pos) {
+                            // Ruler drags seek the playhead; leave the note
+                            // selection untouched.
+                        } else if playhead_hit(press_pos) {
+                            // Dragging the playhead line seeks instead of
+                            // editing notes.
+                        } else if !grid.contains(press_pos) {
                             window.selected.clear();
                         } else {
                             match hit_test(press_pos) {
@@ -8144,6 +8273,20 @@ impl AppUI {
             return;
         }
 
+        if let Some(tick) = seek_content_tick {
+            let timeline_tick = (tick as i64
+                + clip.timeline_position.tick as i64
+                - clip.content_offset as i64)
+                .max(0) as u64;
+            let sample = self
+                .project
+                .tempo_map
+                .tick_to_sample(timeline_tick, sample_rate);
+            if self.playing || self.recording {
+                self.pause_transport();
+            }
+            self.playhead_secs = sample as f64 / sample_rate;
+        }
         if commit {
             self.write_piano_roll_to_project(&window);
         }
