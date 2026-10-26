@@ -333,6 +333,38 @@ fn note_name(pitch: u8) -> String {
     format!("{}{}", NAMES[(pitch % 12) as usize], pitch as i32 / 12 - 1)
 }
 
+const PITCH_CLASS_NAMES: [&str; 12] = [
+    "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+];
+
+fn pitch_in_scale(pitch: u8, root: u8, intervals: &[u8]) -> bool {
+    let relative = (pitch as i16 - root as i16).rem_euclid(12) as u8;
+    intervals.contains(&relative)
+}
+
+/// Move each note to the nearest pitch in the selected scale, preferring the
+/// lower note when two candidates are equally close.
+fn scale_conform_midi_notes(notes: &mut [PianoRollNote], root: u8, intervals: &[u8]) {
+    if intervals.is_empty() {
+        return;
+    }
+    for note in notes {
+        let original = note.pitch;
+        for delta in 0..=6 {
+            let down = original as i16 - delta;
+            if down >= 0 && pitch_in_scale(down as u8, root, intervals) {
+                note.pitch = down as u8;
+                break;
+            }
+            let up = original as i16 + delta;
+            if up <= 127 && pitch_in_scale(up as u8, root, intervals) {
+                note.pitch = up as u8;
+                break;
+            }
+        }
+    }
+}
+
 /// One editable note in the piano roll. Unlike the lightweight span tuples used
 /// by the arrange preview, this keeps the MIDI channel and can be written back
 /// into a clip.
@@ -1531,6 +1563,7 @@ impl PianoRollWindow {
 enum MidiToolTab {
     Quantize,
     Transpose,
+    Scale,
     Humanize,
     Legato,
     NoteLength,
@@ -1539,9 +1572,10 @@ enum MidiToolTab {
 }
 
 impl MidiToolTab {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::Quantize,
         Self::Transpose,
+        Self::Scale,
         Self::Humanize,
         Self::Legato,
         Self::NoteLength,
@@ -1553,11 +1587,76 @@ impl MidiToolTab {
         match self {
             Self::Quantize => "Quantize",
             Self::Transpose => "Transpose",
+            Self::Scale => "Scale",
             Self::Humanize => "Humanize",
             Self::Legato => "Legato",
             Self::NoteLength => "Note Length",
             Self::Velocity => "Velocity",
             Self::Controllers => "CC Lane",
+        }
+    }
+}
+
+/// Diatonic and common pentatonic/blues scales for the conform tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScaleType {
+    Major,
+    NaturalMinor,
+    Dorian,
+    Phrygian,
+    Lydian,
+    Mixolydian,
+    Locrian,
+    HarmonicMinor,
+    PentatonicMajor,
+    PentatonicMinor,
+    Blues,
+}
+
+impl ScaleType {
+    const ALL: [Self; 11] = [
+        Self::Major,
+        Self::NaturalMinor,
+        Self::Dorian,
+        Self::Phrygian,
+        Self::Lydian,
+        Self::Mixolydian,
+        Self::Locrian,
+        Self::HarmonicMinor,
+        Self::PentatonicMajor,
+        Self::PentatonicMinor,
+        Self::Blues,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Major => "Major",
+            Self::NaturalMinor => "Natural Minor",
+            Self::Dorian => "Dorian",
+            Self::Phrygian => "Phrygian",
+            Self::Lydian => "Lydian",
+            Self::Mixolydian => "Mixolydian",
+            Self::Locrian => "Locrian",
+            Self::HarmonicMinor => "Harmonic Minor",
+            Self::PentatonicMajor => "Major Pentatonic",
+            Self::PentatonicMinor => "Minor Pentatonic",
+            Self::Blues => "Blues",
+        }
+    }
+
+    fn intervals(self) -> &'static [u8] {
+        match self {
+            Self::Major => &[0, 2, 4, 5, 7, 9, 11],
+            Self::NaturalMinor => &[0, 2, 3, 5, 7, 8, 10],
+            Self::Dorian => &[0, 2, 3, 5, 7, 9, 10],
+            Self::Phrygian => &[0, 1, 3, 5, 7, 8, 10],
+            Self::Lydian => &[0, 2, 4, 6, 7, 9, 11],
+            Self::Mixolydian => &[0, 2, 4, 5, 7, 9, 10],
+            Self::Locrian => &[0, 1, 3, 5, 6, 8, 10],
+            Self::HarmonicMinor => &[0, 2, 3, 5, 7, 8, 11],
+            Self::PentatonicMajor => &[0, 2, 4, 7, 9],
+            Self::PentatonicMinor => &[0, 3, 5, 7, 10],
+            Self::Blues => &[0, 3, 5, 6, 7, 10],
         }
     }
 }
@@ -1569,6 +1668,8 @@ struct MidiToolsState {
     quantize_snap: PianoRollSnap,
     quantize_strength: f32,
     transpose: i32,
+    scale_root: u8,
+    scale_type: ScaleType,
     velocity_factor: f32,
     humanize_timing: f32,
     humanize_velocity: f32,
@@ -1583,6 +1684,8 @@ impl Default for MidiToolsState {
             quantize_snap: PianoRollSnap::Beat,
             quantize_strength: 1.0,
             transpose: 0,
+            scale_root: 0,
+            scale_type: ScaleType::Major,
             velocity_factor: 1.0,
             humanize_timing: 0.0,
             humanize_velocity: 0.0,
@@ -6270,6 +6373,7 @@ impl AppUI {
         let mut zoom_request: Option<f32> = None;
         let mut do_quantize = false;
         let mut do_transpose = false;
+        let mut do_scale = false;
         let mut do_velocity = false;
         let mut do_humanize = false;
         let mut do_legato = false;
@@ -6463,6 +6567,51 @@ impl AppUI {
                                     .clicked()
                                 {
                                     do_transpose = true;
+                                }
+                            }
+                            MidiToolTab::Scale => {
+                                ui.weak("Snap notes to a musical scale.");
+                                ui.horizontal(|ui| {
+                                    ui.label("Root:");
+                                    egui::ComboBox::from_id_salt(
+                                        "piano_roll_scale_root",
+                                    )
+                                    .selected_text(
+                                        PITCH_CLASS_NAMES
+                                            [window.tools.scale_root as usize],
+                                    )
+                                    .width(60.0)
+                                    .show_ui(ui, |ui| {
+                                        for (index, name) in
+                                            PITCH_CLASS_NAMES.iter().enumerate()
+                                        {
+                                            ui.selectable_value(
+                                                &mut window.tools.scale_root,
+                                                index as u8,
+                                                *name,
+                                            );
+                                        }
+                                    });
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("Scale:");
+                                    egui::ComboBox::from_id_salt(
+                                        "piano_roll_scale_type",
+                                    )
+                                    .selected_text(window.tools.scale_type.label())
+                                    .width(130.0)
+                                    .show_ui(ui, |ui| {
+                                        for scale in ScaleType::ALL {
+                                            ui.selectable_value(
+                                                &mut window.tools.scale_type,
+                                                scale,
+                                                scale.label(),
+                                            );
+                                        }
+                                    });
+                                });
+                                if ui.button("Conform").clicked() {
+                                    do_scale = true;
                                 }
                             }
                             MidiToolTab::Humanize => {
@@ -7562,6 +7711,16 @@ impl AppUI {
                 vec![window.clip_id],
                 "Transpose MIDI",
                 |notes| transpose_midi_notes(notes, semitones),
+            );
+            window.initialized = false;
+        }
+        if do_scale {
+            let root = window.tools.scale_root;
+            let intervals = window.tools.scale_type.intervals();
+            self.apply_midi_note_edit_to_clips(
+                vec![window.clip_id],
+                "Conform MIDI to scale",
+                |notes| scale_conform_midi_notes(notes, root, intervals),
             );
             window.initialized = false;
         }
@@ -11915,11 +12074,11 @@ mod tests {
         write_piano_roll_notes, write_wav_f32, write_wav_range, write_wav_range_with_envelope,
         fit_piano_roll_view, piano_roll_new_note_length, midi_trim_end, midi_trim_start,
         split_midi_clip_at_tick, quantize_midi_notes, scale_midi_velocities,
-        transpose_midi_notes, velocity_color, notes_in_marquee, midi_clip_cc_points,
-        write_midi_cc_points, humanize_midi_notes, legato_midi_notes, set_midi_note_length,
-        MidiCcPoint, project_from_template, ClipShape, ClipSourceState, EditAction, FilterKind,
-        MonitorMode, PianoRollNote, PianoRollSnap, PianoRollWindow, SnapMode, Template,
-        TrackShape,
+        transpose_midi_notes, scale_conform_midi_notes, velocity_color, notes_in_marquee,
+        midi_clip_cc_points, write_midi_cc_points, humanize_midi_notes, legato_midi_notes,
+        set_midi_note_length, MidiCcPoint, project_from_template, ClipShape, ClipSourceState,
+        EditAction, FilterKind, MonitorMode, PianoRollNote, PianoRollSnap, PianoRollWindow,
+        SnapMode, Template, TrackShape,
     };
     use daw_core::audio_pool::AudioFileRef;
     use daw_core::clip::{
@@ -12975,6 +13134,51 @@ mod tests {
         assert_eq!(notes[0].velocity, 127);
         scale_midi_velocities(&mut notes, 0.0);
         assert_eq!(notes[0].velocity, 1);
+    }
+
+    #[test]
+    fn scale_conform_maps_to_nearest_scale_degree() {
+        let mut notes = vec![
+            PianoRollNote {
+                start: 0,
+                end: 120,
+                pitch: 61,
+                velocity: 100,
+                channel: 0,
+            },
+            PianoRollNote {
+                start: 120,
+                end: 240,
+                pitch: 63,
+                velocity: 100,
+                channel: 0,
+            },
+            PianoRollNote {
+                start: 240,
+                end: 360,
+                pitch: 66,
+                velocity: 100,
+                channel: 0,
+            },
+            PianoRollNote {
+                start: 360,
+                end: 480,
+                pitch: 71,
+                velocity: 100,
+                channel: 0,
+            },
+        ];
+        scale_conform_midi_notes(&mut notes, 0, &[0, 2, 4, 5, 7, 9, 11]);
+        assert_eq!(
+            notes.iter().map(|note| note.pitch).collect::<Vec<_>>(),
+            vec![60, 62, 65, 71]
+        );
+
+        scale_conform_midi_notes(&mut notes, 0, &[0, 3, 5, 7, 10]);
+        assert_eq!(
+            notes.iter().map(|note| note.pitch).collect::<Vec<_>>(),
+            vec![60, 63, 65, 70]
+        );
     }
 
     #[test]

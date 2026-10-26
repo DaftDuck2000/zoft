@@ -15,7 +15,7 @@ MIDI transformation tools: quantize, humanize, transpose, scale conform, legato,
 - [x] Quantize: Notes to grid with strength (0-100%) and tuplet grids; swing pending
 - [x] Humanize: Random timing/velocity offset
 - [x] Transpose: Semitones and octave buttons; scale-aware transpose pending
-- [ ] Scale Conform: Force notes to scale (major, minor, modes, custom)
+- [x] Scale Conform: Force notes to scale (major, minor, modes, custom)
 - [x] Legato: Extend notes to next note start (with gap option)
 - [~] Velocity Tools: Scale implemented; compress, expand, curve, randomize pending
 - [x] Note Length: Set fixed length; scale/legato/staccato variants pending
@@ -122,7 +122,7 @@ fn velocity_curve(events: &mut [MidiEvent], params: &ToolParams) {
 - [~] Quantize with strength/swing works musically
 - [x] Humanize adds natural variation
 - [x] Transpose preserves chord quality
-- [ ] Scale conform maps notes correctly
+- [x] Scale conform maps notes correctly
 - [x] Legato creates smooth transitions
 - [~] Velocity curve shapes dynamics
 - [ ] All tools support preview
@@ -133,10 +133,8 @@ fn velocity_curve(events: &mut [MidiEvent], params: &ToolParams) {
 
 - 2026-10-24: MIDI Tools panel inside the piano roll. The left side of the piano-roll window now provides quantize (Bar/Beat/1/8/1/16/1/32/1/8T/1/16T, 0-100% strength), transpose (±24 semitones and octave buttons) and velocity scaling (0-200%). Tools apply to the clip open in the piano roll as one undo step; trimmed notes are included
 - 2026-10-26: Added humanize (random timing and velocity), legato (extend toward the next note with an adjustable gap) and fixed note length to the piano-roll MIDI Tools panel. Each tool applies to the open clip as one undo step
-- YYYY-MM-DD: Scale conform
-- YYYY-MM-DD: Legato
+- 2026-10-26: Added Scale Conform with root note and major/minor/mode/pentatonic/blues scales. Notes move to the nearest scale degree while preserving their register
 - YYYY-MM-DD: Velocity tools
-- YYYY-MM-DD: Note length
 - YYYY-MM-DD: Randomize
 - YYYY-MM-DD: Split/Join/Mirror
 - YYYY-MM-DD: Tool panel UI + presets
