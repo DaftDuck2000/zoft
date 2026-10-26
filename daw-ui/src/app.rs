@@ -9840,152 +9840,210 @@ impl eframe::App for AppUI {
                         egui::UiBuilder::new()
                             .id_salt(("track_row", *track_id))
                             .max_rect(row_rect)
-                            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                            .layout(egui::Layout::top_down(egui::Align::Min)),
                     );
-                    row_ui.spacing_mut().item_spacing.x = 4.0;
+                    row_ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
                     let row = egui::InnerResponse::new(
                         (|ui: &mut egui::Ui| {
-                        let color = egui::Color32::from_rgb(track.color.0, track.color.1, track.color.2);
-                        ui.colored_label(color, "■");
-                        ui.label(&track.name);
-                        ui.separator();
+                            let content_height = 20.0 + 4.0 + 20.0;
+                            ui.add_space(
+                                ((row_rect.height() - content_height) * 0.5)
+                                    .max(0.0),
+                            );
 
-                        // Mute/Solo/Record Arm buttons
-                        let mute_text = "M";
-                        let solo_text = "S";
-                        let arm_text = if after.record_arm { "●" } else { "○" };
-
-                        let mute_color = if after.mute {
-                            egui::Color32::YELLOW
-                        } else {
-                            egui::Color32::GRAY
-                        };
-                        let solo_color = if after.solo {
-                            egui::Color32::GREEN
-                        } else {
-                            egui::Color32::GRAY
-                        };
-                        let arm_color = if after.record_arm {
-                            egui::Color32::RED
-                        } else {
-                            egui::Color32::GRAY
-                        };
-
-                        if ui
-                            .add(
-                                egui::Button::new(egui::RichText::new(mute_text).color(mute_color))
-                                    .min_size([20.0, 20.0].into()),
-                            )
-                            .clicked()
-                        {
-                            after.mute = !after.mute;
-                        }
-                        if ui
-                            .add(
-                                egui::Button::new(egui::RichText::new(solo_text).color(solo_color))
-                                    .min_size([20.0, 20.0].into()),
-                            )
-                            .clicked()
-                        {
-                            after.solo = !after.solo;
-                        }
-                        if ui
-                            .add(
-                                egui::Button::new(egui::RichText::new(arm_text).color(arm_color))
-                                    .min_size([20.0, 20.0].into()),
-                            )
-                            .clicked()
-                        {
-                            after.record_arm = !after.record_arm;
-                        }
-
-                        let monitor_color = match after.monitor_mode {
-                            MonitorMode::Off => egui::Color32::GRAY,
-                            MonitorMode::Auto => egui::Color32::YELLOW,
-                            MonitorMode::On => egui::Color32::GREEN,
-                        };
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    egui::RichText::new("Mon").color(monitor_color),
-                                )
-                                .min_size([30.0, 20.0].into()),
-                            )
-                            .on_hover_text(
-                                "Input monitoring: Off → Auto (armed or recording) → On",
-                            )
-                            .clicked()
-                        {
-                            after.monitor_mode = match after.monitor_mode {
-                                MonitorMode::Off => MonitorMode::Auto,
-                                MonitorMode::Auto => MonitorMode::On,
-                                MonitorMode::On => MonitorMode::Off,
-                            };
-                        }
-
-                        let has_effects = track
-                            .inserts
-                            .iter()
-                            .any(|slot| slot.effect.is_some());
-                        let fx_color = if has_effects {
-                            egui::Color32::GREEN
-                        } else {
-                            egui::Color32::GRAY
-                        };
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    egui::RichText::new("FX").color(fx_color),
-                                )
-                                .min_size([26.0, 20.0].into()),
-                            )
-                            .on_hover_text("Track effects (available on every track type)")
-                            .clicked()
-                        {
-                            open_track_effects = Some(*track_id);
-                        }
-
-                        if matches!(
-                            track.track_type,
-                            TrackType::Midi | TrackType::Instrument
-                        ) {
-                            let ghost_color = if track.show_as_ghost {
-                                egui::Color32::from_rgb(120, 170, 240)
-                            } else {
-                                egui::Color32::GRAY
-                            };
-                            if ui
-                                .add(
-                                    egui::Button::new(
-                                        egui::RichText::new("G").color(ghost_color),
+                            // Top line: track identity and mute/solo/record.
+                            ui.horizontal(|ui| {
+                                let color = egui::Color32::from_rgb(
+                                    track.color.0,
+                                    track.color.1,
+                                    track.color.2,
+                                );
+                                ui.colored_label(color, "■");
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(&track.name).strong(),
                                     )
-                                    .min_size([20.0, 20.0].into()),
-                                )
-                                .on_hover_text(
-                                    "Include this track's notes as piano-roll ghost notes",
-                                )
-                                .clicked()
-                            {
-                                ghost_changes.push((
-                                    *track_id,
-                                    !track.show_as_ghost,
-                                ));
-                            }
-                        }
+                                    .truncate(),
+                                );
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(
+                                        egui::Align::Center,
+                                    ),
+                                    |ui| {
+                                        let arm_text = if after.record_arm {
+                                            "●"
+                                        } else {
+                                            "○"
+                                        };
+                                        let arm_color = if after.record_arm {
+                                            egui::Color32::RED
+                                        } else {
+                                            egui::Color32::GRAY
+                                        };
+                                        if ui
+                                            .add(
+                                                egui::Button::new(
+                                                    egui::RichText::new(arm_text)
+                                                        .color(arm_color),
+                                                )
+                                                .min_size([20.0, 20.0].into()),
+                                            )
+                                            .on_hover_text("Record arm")
+                                            .clicked()
+                                        {
+                                            after.record_arm = !after.record_arm;
+                                        }
 
-                        ui.add_sized(
-                            [56.0, 18.0],
-                            egui::Slider::new(&mut after.volume, 0.0..=1.5).show_value(false),
-                        )
-                        .on_hover_text(format!("Track volume {:.0}%", after.volume * 100.0));
-                        ui.label(format!("{:.0}%", after.volume * 100.0));
-                        if ui
-                            .small_button("×")
-                            .on_hover_text("Remove track")
-                            .clicked()
-                        {
-                            remove_track = Some(*track_id);
-                        }
+                                        let solo_color = if after.solo {
+                                            egui::Color32::GREEN
+                                        } else {
+                                            egui::Color32::GRAY
+                                        };
+                                        if ui
+                                            .add(
+                                                egui::Button::new(
+                                                    egui::RichText::new("S")
+                                                        .color(solo_color),
+                                                )
+                                                .min_size([20.0, 20.0].into()),
+                                            )
+                                            .on_hover_text("Solo")
+                                            .clicked()
+                                        {
+                                            after.solo = !after.solo;
+                                        }
+
+                                        let mute_color = if after.mute {
+                                            egui::Color32::YELLOW
+                                        } else {
+                                            egui::Color32::GRAY
+                                        };
+                                        if ui
+                                            .add(
+                                                egui::Button::new(
+                                                    egui::RichText::new("M")
+                                                        .color(mute_color),
+                                                )
+                                                .min_size([20.0, 20.0].into()),
+                                            )
+                                            .on_hover_text("Mute")
+                                            .clicked()
+                                        {
+                                            after.mute = !after.mute;
+                                        }
+                                    },
+                                );
+                            });
+
+                            // Bottom line: routing, effects, ghost visibility,
+                            // volume and remove.
+                            ui.horizontal(|ui| {
+                                let monitor_color = match after.monitor_mode {
+                                    MonitorMode::Off => egui::Color32::GRAY,
+                                    MonitorMode::Auto => egui::Color32::YELLOW,
+                                    MonitorMode::On => egui::Color32::GREEN,
+                                };
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            egui::RichText::new("Mon")
+                                                .color(monitor_color),
+                                        )
+                                        .min_size([30.0, 20.0].into()),
+                                    )
+                                    .on_hover_text(
+                                        "Input monitoring: Off → Auto (armed or recording) → On",
+                                    )
+                                    .clicked()
+                                {
+                                    after.monitor_mode = match after.monitor_mode {
+                                        MonitorMode::Off => MonitorMode::Auto,
+                                        MonitorMode::Auto => MonitorMode::On,
+                                        MonitorMode::On => MonitorMode::Off,
+                                    };
+                                }
+
+                                let has_effects = track
+                                    .inserts
+                                    .iter()
+                                    .any(|slot| slot.effect.is_some());
+                                let fx_color = if has_effects {
+                                    egui::Color32::GREEN
+                                } else {
+                                    egui::Color32::GRAY
+                                };
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            egui::RichText::new("FX")
+                                                .color(fx_color),
+                                        )
+                                        .min_size([26.0, 20.0].into()),
+                                    )
+                                    .on_hover_text(
+                                        "Track effects (available on every track type)",
+                                    )
+                                    .clicked()
+                                {
+                                    open_track_effects = Some(*track_id);
+                                }
+
+                                if matches!(
+                                    track.track_type,
+                                    TrackType::Midi | TrackType::Instrument
+                                ) {
+                                    let ghost_color = if track.show_as_ghost {
+                                        egui::Color32::from_rgb(120, 170, 240)
+                                    } else {
+                                        egui::Color32::GRAY
+                                    };
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                egui::RichText::new("G")
+                                                    .color(ghost_color),
+                                            )
+                                            .min_size([20.0, 20.0].into()),
+                                        )
+                                        .on_hover_text(
+                                            "Include this track's notes as piano-roll ghost notes",
+                                        )
+                                        .clicked()
+                                    {
+                                        ghost_changes.push((
+                                            *track_id,
+                                            !track.show_as_ghost,
+                                        ));
+                                    }
+                                } else {
+                                    ui.add_space(20.0);
+                                }
+
+                                ui.label("Vol");
+                                ui.add_sized(
+                                    [80.0, 18.0],
+                                    egui::Slider::new(
+                                        &mut after.volume,
+                                        0.0..=1.5,
+                                    )
+                                    .show_value(false),
+                                )
+                                .on_hover_text(format!(
+                                    "Track volume {:.0}%",
+                                    after.volume * 100.0
+                                ));
+                                ui.label(format!(
+                                    "{:.0}%",
+                                    after.volume * 100.0
+                                ));
+                                if ui
+                                    .small_button("×")
+                                    .on_hover_text("Remove track")
+                                    .clicked()
+                                {
+                                    remove_track = Some(*track_id);
+                                }
+                            });
                         })(&mut row_ui),
                         row_response,
                     );
