@@ -1092,6 +1092,188 @@ fn draw_input_meter(ui: &mut egui::Ui, peak: f32, rms: f32) {
     ui.label(format!("{:.0} dB", db));
 }
 
+/// Number of wheel notches over a hovered slider. Positive means increase.
+fn slider_wheel_steps(ui: &egui::Ui) -> f32 {
+    if ui.input(|i| i.modifiers.command || i.modifiers.ctrl) {
+        return 0.0;
+    }
+    let mut steps = 0.0;
+    ui.input(|i| {
+        for event in &i.events {
+            if let egui::Event::MouseWheel { delta, .. } = event {
+                if delta.y != 0.0 {
+                    steps += delta.y.signum();
+                }
+            }
+        }
+    });
+    steps.clamp(-1.0, 1.0)
+}
+
+/// Move a slider value by `steps` notches, where each notch is 5% of the
+/// slider's full range.
+fn slider_wheel_value(current: f64, start: f64, end: f64, steps: f32) -> f64 {
+    let step = (end - start) * 0.05;
+    (current + step * steps as f64).clamp(start, end)
+}
+
+/// Move a slider value by a caller-provided step per wheel notch.
+fn slider_wheel_value_with_step(
+    current: f64,
+    start: f64,
+    end: f64,
+    steps: f32,
+    step: f64,
+) -> f64 {
+    (current + step * steps as f64).clamp(start, end)
+}
+
+/// Move a logarithmic slider value by 5% of its logarithmic travel per notch.
+fn slider_wheel_log_value(
+    current: f64,
+    start: f64,
+    end: f64,
+    steps: f32,
+) -> f64 {
+    if start <= 0.0 || end <= start || current <= 0.0 {
+        return current.clamp(start, end);
+    }
+    let log_step = (end.log10() - start.log10()) * 0.05;
+    (current * 10f64.powf(log_step * steps as f64)).clamp(start, end)
+}
+
+/// Apply a wheel adjustment before a slider is drawn. The slider's previous
+/// rectangle is stored under its auto-id so the wheel only affects the slider
+/// under the pointer.
+fn apply_slider_wheel<Num: egui::emath::Numeric>(
+    ui: &mut egui::Ui,
+    value: &mut Num,
+    range: &std::ops::RangeInclusive<Num>,
+    id: egui::Id,
+    wheel_step: Option<f64>,
+    logarithmic: bool,
+) -> bool {
+    let Some(rect) = ui.data(|data| data.get_temp::<egui::Rect>(id)) else {
+        return false;
+    };
+    if !ui.rect_contains_pointer(rect) {
+        return false;
+    }
+    let steps = slider_wheel_steps(ui);
+    if steps == 0.0 {
+        return false;
+    }
+    // Consume the scroll even when throttled so the surrounding scroll area
+    // does not move while the pointer is over a slider.
+    ui.input_mut(|i| {
+        i.raw_scroll_delta = egui::Vec2::ZERO;
+        i.smooth_scroll_delta = egui::Vec2::ZERO;
+    });
+    let now = ui.input(|i| i.time);
+    let last_id = id.with("wheel_time");
+    let last = ui
+        .data(|data| data.get_temp::<f64>(last_id))
+        .unwrap_or(f64::NEG_INFINITY);
+    if now - last < 0.05 {
+        return false;
+    }
+    ui.data_mut(|data| data.insert_temp(last_id, now));
+
+    let start = range.start().to_f64();
+    let end = range.end().to_f64();
+    let mut next = if logarithmic {
+        slider_wheel_log_value(value.to_f64(), start, end, steps)
+    } else if let Some(step) = wheel_step {
+        slider_wheel_value_with_step(
+            value.to_f64(),
+            start,
+            end,
+            steps,
+            step,
+        )
+    } else {
+        slider_wheel_value(value.to_f64(), start, end, steps)
+    };
+    if Num::INTEGRAL {
+        next = next.round();
+    }
+    *value = Num::from_f64(next);
+    true
+}
+
+/// Add a slider that supports wheel adjustment in 5% range steps.
+fn add_wheel_slider<'a, Num: egui::emath::Numeric>(
+    ui: &mut egui::Ui,
+    value: &'a mut Num,
+    range: std::ops::RangeInclusive<Num>,
+    build: impl FnOnce(egui::Slider<'a>) -> egui::Slider<'a>,
+) -> egui::Response {
+    add_wheel_slider_step(ui, value, range, None, false, build)
+}
+
+/// Add a logarithmic slider that steps by 5% of its logarithmic travel.
+fn add_wheel_slider_log<'a, Num: egui::emath::Numeric>(
+    ui: &mut egui::Ui,
+    value: &'a mut Num,
+    range: std::ops::RangeInclusive<Num>,
+    build: impl FnOnce(egui::Slider<'a>) -> egui::Slider<'a>,
+) -> egui::Response {
+    add_wheel_slider_step(ui, value, range, None, true, build)
+}
+
+/// Add a slider with an explicit wheel step.
+fn add_wheel_slider_step<'a, Num: egui::emath::Numeric>(
+    ui: &mut egui::Ui,
+    value: &'a mut Num,
+    range: std::ops::RangeInclusive<Num>,
+    wheel_step: Option<f64>,
+    logarithmic: bool,
+    build: impl FnOnce(egui::Slider<'a>) -> egui::Slider<'a>,
+) -> egui::Response {
+    let id = ui.next_auto_id();
+    let wheel_changed =
+        apply_slider_wheel(ui, value, &range, id, wheel_step, logarithmic);
+    let mut response = ui.add(build(egui::Slider::new(value, range)));
+    if wheel_changed {
+        response.mark_changed();
+    }
+    ui.data_mut(|data| data.insert_temp(id, response.rect));
+    response
+}
+
+/// Add a fixed-size slider that supports wheel adjustment in 5% range steps.
+fn add_sized_wheel_slider<'a, Num: egui::emath::Numeric>(
+    ui: &mut egui::Ui,
+    size: egui::Vec2,
+    value: &'a mut Num,
+    range: std::ops::RangeInclusive<Num>,
+    build: impl FnOnce(egui::Slider<'a>) -> egui::Slider<'a>,
+) -> egui::Response {
+    add_sized_wheel_slider_step(ui, size, value, range, None, false, build)
+}
+
+/// Add a fixed-size slider with an explicit wheel step.
+fn add_sized_wheel_slider_step<'a, Num: egui::emath::Numeric>(
+    ui: &mut egui::Ui,
+    size: egui::Vec2,
+    value: &'a mut Num,
+    range: std::ops::RangeInclusive<Num>,
+    wheel_step: Option<f64>,
+    logarithmic: bool,
+    build: impl FnOnce(egui::Slider<'a>) -> egui::Slider<'a>,
+) -> egui::Response {
+    let id = ui.next_auto_id();
+    let wheel_changed =
+        apply_slider_wheel(ui, value, &range, id, wheel_step, logarithmic);
+    let mut response =
+        ui.add_sized(size, build(egui::Slider::new(value, range)));
+    if wheel_changed {
+        response.mark_changed();
+    }
+    ui.data_mut(|data| data.insert_temp(id, response.rect));
+    response
+}
+
 /// Source reference and trimmed range, used by processing operations that
 /// render a new file (the original file is never modified).
 #[derive(Debug, Clone)]
@@ -5601,10 +5783,11 @@ impl AppUI {
         // Gain (stored linearly, edited in dB).
         ui.label("Gain:");
         let mut gain_db = 20.0 * before.gain.max(1e-6).log10();
-        let gain_response = ui.add(
-            egui::Slider::new(&mut gain_db, -48.0..=12.0)
-                .suffix(" dB")
-                .max_decimals(1),
+        let gain_response = add_wheel_slider(
+            ui,
+            &mut gain_db,
+            -48.0..=12.0,
+            |slider| slider.suffix(" dB").max_decimals(1),
         );
         if gain_response.changed() {
             after.gain = 10.0f32.powf(gain_db / 20.0);
@@ -6494,13 +6677,16 @@ impl AppUI {
                                                 ));
                                                 ui.horizontal(|ui| {
                                                     ui.label("Vol");
-                                                    ui.add_sized(
-                                                        [120.0, 18.0],
-                                                        egui::Slider::new(
-                                                            &mut after.volume,
-                                                            0.0..=1.5,
-                                                        )
-                                                        .show_value(false),
+                                                    add_sized_wheel_slider_step(
+                                                        ui,
+                                                        egui::vec2(120.0, 18.0),
+                                                        &mut after.volume,
+                                                        0.0..=1.5,
+                                                        Some(0.05),
+                                                        false,
+                                                        |slider| {
+                                                            slider.show_value(false)
+                                                        },
                                                     )
                                                     .on_hover_text(format!(
                                                         "Track volume {:.0}%",
@@ -6773,27 +6959,26 @@ impl AppUI {
                                 });
                                 let mut strength =
                                     window.tools.quantize_strength * 100.0;
-                                if ui
-                                    .add(
-                                        egui::Slider::new(
-                                            &mut strength,
-                                            0.0..=100.0,
-                                        )
-                                        .text("Strength")
-                                        .suffix("%"),
-                                    )
-                                    .changed()
+                                if add_wheel_slider(
+                                    ui,
+                                    &mut strength,
+                                    0.0..=100.0,
+                                    |slider| {
+                                        slider.text("Strength").suffix("%")
+                                    },
+                                )
+                                .changed()
                                 {
                                     window.tools.quantize_strength =
                                         strength / 100.0;
                                 }
-                                ui.add(
-                                    egui::Slider::new(
-                                        &mut window.tools.quantize_swing,
-                                        0.0..=100.0,
-                                    )
-                                    .text("Swing")
-                                    .suffix("%"),
+                                add_wheel_slider(
+                                    ui,
+                                    &mut window.tools.quantize_swing,
+                                    0.0..=100.0,
+                                    |slider| {
+                                        slider.text("Swing").suffix("%")
+                                    },
                                 );
                                 if ui
                                     .add_enabled(
@@ -6810,13 +6995,15 @@ impl AppUI {
                             }
                             MidiToolTab::Transpose => {
                                 ui.weak("Shift note pitches.");
-                                ui.add(
-                                    egui::Slider::new(
-                                        &mut window.tools.transpose,
-                                        -24..=24,
-                                    )
-                                    .text("Semitones")
-                                    .step_by(1.0),
+                                add_wheel_slider(
+                                    ui,
+                                    &mut window.tools.transpose,
+                                    -24..=24,
+                                    |slider| {
+                                        slider
+                                            .text("Semitones")
+                                            .step_by(1.0)
+                                    },
                                 );
                                 ui.horizontal(|ui| {
                                     if ui.small_button("-12").clicked() {
@@ -6885,20 +7072,21 @@ impl AppUI {
                             }
                             MidiToolTab::Humanize => {
                                 ui.weak("Add subtle timing and velocity variation.");
-                                ui.add(
-                                    egui::Slider::new(
-                                        &mut window.tools.humanize_timing,
-                                        0.0..=240.0,
-                                    )
-                                    .text("Timing")
-                                    .suffix(" ticks"),
+                                add_wheel_slider(
+                                    ui,
+                                    &mut window.tools.humanize_timing,
+                                    0.0..=240.0,
+                                    |slider| {
+                                        slider
+                                            .text("Timing")
+                                            .suffix(" ticks")
+                                    },
                                 );
-                                ui.add(
-                                    egui::Slider::new(
-                                        &mut window.tools.humanize_velocity,
-                                        0.0..=64.0,
-                                    )
-                                    .text("Velocity"),
+                                add_wheel_slider(
+                                    ui,
+                                    &mut window.tools.humanize_velocity,
+                                    0.0..=64.0,
+                                    |slider| slider.text("Velocity"),
                                 );
                                 if ui
                                     .add_enabled(
@@ -6914,13 +7102,13 @@ impl AppUI {
                             }
                             MidiToolTab::Legato => {
                                 ui.weak("Extend notes toward the next note.");
-                                ui.add(
-                                    egui::Slider::new(
-                                        &mut window.tools.legato_gap,
-                                        0.0..=240.0,
-                                    )
-                                    .text("Gap")
-                                    .suffix(" ticks"),
+                                add_wheel_slider(
+                                    ui,
+                                    &mut window.tools.legato_gap,
+                                    0.0..=240.0,
+                                    |slider| {
+                                        slider.text("Gap").suffix(" ticks")
+                                    },
                                 );
                                 if ui.button("Legato").clicked() {
                                     do_legato = true;
@@ -6928,13 +7116,15 @@ impl AppUI {
                             }
                             MidiToolTab::NoteLength => {
                                 ui.weak("Set every note to a fixed length.");
-                                ui.add(
-                                    egui::Slider::new(
-                                        &mut window.tools.note_length,
-                                        30.0..=3840.0,
-                                    )
-                                    .text("Length")
-                                    .suffix(" ticks"),
+                                add_wheel_slider(
+                                    ui,
+                                    &mut window.tools.note_length,
+                                    30.0..=3840.0,
+                                    |slider| {
+                                        slider
+                                            .text("Length")
+                                            .suffix(" ticks")
+                                    },
                                 );
                                 if ui.button("Set Length").clicked() {
                                     do_note_length = true;
@@ -6942,14 +7132,16 @@ impl AppUI {
                             }
                             MidiToolTab::Notes => {
                                 ui.weak("Join or split notes.");
-                                ui.add(
-                                    egui::Slider::new(
-                                        &mut window.tools.join_gap,
-                                        0.0..=960.0,
-                                    )
-                                    .text("Join gap")
-                                    .suffix(" ticks")
-                                    .step_by(1.0),
+                                add_wheel_slider(
+                                    ui,
+                                    &mut window.tools.join_gap,
+                                    0.0..=960.0,
+                                    |slider| {
+                                        slider
+                                            .text("Join gap")
+                                            .suffix(" ticks")
+                                            .step_by(1.0)
+                                    },
                                 );
                                 if ui
                                     .add_enabled(
@@ -6994,53 +7186,60 @@ impl AppUI {
                                 }
                                 ui.separator();
                                 let center = window.tools.mirror_center;
-                                ui.add(
-                                    egui::Slider::new(
-                                        &mut window.tools.mirror_center,
-                                        0..=127,
-                                    )
-                                    .text(format!(
-                                        "Mirror center ({})",
-                                        note_name(center)
-                                    )),
+                                add_wheel_slider(
+                                    ui,
+                                    &mut window.tools.mirror_center,
+                                    0..=127,
+                                    |slider| {
+                                        slider.text(format!(
+                                            "Mirror center ({})",
+                                            note_name(center)
+                                        ))
+                                    },
                                 );
                                 if ui.button("Mirror Pitch").clicked() {
                                     do_mirror = true;
                                 }
                                 ui.separator();
-                                ui.add(
-                                    egui::Slider::new(
-                                        &mut window.tools.randomize_pitch,
-                                        0.0..=12.0,
-                                    )
-                                    .text("Pitch ±")
-                                    .step_by(1.0),
+                                add_wheel_slider(
+                                    ui,
+                                    &mut window.tools.randomize_pitch,
+                                    0.0..=12.0,
+                                    |slider| {
+                                        slider.text("Pitch ±").step_by(1.0)
+                                    },
                                 );
-                                ui.add(
-                                    egui::Slider::new(
-                                        &mut window.tools.randomize_velocity,
-                                        0.0..=64.0,
-                                    )
-                                    .text("Velocity ±")
-                                    .step_by(1.0),
+                                add_wheel_slider(
+                                    ui,
+                                    &mut window.tools.randomize_velocity,
+                                    0.0..=64.0,
+                                    |slider| {
+                                        slider
+                                            .text("Velocity ±")
+                                            .step_by(1.0)
+                                    },
                                 );
-                                ui.add(
-                                    egui::Slider::new(
-                                        &mut window.tools.randomize_timing,
-                                        0.0..=240.0,
-                                    )
-                                    .text("Timing ±")
-                                    .suffix(" ticks")
-                                    .step_by(1.0),
+                                add_wheel_slider(
+                                    ui,
+                                    &mut window.tools.randomize_timing,
+                                    0.0..=240.0,
+                                    |slider| {
+                                        slider
+                                            .text("Timing ±")
+                                            .suffix(" ticks")
+                                            .step_by(1.0)
+                                    },
                                 );
-                                ui.add(
-                                    egui::Slider::new(
-                                        &mut window.tools.randomize_density,
-                                        0.0..=100.0,
-                                    )
-                                    .text("Thin")
-                                    .suffix("%")
-                                    .step_by(1.0),
+                                add_wheel_slider(
+                                    ui,
+                                    &mut window.tools.randomize_density,
+                                    0.0..=100.0,
+                                    |slider| {
+                                        slider
+                                            .text("Thin")
+                                            .suffix("%")
+                                            .step_by(1.0)
+                                    },
                                 );
                                 if ui
                                     .add_enabled(
@@ -7088,66 +7287,66 @@ impl AppUI {
                                         let mut velocity_percent =
                                             window.tools.velocity_factor
                                                 * 100.0;
-                                        if ui
-                                            .add(
-                                                egui::Slider::new(
-                                                    &mut velocity_percent,
-                                                    0.0..=200.0,
-                                                )
-                                                .text("Scale")
-                                                .suffix("%"),
-                                            )
-                                            .changed()
+                                        if add_wheel_slider_step(
+                                            ui,
+                                            &mut velocity_percent,
+                                            0.0..=200.0,
+                                            Some(5.0),
+                                            false,
+                                            |slider| {
+                                                slider
+                                                    .text("Scale")
+                                                    .suffix("%")
+                                            },
+                                        )
+                                        .changed()
                                         {
                                             window.tools.velocity_factor =
                                                 velocity_percent / 100.0;
                                         }
                                     }
                                     VelocityMode::Compress => {
-                                        ui.add(
-                                            egui::Slider::new(
-                                                &mut window
-                                                    .tools
-                                                    .velocity_amount,
-                                                0.0..=100.0,
-                                            )
-                                            .text("Amount")
-                                            .suffix("%"),
+                                        add_wheel_slider(
+                                            ui,
+                                            &mut window.tools.velocity_amount,
+                                            0.0..=100.0,
+                                            |slider| {
+                                                slider
+                                                    .text("Amount")
+                                                    .suffix("%")
+                                            },
                                         );
                                     }
                                     VelocityMode::Expand => {
-                                        ui.add(
-                                            egui::Slider::new(
-                                                &mut window
-                                                    .tools
-                                                    .velocity_amount,
-                                                0.0..=100.0,
-                                            )
-                                            .text("Amount")
-                                            .suffix("%"),
+                                        add_wheel_slider(
+                                            ui,
+                                            &mut window.tools.velocity_amount,
+                                            0.0..=100.0,
+                                            |slider| {
+                                                slider
+                                                    .text("Amount")
+                                                    .suffix("%")
+                                            },
                                         );
                                     }
                                     VelocityMode::Curve => {
-                                        ui.add(
-                                            egui::Slider::new(
-                                                &mut window
-                                                    .tools
-                                                    .velocity_curve,
-                                                -100.0..=100.0,
-                                            )
-                                            .text("Curve"),
+                                        add_wheel_slider(
+                                            ui,
+                                            &mut window.tools.velocity_curve,
+                                            -100.0..=100.0,
+                                            |slider| slider.text("Curve"),
                                         );
                                     }
                                     VelocityMode::Randomize => {
-                                        ui.add(
-                                            egui::Slider::new(
-                                                &mut window
-                                                    .tools
-                                                    .velocity_random,
-                                                0.0..=64.0,
-                                            )
-                                            .text("Amount")
-                                            .step_by(1.0),
+                                        add_wheel_slider(
+                                            ui,
+                                            &mut window.tools.velocity_random,
+                                            0.0..=64.0,
+                                            |slider| {
+                                                slider
+                                                    .text("Amount")
+                                                    .step_by(1.0)
+                                            },
                                         );
                                     }
                                 }
@@ -8869,19 +9068,22 @@ fn show_insert_slots(ui: &mut egui::Ui, inserts: &mut Vec<InsertSlot>) -> bool {
 
                 match &mut slot.effect {
                     Some(TrackEffect::Saturation { drive_db, mix }) => {
-                        changed |= ui
-                            .add(
-                                egui::Slider::new(drive_db, 0.0..=36.0)
-                                    .text("Drive")
-                                    .suffix(" dB"),
-                            )
-                            .changed();
-                        changed |= ui
-                            .add(
-                                egui::Slider::new(mix, 0.0..=1.0)
-                                    .text("Effect mix"),
-                            )
-                            .changed();
+                        changed |= add_wheel_slider(
+                            ui,
+                            drive_db,
+                            0.0..=36.0,
+                            |slider| {
+                                slider.text("Drive").suffix(" dB")
+                            },
+                        )
+                        .changed();
+                        changed |= add_wheel_slider(
+                            ui,
+                            mix,
+                            0.0..=1.0,
+                            |slider| slider.text("Effect mix"),
+                        )
+                        .changed();
                     }
                     Some(TrackEffect::Filter { mode, cutoff }) => {
                         ui.horizontal(|ui| {
@@ -8906,63 +9108,75 @@ fn show_insert_slots(ui: &mut egui::Ui, inserts: &mut Vec<InsertSlot>) -> bool {
                                         .changed();
                                 });
                         });
-                        changed |= ui
-                            .add(
-                                egui::Slider::new(cutoff, 20.0..=20_000.0)
+                        changed |= add_wheel_slider_log(
+                            ui,
+                            cutoff,
+                            20.0..=20_000.0,
+                            |slider| {
+                                slider
                                     .logarithmic(true)
                                     .text("Cutoff")
-                                    .suffix(" Hz"),
-                            )
-                            .changed();
+                                    .suffix(" Hz")
+                            },
+                        )
+                        .changed();
                     }
                     Some(TrackEffect::BitCrusher {
                         bits,
                         downsample,
                     }) => {
                         let mut bit_value = *bits as f32;
-                        if ui
-                            .add(
-                                egui::Slider::new(&mut bit_value, 1.0..=24.0)
-                                    .step_by(1.0)
-                                    .text("Bits"),
-                            )
-                            .changed()
+                        if add_wheel_slider(
+                            ui,
+                            &mut bit_value,
+                            1.0..=24.0,
+                            |slider| {
+                                slider.step_by(1.0).text("Bits")
+                            },
+                        )
+                        .changed()
                         {
                             *bits = bit_value.round() as u32;
                             changed = true;
                         }
                         let mut hold_value = *downsample as f32;
-                        if ui
-                            .add(
-                                egui::Slider::new(
-                                    &mut hold_value,
-                                    1.0..=64.0,
-                                )
-                                .step_by(1.0)
-                                .text("Sample hold")
-                                .suffix("×"),
-                            )
-                            .changed()
+                        if add_wheel_slider(
+                            ui,
+                            &mut hold_value,
+                            1.0..=64.0,
+                            |slider| {
+                                slider
+                                    .step_by(1.0)
+                                    .text("Sample hold")
+                                    .suffix("×")
+                            },
+                        )
+                        .changed()
                         {
                             *downsample = hold_value.round() as u32;
                             changed = true;
                         }
                     }
                     Some(TrackEffect::Tremolo { rate, depth }) => {
-                        changed |= ui
-                            .add(
-                                egui::Slider::new(rate, 0.1..=20.0)
+                        changed |= add_wheel_slider_log(
+                            ui,
+                            rate,
+                            0.1..=20.0,
+                            |slider| {
+                                slider
                                     .logarithmic(true)
                                     .text("Rate")
-                                    .suffix(" Hz"),
-                            )
-                            .changed();
-                        changed |= ui
-                            .add(
-                                egui::Slider::new(depth, 0.0..=1.0)
-                                    .text("Depth"),
-                            )
-                            .changed();
+                                    .suffix(" Hz")
+                            },
+                        )
+                        .changed();
+                        changed |= add_wheel_slider(
+                            ui,
+                            depth,
+                            0.0..=1.0,
+                            |slider| slider.text("Depth"),
+                        )
+                        .changed();
                     }
                     None => {
                         ui.weak("Choose an effect kind above.");
@@ -8975,34 +9189,31 @@ fn show_insert_slots(ui: &mut egui::Ui, inserts: &mut Vec<InsertSlot>) -> bool {
                     .spacing([6.0, 2.0])
                     .show(ui, |ui| {
                         ui.label("In");
-                        changed |= ui
-                            .add(
-                                egui::Slider::new(
-                                    &mut slot.input_gain,
-                                    0.0..=2.0,
-                                )
-                                .suffix("×"),
-                            )
-                            .changed();
+                        changed |= add_wheel_slider(
+                            ui,
+                            &mut slot.input_gain,
+                            0.0..=2.0,
+                            |slider| slider.suffix("×"),
+                        )
+                        .changed();
                         ui.end_row();
                         ui.label("Mix");
-                        changed |= ui
-                            .add(egui::Slider::new(
-                                &mut slot.mix,
-                                0.0..=1.0,
-                            ))
-                            .changed();
+                        changed |= add_wheel_slider(
+                            ui,
+                            &mut slot.mix,
+                            0.0..=1.0,
+                            |slider| slider,
+                        )
+                        .changed();
                         ui.end_row();
                         ui.label("Out");
-                        changed |= ui
-                            .add(
-                                egui::Slider::new(
-                                    &mut slot.output_gain,
-                                    0.0..=2.0,
-                                )
-                                .suffix("×"),
-                            )
-                            .changed();
+                        changed |= add_wheel_slider(
+                            ui,
+                            &mut slot.output_gain,
+                            0.0..=2.0,
+                            |slider| slider.suffix("×"),
+                        )
+                        .changed();
                         ui.end_row();
                     });
             });
@@ -10193,13 +10404,14 @@ impl eframe::App for AppUI {
                                 }
 
                                 ui.label("Vol");
-                                ui.add_sized(
-                                    [80.0, 18.0],
-                                    egui::Slider::new(
-                                        &mut after.volume,
-                                        0.0..=1.5,
-                                    )
-                                    .show_value(false),
+                                add_sized_wheel_slider_step(
+                                    ui,
+                                    egui::vec2(80.0, 18.0),
+                                    &mut after.volume,
+                                    0.0..=1.5,
+                                    Some(0.05),
+                                    false,
+                                    |slider| slider.show_value(false),
                                 )
                                 .on_hover_text(format!(
                                     "Track volume {:.0}%",
@@ -13173,6 +13385,8 @@ mod tests {
         knob_from_normalized, knob_to_normalized, load_wav_interleaved,
         load_wav_range_interleaved, loop_range_frames, measure_integrated_loudness,
         merge_continuous_edit, metronome_config, midi_clip_note_spans, midi_clip_notes,
+        slider_wheel_value, slider_wheel_value_with_step,
+        slider_wheel_log_value,
         midi_clip_content_notes, midi_clips_in_marquee, note_name, processed_file_stem,
         punch_waiting, render_pitch_stretch, reverse_interleaved, saturate, take_lane_layout,
         tape_stretch_interleaved, timeline_snap_ticks, tremolo, wav_file_info, wav_peak,
@@ -13499,6 +13713,27 @@ mod tests {
         };
         assert_eq!(to.volume, 0.7);
         assert_eq!(history.past()[0].description, "Track volume");
+    }
+
+    #[test]
+    fn slider_wheel_moves_five_percent_per_notch() {
+        assert_eq!(slider_wheel_value(50.0, 0.0, 100.0, 1.0), 55.0);
+        assert_eq!(slider_wheel_value(50.0, 0.0, 100.0, -1.0), 45.0);
+        assert_eq!(slider_wheel_value(2.0, 0.0, 10.0, 1.0), 2.5);
+        assert_eq!(slider_wheel_value(99.0, 0.0, 100.0, 2.0), 100.0);
+        assert_eq!(slider_wheel_value(1.0, 0.0, 100.0, -2.0), 0.0);
+        assert_eq!(
+            slider_wheel_value_with_step(1.0, 0.0, 1.5, 1.0, 0.05),
+            1.05
+        );
+        assert_eq!(
+            slider_wheel_value_with_step(1.0, 0.0, 1.5, -1.0, 0.05),
+            0.95
+        );
+        let log_up = slider_wheel_log_value(100.0, 20.0, 20_000.0, 1.0);
+        let log_down = slider_wheel_log_value(100.0, 20.0, 20_000.0, -1.0);
+        assert!((log_up - 141.25).abs() < 0.1);
+        assert!((log_down - 70.79).abs() < 0.1);
     }
 
     #[test]

@@ -100,6 +100,7 @@ struct UiState {
 - [✓] **Playhead click-to-seek**: ruler lower lane seeks; upper lane sets the loop
 - [✓] **Timeline zoom**: Ctrl+wheel to zoom in/out on timeline
 - [✓] **Timeline horizontal scroll**: Mouse wheel or middle-drag to scroll horizontally
+- [✓] **Slider mouse wheel**: Wheel over a slider moves it by 5% of its travel; up increases, down decreases
 - [ ] **Vertical scroll**: Track list overflow handling
 - [✓] **Loop range UI**: Drag the ruler loop lane or use In/Out at the playhead
 - [ ] **Markers UI**: Flag icons on ruler, click to jump
