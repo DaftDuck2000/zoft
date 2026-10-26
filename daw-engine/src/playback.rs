@@ -81,6 +81,9 @@ pub struct PlayableTrack {
     /// Matches `PlayableClip::track` and `PlayableNote::track`.
     pub index: u32,
     pub gain: f32,
+    /// Equal-power pan gains for the left and right output channels.
+    pub pan_left: f32,
+    pub pan_right: f32,
     pub effects: Vec<PlayableEffect>,
 }
 
@@ -423,8 +426,24 @@ impl PlaybackMixer {
                     );
                 }
                 let gain = track.gain;
-                for (dst, src) in out.iter_mut().zip(track_buf.iter()) {
-                    *dst += *src * gain;
+                let pan_left = track.pan_left;
+                let pan_right = track.pan_right;
+                let mono_pan = (pan_left + pan_right) * 0.5;
+                for frame in 0..frames {
+                    let base = frame * out_ch;
+                    for channel in 0..out_ch {
+                        let pan = if out_ch == 1 {
+                            mono_pan
+                        } else if channel == 0 {
+                            pan_left
+                        } else if channel == 1 {
+                            pan_right
+                        } else {
+                            1.0
+                        };
+                        out[base + channel] +=
+                            track_buf[base + channel] * gain * pan;
+                    }
                 }
             }
             self.tracks = tracks;
@@ -994,6 +1013,8 @@ mod tests {
         mixer.set_tracks(vec![PlayableTrack {
             index: 0,
             gain: 0.25,
+            pan_left: 1.0,
+            pan_right: 1.0,
             effects: Vec::new(),
         }]);
 
@@ -1003,12 +1024,39 @@ mod tests {
     }
 
     #[test]
+    fn track_pan_routes_the_signal_to_one_channel() {
+        let a = clip(vec![1.0; 4], 0, 0);
+        let mut mixer = PlaybackMixer::new(10, 2, vec![a], 0);
+        mixer.set_tracks(vec![PlayableTrack {
+            index: 0,
+            gain: 1.0,
+            pan_left: 1.0,
+            pan_right: 0.0,
+            effects: Vec::new(),
+        }]);
+
+        let mut out = [0.0f32; 8];
+        mixer.fill_unclamped(&mut out);
+        assert!(out
+            .iter()
+            .step_by(2)
+            .all(|sample| (sample - 1.0).abs() < 1e-6));
+        assert!(out
+            .iter()
+            .skip(1)
+            .step_by(2)
+            .all(|sample| sample.abs() < 1e-6));
+    }
+
+    #[test]
     fn track_effects_process_audio_before_the_fader() {
         let a = clip(vec![1.0; 100], 0, 0);
         let mut mixer = PlaybackMixer::new(1000, 1, vec![a], 0);
         mixer.set_tracks(vec![PlayableTrack {
             index: 0,
             gain: 1.0,
+            pan_left: 1.0,
+            pan_right: 1.0,
             effects: vec![PlayableEffect {
                 effect: TrackEffect::Tremolo {
                     rate: 10.0,
@@ -1034,6 +1082,8 @@ mod tests {
         mixer.set_tracks(vec![PlayableTrack {
             index: 0,
             gain: 1.0,
+            pan_left: 1.0,
+            pan_right: 1.0,
             effects: vec![PlayableEffect {
                 effect: TrackEffect::Tremolo {
                     rate: 10.0,
@@ -1064,6 +1114,8 @@ mod tests {
         mixer.set_tracks(vec![PlayableTrack {
             index: 0,
             gain: 0.0,
+            pan_left: 1.0,
+            pan_right: 1.0,
             effects: Vec::new(),
         }]);
 

@@ -106,7 +106,7 @@ struct UiState {
 - [ ] **Markers UI**: Flag icons on ruler, click to jump
 - [ ] **Track reordering**: Drag tracks to reorder in track list
 - [ ] **Track context menu**: Right-click to add/remove/duplicate tracks
-- [✓] **Track header controls**: M/S/R, monitor mode, volume fader; pan not yet
+- [✓] **Track header controls**: M/S/R, monitor mode, volume fader; pan available in the FX Rack
 - [~] **Transport bar enhancements**: Tap tempo and Bars/Time ruler dropdown done; ◄◄ | ►► buttons not yet
 - [✓] **Metronome toggle**: Click toggle; count-in not yet
 - [ ] **Dark/light theme toggle**: User preference (dark default only)

@@ -337,9 +337,10 @@ impl PanLaw {
     pub fn from_linear(pan: f32) -> Self {
         let pan = pan.clamp(-1.0, 1.0);
         let angle = (pan + 1.0) * std::f32::consts::FRAC_PI_4;
+        let norm = std::f32::consts::SQRT_2;
         Self {
-            left_gain: angle.cos(),
-            right_gain: angle.sin(),
+            left_gain: angle.cos() * norm,
+            right_gain: angle.sin() * norm,
         }
     }
 
@@ -399,6 +400,21 @@ mod tests {
         assert_eq!(a, b);
         b.enabled = false;
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn pan_law_is_unity_at_center_and_equal_power_at_edges() {
+        let center = PanLaw::from_linear(0.0);
+        assert!((center.left_gain - 1.0).abs() < 1e-6);
+        assert!((center.right_gain - 1.0).abs() < 1e-6);
+
+        let left = PanLaw::from_linear(-1.0);
+        assert!((left.left_gain - std::f32::consts::SQRT_2).abs() < 1e-6);
+        assert!(left.right_gain.abs() < 1e-6);
+
+        let right = PanLaw::from_linear(1.0);
+        assert!(right.left_gain.abs() < 1e-6);
+        assert!((right.right_gain - std::f32::consts::SQRT_2).abs() < 1e-6);
     }
 
     #[test]

@@ -5,7 +5,7 @@ use daw_core::audio_pool::AudioFileRef;
 use daw_core::clip::{AudioClip, ClipId, Fade, FadeCurve, MidiClip, MidiEvent, MidiMessage, TimeStretchMode, TimelinePos};
 use daw_core::project::{BitDepth, Color, TempoMap};
 use daw_core::serialization::ProjectSerialization;
-use daw_core::track::{FilterMode, InsertSlot, MonitorMode, Track, TrackId, TrackEffect, TrackType};
+use daw_core::track::{FilterMode, InsertSlot, MonitorMode, PanLaw, Track, TrackId, TrackEffect, TrackType};
 use daw_core::undo::History;
 use daw_core::Project;
 use daw_core::WaveformOverview;
@@ -218,6 +218,7 @@ struct TrackShape {
     solo: bool,
     record_arm: bool,
     volume: f32,
+    pan: PanLaw,
     monitor_mode: MonitorMode,
 }
 
@@ -228,6 +229,7 @@ impl TrackShape {
             solo: track.solo,
             record_arm: track.record_arm,
             volume: track.volume,
+            pan: track.pan,
             monitor_mode: track.monitor_mode,
         }
     }
@@ -237,6 +239,7 @@ impl TrackShape {
         track.solo = self.solo;
         track.record_arm = self.record_arm;
         track.set_volume(self.volume);
+        track.pan = self.pan;
         track.monitor_mode = self.monitor_mode;
     }
 }
@@ -1568,6 +1571,8 @@ impl EditAction {
                     .to_string()
                 } else if from.volume != to.volume {
                     "Track volume".to_string()
+                } else if from.pan != to.pan {
+                    "Track pan".to_string()
                 } else if from.monitor_mode != to.monitor_mode {
                     match to.monitor_mode {
                         MonitorMode::Off => "Monitor off",
@@ -6697,6 +6702,49 @@ impl AppUI {
                                                         after.volume * 100.0
                                                     ));
                                                 });
+                                                ui.horizontal(|ui| {
+                                                    ui.label("Pan");
+                                                    let mut pan =
+                                                        after.pan.to_linear();
+                                                    let response =
+                                                        add_sized_wheel_slider(
+                                                            ui,
+                                                            egui::vec2(
+                                                                120.0, 18.0,
+                                                            ),
+                                                            &mut pan,
+                                                            -1.0..=1.0,
+                                                            |slider| {
+                                                                slider.show_value(
+                                                                    false,
+                                                                )
+                                                            },
+                                                        )
+                                                        .on_hover_text(
+                                                            "Track pan",
+                                                        );
+                                                    if response.changed() {
+                                                        after.pan =
+                                                            PanLaw::from_linear(
+                                                                pan,
+                                                            );
+                                                    }
+                                                    let pan_text =
+                                                        if pan.abs() < 0.005 {
+                                                            "C".to_string()
+                                                        } else if pan < 0.0 {
+                                                            format!(
+                                                                "L{:.0}",
+                                                                -pan * 100.0
+                                                            )
+                                                        } else {
+                                                            format!(
+                                                                "R{:.0}",
+                                                                pan * 100.0
+                                                            )
+                                                        };
+                                                    ui.label(pan_text);
+                                                });
                                                 ui.separator();
                                                 if show_insert_slots(
                                                     ui,
@@ -11623,6 +11671,8 @@ impl AppUI {
                 self.project.tracks.get(track_id).map(|track| PlayableTrack {
                     index: index as u32,
                     gain: audible_track_gain(track, any_solo).unwrap_or(0.0),
+                    pan_left: track.pan.left_gain,
+                    pan_right: track.pan.right_gain,
                     effects: track
                         .inserts
                         .iter()
@@ -13517,6 +13567,7 @@ mod tests {
             solo: false,
             record_arm: false,
             volume: 1.0,
+            pan: daw_core::track::PanLaw::center(),
             monitor_mode: MonitorMode::Off,
         };
 
@@ -13562,6 +13613,15 @@ mod tests {
             to: louder,
         };
         assert_eq!(action.description(), "Track volume");
+
+        let mut panned = base;
+        panned.pan = daw_core::track::PanLaw::from_linear(-0.5);
+        let action = EditAction::TrackState {
+            track_id,
+            from: base,
+            to: panned,
+        };
+        assert_eq!(action.description(), "Track pan");
 
         let mut monitoring = base;
         monitoring.monitor_mode = MonitorMode::Auto;
@@ -13680,6 +13740,7 @@ mod tests {
             solo: false,
             record_arm: false,
             volume: 1.0,
+            pan: daw_core::track::PanLaw::center(),
             monitor_mode: MonitorMode::Off,
         };
         let mut history: History<EditAction> = History::new(10);
