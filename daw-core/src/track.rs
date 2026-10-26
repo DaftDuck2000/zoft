@@ -10,6 +10,11 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TrackId(pub Uuid);
 
+/// Ghost-note visibility defaults to on for new and legacy tracks.
+fn default_show_as_ghost() -> bool {
+    true
+}
+
 impl TrackId {
     pub fn new() -> Self {
         Self(Uuid::new_v4())
@@ -43,6 +48,9 @@ pub struct Track {
     /// MIDI clips attached to this track (keys from `Project::midi_clips`).
     #[serde(default)]
     pub midi_clips: Vec<ClipId>,
+    /// Include this track's notes as ghost notes in piano rolls.
+    #[serde(default = "default_show_as_ghost")]
+    pub show_as_ghost: bool,
     pub visible: bool,
     pub height: f32,
     pub folder_parent: Option<TrackId>,
@@ -70,6 +78,7 @@ impl Track {
             automation_lanes: HashMap::new(),
             clips: Vec::new(),
             midi_clips: Vec::new(),
+            show_as_ghost: true,
             visible: true,
             height: 60.0,
             folder_parent: None,
@@ -390,5 +399,23 @@ mod tests {
         assert_eq!(a, b);
         b.enabled = false;
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn new_tracks_show_as_ghosts_by_default() {
+        let track = Track::new_audio("Audio");
+        assert!(track.show_as_ghost);
+    }
+
+    #[test]
+    fn legacy_tracks_without_ghost_flag_load_as_visible() {
+        let track = Track::new_audio("Audio");
+        let mut value = serde_json::to_value(&track).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("show_as_ghost");
+        let loaded: Track = serde_json::from_value(value).unwrap();
+        assert!(loaded.show_as_ghost);
     }
 }

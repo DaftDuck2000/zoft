@@ -25,7 +25,7 @@ Full-featured piano roll: note entry/selection/editing, velocity lanes, CC lanes
 - [x] Zoom: Ctrl+wheel and +/− buttons; Fit resets the view
 - [x] Scroll: Wheel pans time, Shift+wheel pans pitch, middle-drag pans both
 - [ ] Fit selection, horizontal/vertical scrollbars
-- [x] Ghost notes: Show notes from other MIDI tracks/clips overlapping the current clip (dimmed), toggleable
+- [x] Ghost notes: Show notes from other MIDI tracks/clips overlapping the current clip (dimmed), toggleable globally and per track
 - [ ] Scale highlighting: Highlight notes in current scale
 - [ ] Drum mode: Note names instead of piano keys, one-row-per-drum
 
@@ -184,6 +184,7 @@ enum CCEditMode {
 - 2026-10-26: Added the project playhead to the piano roll plus a Notes tool for joining same-pitch notes and splitting notes at the playhead
 - 2026-10-26: Added a bar/beat ruler. Clicking or dragging the ruler, or dragging the playhead line anywhere in the grid, seeks the project playhead and pauses playback like the arrange timeline
 - 2026-10-26: Added toggleable ghost notes for other MIDI tracks/clips in the project, mapped into the open clip's content coordinates and drawn dimmed behind the active notes like FL Studio's ghost channels
+- 2026-10-26: Added a per-track ghost-note toggle. MIDI/instrument track headers have a G button (also available as “Show as ghost notes” in the track menu) so large projects can hide individual tracks from the ghost-note view
 - 2026-10-26: Quantize is the default selected tool and the CC lane starts hidden, so the piano roll opens with a clean grid and one focused tool panel
 - YYYY-MM-DD: Pencil/Eraser/Select tools
 - YYYY-MM-DD: Note drag + resize

@@ -863,6 +863,9 @@ fn ghost_notes_for_clip(
         let Some(track) = project.tracks.get(track_id) else {
             continue;
         };
+        if !track.show_as_ghost {
+            continue;
+        }
         for other_id in &track.midi_clips {
             if *other_id == clip_id {
                 continue;
@@ -9791,6 +9794,7 @@ impl eframe::App for AppUI {
             let mut add_midi_track = false;
             let mut remove_track = None;
             let mut open_track_effects = None;
+            let mut ghost_changes: Vec<(TrackId, bool)> = Vec::new();
             ui.spacing_mut().item_spacing.y = 0.0;
             let (header_rect, _) = ui.allocate_exact_size(
                 egui::vec2(ui.available_width(), RULER_HEIGHT),
@@ -9838,6 +9842,7 @@ impl eframe::App for AppUI {
                             .max_rect(row_rect)
                             .layout(egui::Layout::left_to_right(egui::Align::Center)),
                     );
+                    row_ui.spacing_mut().item_spacing.x = 4.0;
                     let row = egui::InnerResponse::new(
                         (|ui: &mut egui::Ui| {
                         let color = egui::Color32::from_rgb(track.color.0, track.color.1, track.color.2);
@@ -9940,8 +9945,36 @@ impl eframe::App for AppUI {
                             open_track_effects = Some(*track_id);
                         }
 
+                        if matches!(
+                            track.track_type,
+                            TrackType::Midi | TrackType::Instrument
+                        ) {
+                            let ghost_color = if track.show_as_ghost {
+                                egui::Color32::from_rgb(120, 170, 240)
+                            } else {
+                                egui::Color32::GRAY
+                            };
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        egui::RichText::new("G").color(ghost_color),
+                                    )
+                                    .min_size([20.0, 20.0].into()),
+                                )
+                                .on_hover_text(
+                                    "Include this track's notes as piano-roll ghost notes",
+                                )
+                                .clicked()
+                            {
+                                ghost_changes.push((
+                                    *track_id,
+                                    !track.show_as_ghost,
+                                ));
+                            }
+                        }
+
                         ui.add_sized(
-                            [72.0, 18.0],
+                            [56.0, 18.0],
                             egui::Slider::new(&mut after.volume, 0.0..=1.5).show_value(false),
                         )
                         .on_hover_text(format!("Track volume {:.0}%", after.volume * 100.0));
@@ -9960,6 +9993,22 @@ impl eframe::App for AppUI {
                         if ui.button("Track Effects…").clicked() {
                             open_track_effects = Some(*track_id);
                             ui.close_menu();
+                        }
+                        if matches!(
+                            track.track_type,
+                            TrackType::Midi | TrackType::Instrument
+                        ) {
+                            ui.separator();
+                            let mut show_as_ghost = track.show_as_ghost;
+                            if ui
+                                .checkbox(
+                                    &mut show_as_ghost,
+                                    "Show as ghost notes",
+                                )
+                                .changed()
+                            {
+                                ghost_changes.push((*track_id, show_as_ghost));
+                            }
                         }
                         ui.separator();
                         if ui.button("Remove Track").clicked() {
@@ -9993,6 +10042,14 @@ impl eframe::App for AppUI {
                     self.needs_audio_refresh = true;
                 } else {
                     self.refresh_playback_if_playing();
+                }
+            }
+            for (track_id, show_as_ghost) in ghost_changes {
+                if let Some(track) = self.project.tracks.get_mut(&track_id) {
+                    if track.show_as_ghost != show_as_ghost {
+                        track.show_as_ghost = show_as_ghost;
+                        self.project.modified = true;
+                    }
                 }
             }
             if add_audio_track {
@@ -14319,7 +14376,7 @@ mod tests {
         far_track.add_midi_clip(far_id);
 
         project.add_track(track);
-        project.add_track(different_track);
+        let different_track_id = project.add_track(different_track);
         project.add_track(far_track);
 
         let mut ghosts = ghost_notes_for_clip(&project, current_id, 1920);
@@ -14333,6 +14390,15 @@ mod tests {
             (ghosts[1].start, ghosts[1].end, ghosts[1].pitch),
             (720, 960, 67)
         );
+
+        project
+            .tracks
+            .get_mut(&different_track_id)
+            .unwrap()
+            .show_as_ghost = false;
+        let ghosts = ghost_notes_for_clip(&project, current_id, 1920);
+        assert_eq!(ghosts.len(), 1);
+        assert_eq!(ghosts[0].pitch, 60);
     }
 
     #[test]
