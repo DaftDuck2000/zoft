@@ -1526,9 +1526,46 @@ impl PianoRollWindow {
     }
 }
 
+/// Selected MIDI tool shown in the piano-roll side panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MidiToolTab {
+    Quantize,
+    Transpose,
+    Humanize,
+    Legato,
+    NoteLength,
+    Velocity,
+    Controllers,
+}
+
+impl MidiToolTab {
+    const ALL: [Self; 7] = [
+        Self::Quantize,
+        Self::Transpose,
+        Self::Humanize,
+        Self::Legato,
+        Self::NoteLength,
+        Self::Velocity,
+        Self::Controllers,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Quantize => "Quantize",
+            Self::Transpose => "Transpose",
+            Self::Humanize => "Humanize",
+            Self::Legato => "Legato",
+            Self::NoteLength => "Note Length",
+            Self::Velocity => "Velocity",
+            Self::Controllers => "CC Lane",
+        }
+    }
+}
+
 /// State of the floating MIDI tools window (quantize, transpose, velocity).
 #[derive(Debug, Clone, Copy)]
 struct MidiToolsState {
+    selected_tool: MidiToolTab,
     quantize_snap: PianoRollSnap,
     quantize_strength: f32,
     transpose: i32,
@@ -1542,6 +1579,7 @@ struct MidiToolsState {
 impl Default for MidiToolsState {
     fn default() -> Self {
         Self {
+            selected_tool: MidiToolTab::Quantize,
             quantize_snap: PianoRollSnap::Beat,
             quantize_strength: 1.0,
             transpose: 0,
@@ -6322,179 +6360,225 @@ impl AppUI {
                             .show(ui, |ui| {
                         ui.heading("MIDI Tools");
                         ui.weak("Applies to this clip.");
-                        ui.separator();
-
-                        ui.heading("Quantize");
                         ui.horizontal(|ui| {
-                            ui.label("Grid:");
-                            egui::ComboBox::from_id_salt("piano_roll_quantize_grid")
-                                .selected_text(window.tools.quantize_snap.label())
-                                .width(76.0)
+                            ui.label("Tool:");
+                            egui::ComboBox::from_id_salt("piano_roll_tool")
+                                .selected_text(window.tools.selected_tool.label())
+                                .width(120.0)
                                 .show_ui(ui, |ui| {
-                                    for snap in PianoRollSnap::ALL {
-                                        if snap != PianoRollSnap::Off {
-                                            ui.selectable_value(
-                                                &mut window.tools.quantize_snap,
-                                                snap,
-                                                snap.label(),
-                                            );
-                                        }
-                                    }
-                                });
-                        });
-                        let mut strength = window.tools.quantize_strength * 100.0;
-                        if ui
-                            .add(
-                                egui::Slider::new(&mut strength, 0.0..=100.0)
-                                    .text("Strength")
-                                    .suffix("%"),
-                            )
-                            .changed()
-                        {
-                            window.tools.quantize_strength = strength / 100.0;
-                        }
-                        if ui
-                            .add_enabled(
-                                window.tools.quantize_snap != PianoRollSnap::Off
-                                    && window.tools.quantize_strength > 0.0,
-                                egui::Button::new("Quantize"),
-                            )
-                            .clicked()
-                        {
-                            do_quantize = true;
-                        }
-
-                        ui.separator();
-                        ui.heading("Transpose");
-                        ui.add(
-                            egui::Slider::new(&mut window.tools.transpose, -24..=24)
-                                .text("Semitones")
-                                .step_by(1.0),
-                        );
-                        ui.horizontal(|ui| {
-                            if ui.small_button("-12").clicked() {
-                                window.tools.transpose -= 12;
-                            }
-                            if ui.small_button("+12").clicked() {
-                                window.tools.transpose += 12;
-                            }
-                            window.tools.transpose =
-                                window.tools.transpose.clamp(-24, 24);
-                        });
-                        if ui
-                            .add_enabled(
-                                window.tools.transpose != 0,
-                                egui::Button::new("Transpose"),
-                            )
-                            .clicked()
-                        {
-                            do_transpose = true;
-                        }
-
-                        ui.separator();
-                        ui.heading("Velocity");
-                        ui.checkbox(
-                            &mut window.show_velocity_lane,
-                            "Show velocity lane",
-                        );
-                        let mut velocity_percent =
-                            window.tools.velocity_factor * 100.0;
-                        if ui
-                            .add(
-                                egui::Slider::new(&mut velocity_percent, 0.0..=200.0)
-                                    .text("Scale")
-                                    .suffix("%"),
-                            )
-                            .changed()
-                        {
-                            window.tools.velocity_factor = velocity_percent / 100.0;
-                        }
-                        if ui
-                            .add_enabled(
-                                (window.tools.velocity_factor - 1.0).abs() > 1e-3,
-                                egui::Button::new("Apply Velocity"),
-                            )
-                            .clicked()
-                        {
-                            do_velocity = true;
-                        }
-
-                        ui.separator();
-                        ui.heading("Humanize");
-                        ui.add(
-                            egui::Slider::new(
-                                &mut window.tools.humanize_timing,
-                                0.0..=240.0,
-                            )
-                            .text("Timing")
-                            .suffix(" ticks"),
-                        );
-                        ui.add(
-                            egui::Slider::new(
-                                &mut window.tools.humanize_velocity,
-                                0.0..=64.0,
-                            )
-                            .text("Velocity"),
-                        );
-                        if ui
-                            .add_enabled(
-                                window.tools.humanize_timing > 0.0
-                                    || window.tools.humanize_velocity > 0.0,
-                                egui::Button::new("Humanize"),
-                            )
-                            .clicked()
-                        {
-                            do_humanize = true;
-                        }
-
-                        ui.separator();
-                        ui.heading("Legato");
-                        ui.add(
-                            egui::Slider::new(&mut window.tools.legato_gap, 0.0..=240.0)
-                                .text("Gap")
-                                .suffix(" ticks"),
-                        );
-                        if ui.button("Legato").clicked() {
-                            do_legato = true;
-                        }
-
-                        ui.separator();
-                        ui.heading("Note Length");
-                        ui.add(
-                            egui::Slider::new(
-                                &mut window.tools.note_length,
-                                30.0..=3840.0,
-                            )
-                            .text("Length")
-                            .suffix(" ticks"),
-                        );
-                        if ui.button("Set Length").clicked() {
-                            do_note_length = true;
-                        }
-
-                        ui.separator();
-                        ui.heading("Controllers");
-                        ui.checkbox(&mut window.show_cc_lane, "Show CC lane");
-                        if window.show_cc_lane {
-                            ui.horizontal(|ui| {
-                                ui.label("CC:");
-                                egui::ComboBox::from_id_salt(
-                                    "piano_roll_cc_controller",
-                                )
-                                .selected_text(cc_controller_label(
-                                    window.cc_controller,
-                                ))
-                                .width(130.0)
-                                .show_ui(ui, |ui| {
-                                    for (controller, label) in CC_CONTROLLERS {
+                                    for tool in MidiToolTab::ALL {
                                         ui.selectable_value(
-                                            &mut window.cc_controller,
-                                            controller,
-                                            label,
+                                            &mut window.tools.selected_tool,
+                                            tool,
+                                            tool.label(),
                                         );
                                     }
                                 });
-                            });
+                        });
+                        ui.separator();
+
+                        match window.tools.selected_tool {
+                            MidiToolTab::Quantize => {
+                                ui.weak("Move note starts toward the grid.");
+                                ui.horizontal(|ui| {
+                                    ui.label("Grid:");
+                                    egui::ComboBox::from_id_salt(
+                                        "piano_roll_quantize_grid",
+                                    )
+                                    .selected_text(window.tools.quantize_snap.label())
+                                    .width(76.0)
+                                    .show_ui(ui, |ui| {
+                                        for snap in PianoRollSnap::ALL {
+                                            if snap != PianoRollSnap::Off {
+                                                ui.selectable_value(
+                                                    &mut window.tools.quantize_snap,
+                                                    snap,
+                                                    snap.label(),
+                                                );
+                                            }
+                                        }
+                                    });
+                                });
+                                let mut strength =
+                                    window.tools.quantize_strength * 100.0;
+                                if ui
+                                    .add(
+                                        egui::Slider::new(
+                                            &mut strength,
+                                            0.0..=100.0,
+                                        )
+                                        .text("Strength")
+                                        .suffix("%"),
+                                    )
+                                    .changed()
+                                {
+                                    window.tools.quantize_strength =
+                                        strength / 100.0;
+                                }
+                                if ui
+                                    .add_enabled(
+                                        window.tools.quantize_snap
+                                            != PianoRollSnap::Off
+                                            && window.tools.quantize_strength
+                                                > 0.0,
+                                        egui::Button::new("Quantize"),
+                                    )
+                                    .clicked()
+                                {
+                                    do_quantize = true;
+                                }
+                            }
+                            MidiToolTab::Transpose => {
+                                ui.weak("Shift note pitches.");
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut window.tools.transpose,
+                                        -24..=24,
+                                    )
+                                    .text("Semitones")
+                                    .step_by(1.0),
+                                );
+                                ui.horizontal(|ui| {
+                                    if ui.small_button("-12").clicked() {
+                                        window.tools.transpose -= 12;
+                                    }
+                                    if ui.small_button("+12").clicked() {
+                                        window.tools.transpose += 12;
+                                    }
+                                    window.tools.transpose =
+                                        window.tools.transpose.clamp(-24, 24);
+                                });
+                                if ui
+                                    .add_enabled(
+                                        window.tools.transpose != 0,
+                                        egui::Button::new("Transpose"),
+                                    )
+                                    .clicked()
+                                {
+                                    do_transpose = true;
+                                }
+                            }
+                            MidiToolTab::Humanize => {
+                                ui.weak("Add subtle timing and velocity variation.");
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut window.tools.humanize_timing,
+                                        0.0..=240.0,
+                                    )
+                                    .text("Timing")
+                                    .suffix(" ticks"),
+                                );
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut window.tools.humanize_velocity,
+                                        0.0..=64.0,
+                                    )
+                                    .text("Velocity"),
+                                );
+                                if ui
+                                    .add_enabled(
+                                        window.tools.humanize_timing > 0.0
+                                            || window.tools.humanize_velocity
+                                                > 0.0,
+                                        egui::Button::new("Humanize"),
+                                    )
+                                    .clicked()
+                                {
+                                    do_humanize = true;
+                                }
+                            }
+                            MidiToolTab::Legato => {
+                                ui.weak("Extend notes toward the next note.");
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut window.tools.legato_gap,
+                                        0.0..=240.0,
+                                    )
+                                    .text("Gap")
+                                    .suffix(" ticks"),
+                                );
+                                if ui.button("Legato").clicked() {
+                                    do_legato = true;
+                                }
+                            }
+                            MidiToolTab::NoteLength => {
+                                ui.weak("Set every note to a fixed length.");
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut window.tools.note_length,
+                                        30.0..=3840.0,
+                                    )
+                                    .text("Length")
+                                    .suffix(" ticks"),
+                                );
+                                if ui.button("Set Length").clicked() {
+                                    do_note_length = true;
+                                }
+                            }
+                            MidiToolTab::Velocity => {
+                                ui.weak("Scale note velocities.");
+                                ui.checkbox(
+                                    &mut window.show_velocity_lane,
+                                    "Show velocity lane",
+                                );
+                                let mut velocity_percent =
+                                    window.tools.velocity_factor * 100.0;
+                                if ui
+                                    .add(
+                                        egui::Slider::new(
+                                            &mut velocity_percent,
+                                            0.0..=200.0,
+                                        )
+                                        .text("Scale")
+                                        .suffix("%"),
+                                    )
+                                    .changed()
+                                {
+                                    window.tools.velocity_factor =
+                                        velocity_percent / 100.0;
+                                }
+                                if ui
+                                    .add_enabled(
+                                        (window.tools.velocity_factor - 1.0)
+                                            .abs()
+                                            > 1e-3,
+                                        egui::Button::new("Apply Velocity"),
+                                    )
+                                    .clicked()
+                                {
+                                    do_velocity = true;
+                                }
+                            }
+                            MidiToolTab::Controllers => {
+                                ui.weak("Draw controller automation.");
+                                ui.checkbox(
+                                    &mut window.show_cc_lane,
+                                    "Show CC lane",
+                                );
+                                if window.show_cc_lane {
+                                    ui.horizontal(|ui| {
+                                        ui.label("CC:");
+                                        egui::ComboBox::from_id_salt(
+                                            "piano_roll_cc_controller",
+                                        )
+                                        .selected_text(cc_controller_label(
+                                            window.cc_controller,
+                                        ))
+                                        .width(130.0)
+                                        .show_ui(ui, |ui| {
+                                            for (controller, label) in
+                                                CC_CONTROLLERS
+                                            {
+                                                ui.selectable_value(
+                                                    &mut window.cc_controller,
+                                                    controller,
+                                                    label,
+                                                );
+                                            }
+                                        });
+                                    });
+                                }
+                            }
                         }
                         });
                     });
