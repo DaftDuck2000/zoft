@@ -12,7 +12,7 @@ Full mixer console: channel strips, meter bridge, insert/send racks, routing mat
 
 ## Requirements
 
-- [ ] Channel strips: Fader, pan, meter, inserts, sends, I/O, name, color
+- [~] Channel strips: Name, color, mute/solo, volume fader and inserts implemented; pan, meters, sends and I/O pending
 - [ ] Meter bridge: Peak, RMS, LUFS, true peak, correlation, K-system
 - [~] Insert rack: 8 slots, drag-reorder, bypass, solo, preset
   - [x] Basic per-track insert chain (saturation, filter, bit crusher, tremolo) on every track type
@@ -144,6 +144,7 @@ struct SoloSystem {
 ## Progress Log
 
 - 2026-10-26: Added the FX Rack (X), a Logic-style window with one horizontal column per track and that track's insert chain underneath. Tracks can be scrolled horizontally; slots can be added, removed, reordered, bypassed and edited in place
+- 2026-10-26: FX Rack columns now include mute/solo and a volume fader. Continuous fader moves merge into one undo entry, and the live mixer is updated immediately while dragging
 - YYYY-MM-DD: Channel strip UI
 - YYYY-MM-DD: Meter bridge + ballistics
 - YYYY-MM-DD: Insert/send racks

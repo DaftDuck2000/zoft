@@ -1421,25 +1421,43 @@ impl EditAction {
 /// new edit starts exactly where the previous one ended (same clip). Returns
 /// true when the edit was merged.
 fn merge_continuous_edit(history: &mut History<EditAction>, action: &EditAction) -> bool {
-    let EditAction::Shape { clip_id, from, to } = action else {
-        return false;
-    };
-    let (clip_id, from, to) = (*clip_id, *from, *to);
-
     let Some(entry) = history.last_mut() else {
         return false;
     };
     let mut merged = false;
-    if let EditAction::Shape {
-        clip_id: prev_id,
-        to: prev_to,
-        ..
-    } = &mut entry.action
-    {
-        if *prev_id == clip_id && *prev_to == from {
-            *prev_to = to;
-            merged = true;
+    match action {
+        EditAction::Shape { clip_id, from, to } => {
+            let (clip_id, from, to) = (*clip_id, *from, *to);
+            if let EditAction::Shape {
+                clip_id: prev_id,
+                to: prev_to,
+                ..
+            } = &mut entry.action
+            {
+                if *prev_id == clip_id && *prev_to == from {
+                    *prev_to = to;
+                    merged = true;
+                }
+            }
         }
+        EditAction::TrackState {
+            track_id,
+            from,
+            to,
+        } => {
+            if let EditAction::TrackState {
+                track_id: prev_id,
+                to: prev_to,
+                ..
+            } = &mut entry.action
+            {
+                if *prev_id == *track_id && *prev_to == *from {
+                    *prev_to = *to;
+                    merged = true;
+                }
+            }
+        }
+        _ => {}
     }
     if merged {
         entry.description = entry.action.description();
@@ -6355,6 +6373,8 @@ impl AppUI {
         let track_ids = self.project.track_order.clone();
         let mut open = true;
         let mut changes: Vec<(TrackId, Vec<InsertSlot>)> = Vec::new();
+        let mut track_changes: Vec<(TrackId, TrackShape, TrackShape, bool)> =
+            Vec::new();
 
         egui::Window::new("FX Rack")
             .id(egui::Id::new("fx_rack"))
@@ -6395,6 +6415,8 @@ impl AppUI {
                                     track.color.2,
                                 );
                                 let mut inserts = track.inserts.clone();
+                                let before = TrackShape::of(track);
+                                let mut after = before;
                                 ui.push_id(track_id, |ui| {
                                     ui.vertical(|ui| {
                                         ui.set_width(220.0);
@@ -6417,10 +6439,78 @@ impl AppUI {
                                                         )
                                                         .truncate(),
                                                     );
+                                                    ui.with_layout(
+                                                        egui::Layout::right_to_left(
+                                                            egui::Align::Center,
+                                                        ),
+                                                        |ui| {
+                                                            let solo_color =
+                                                                if after.solo {
+                                                                    egui::Color32::GREEN
+                                                                } else {
+                                                                    egui::Color32::GRAY
+                                                                };
+                                                            if ui
+                                                                .add(
+                                                                    egui::Button::new(
+                                                                        egui::RichText::new("S")
+                                                                            .color(solo_color),
+                                                                    )
+                                                                    .min_size(
+                                                                        [18.0, 18.0].into(),
+                                                                    ),
+                                                                )
+                                                                .on_hover_text("Solo")
+                                                                .clicked()
+                                                            {
+                                                                after.solo = !after.solo;
+                                                            }
+                                                            let mute_color =
+                                                                if after.mute {
+                                                                    egui::Color32::YELLOW
+                                                                } else {
+                                                                    egui::Color32::GRAY
+                                                                };
+                                                            if ui
+                                                                .add(
+                                                                    egui::Button::new(
+                                                                        egui::RichText::new("M")
+                                                                            .color(mute_color),
+                                                                    )
+                                                                    .min_size(
+                                                                        [18.0, 18.0].into(),
+                                                                    ),
+                                                                )
+                                                                .on_hover_text("Mute")
+                                                                .clicked()
+                                                            {
+                                                                after.mute = !after.mute;
+                                                            }
+                                                        },
+                                                    );
                                                 });
                                                 ui.weak(track_type_label(
                                                     track_type,
                                                 ));
+                                                ui.horizontal(|ui| {
+                                                    ui.label("Vol");
+                                                    ui.add_sized(
+                                                        [120.0, 18.0],
+                                                        egui::Slider::new(
+                                                            &mut after.volume,
+                                                            0.0..=1.5,
+                                                        )
+                                                        .show_value(false),
+                                                    )
+                                                    .on_hover_text(format!(
+                                                        "Track volume {:.0}%",
+                                                        after.volume * 100.0
+                                                    ));
+                                                    ui.label(format!(
+                                                        "{:.0}%",
+                                                        after.volume * 100.0
+                                                    ));
+                                                });
                                                 ui.separator();
                                                 if show_insert_slots(
                                                     ui,
@@ -6433,6 +6523,21 @@ impl AppUI {
                                                 }
                                             },
                                         );
+                                        if after != before {
+                                            let merge = after.mute
+                                                == before.mute
+                                                && after.solo == before.solo
+                                                && after.record_arm
+                                                    == before.record_arm
+                                                && after.monitor_mode
+                                                    == before.monitor_mode;
+                                            track_changes.push((
+                                                *track_id,
+                                                before,
+                                                after,
+                                                merge,
+                                            ));
+                                        }
                                     });
                                 });
                                 ui.add_space(6.0);
@@ -6444,6 +6549,15 @@ impl AppUI {
         if !open {
             self.fx_rack_open = false;
             self.commit_pending_insert_edit();
+        }
+        for (track_id, from, to, merge) in track_changes {
+            if let Some(track) = self.project.tracks.get_mut(&track_id) {
+                to.apply(track);
+            }
+            self.push_undo(EditAction::TrackState { track_id, from, to }, merge);
+            self.after_edit();
+            let tracks = self.collect_playable_tracks();
+            self.engine.set_playback_tracks(tracks);
         }
         for (track_id, inserts) in changes {
             self.apply_track_inserts(track_id, inserts);
@@ -13342,6 +13456,49 @@ mod tests {
         };
         assert_eq!(to.gain, 2.0);
         assert_eq!(history.past()[0].description, "Clip gain");
+    }
+
+    #[test]
+    fn continuous_track_state_edits_merge_into_one_entry() {
+        let track_id = daw_core::track::TrackId::default();
+        let base = TrackShape {
+            mute: false,
+            solo: false,
+            record_arm: false,
+            volume: 1.0,
+            monitor_mode: MonitorMode::Off,
+        };
+        let mut history: History<EditAction> = History::new(10);
+
+        let first = EditAction::TrackState {
+            track_id,
+            from: base,
+            to: TrackShape {
+                volume: 0.9,
+                ..base
+            },
+        };
+        let second = EditAction::TrackState {
+            track_id,
+            from: TrackShape {
+                volume: 0.9,
+                ..base
+            },
+            to: TrackShape {
+                volume: 0.7,
+                ..base
+            },
+        };
+
+        history.push(first, "Track volume".to_string());
+        assert!(merge_continuous_edit(&mut history, &second));
+        assert_eq!(history.past_len(), 1);
+
+        let EditAction::TrackState { to, .. } = &history.past()[0].action else {
+            panic!("expected a track state edit");
+        };
+        assert_eq!(to.volume, 0.7);
+        assert_eq!(history.past()[0].description, "Track volume");
     }
 
     #[test]
