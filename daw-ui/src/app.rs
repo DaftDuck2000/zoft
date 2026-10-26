@@ -1527,7 +1527,7 @@ impl PianoRollWindow {
 }
 
 /// Selected MIDI tool shown in the piano-roll side panel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum MidiToolTab {
     Quantize,
     Transpose,
@@ -1563,9 +1563,9 @@ impl MidiToolTab {
 }
 
 /// State of the floating MIDI tools window (quantize, transpose, velocity).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct MidiToolsState {
-    selected_tool: MidiToolTab,
+    visible_tools: BTreeSet<MidiToolTab>,
     quantize_snap: PianoRollSnap,
     quantize_strength: f32,
     transpose: i32,
@@ -1579,7 +1579,7 @@ struct MidiToolsState {
 impl Default for MidiToolsState {
     fn default() -> Self {
         Self {
-            selected_tool: MidiToolTab::Quantize,
+            visible_tools: BTreeSet::from([MidiToolTab::Quantize]),
             quantize_snap: PianoRollSnap::Beat,
             quantize_strength: 1.0,
             transpose: 0,
@@ -6360,24 +6360,31 @@ impl AppUI {
                             .show(ui, |ui| {
                         ui.heading("MIDI Tools");
                         ui.weak("Applies to this clip.");
-                        ui.horizontal(|ui| {
-                            ui.label("Tool:");
-                            egui::ComboBox::from_id_salt("piano_roll_tool")
-                                .selected_text(window.tools.selected_tool.label())
-                                .width(120.0)
-                                .show_ui(ui, |ui| {
-                                    for tool in MidiToolTab::ALL {
-                                        ui.selectable_value(
-                                            &mut window.tools.selected_tool,
-                                            tool,
-                                            tool.label(),
-                                        );
+                        ui.menu_button("Tools…", |ui| {
+                            for tool in MidiToolTab::ALL {
+                                let mut visible =
+                                    window.tools.visible_tools.contains(&tool);
+                                if ui.checkbox(&mut visible, tool.label()).changed() {
+                                    if visible {
+                                        window.tools.visible_tools.insert(tool);
+                                    } else {
+                                        window.tools.visible_tools.remove(&tool);
                                     }
-                                });
+                                }
+                            }
                         });
                         ui.separator();
-
-                        match window.tools.selected_tool {
+                        if window.tools.visible_tools.is_empty() {
+                            ui.weak("Choose tools from the Tools menu.");
+                        }
+                        for tool in MidiToolTab::ALL {
+                            if !window.tools.visible_tools.contains(&tool) {
+                                continue;
+                            }
+                            egui::CollapsingHeader::new(tool.label())
+                                .default_open(true)
+                                .show(ui, |ui| {
+                        match tool {
                             MidiToolTab::Quantize => {
                                 ui.weak("Move note starts toward the grid.");
                                 ui.horizontal(|ui| {
@@ -6579,6 +6586,9 @@ impl AppUI {
                                     });
                                 }
                             }
+                        }
+                                });
+                            ui.add_space(4.0);
                         }
                         });
                     });
