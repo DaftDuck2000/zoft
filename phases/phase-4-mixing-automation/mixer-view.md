@@ -4,7 +4,7 @@
 ## ID: 4.1
 ## Priority: Critical
 ## Estimated: 3 weeks
-## Status: `[ ]` Not Started
+## Status: `[~]` In Progress
 ## Depends On: 0.4, 1.1, 3.5
 
 ## Description
@@ -16,7 +16,7 @@ Full mixer console: channel strips, meter bridge, insert/send racks, routing mat
 - [ ] Meter bridge: Peak, RMS, LUFS, true peak, correlation, K-system
 - [~] Insert rack: 8 slots, drag-reorder, bypass, solo, preset
   - [x] Basic per-track insert chain (saturation, filter, bit crusher, tremolo) on every track type
-  - [ ] Mixer insert rack UI, drag-reorder, solo, presets
+  - [~] FX Rack: horizontal track columns with insert lists, add/remove/reorder/bypass and parameter controls; drag-reorder, solo and presets pending
 - [ ] Send rack: 8 sends, pre/post fader, pan, level, destination
 - [ ] Routing matrix: Visual patchbay for I/O, buses, sidechains
 - [ ] Solo/Mute groups: Exclusive solo, solo safe, mute groups
@@ -143,6 +143,7 @@ struct SoloSystem {
 
 ## Progress Log
 
+- 2026-10-26: Added the FX Rack (X), a Logic-style window with one horizontal column per track and that track's insert chain underneath. Tracks can be scrolled horizontally; slots can be added, removed, reordered, bypassed and edited in place
 - YYYY-MM-DD: Channel strip UI
 - YYYY-MM-DD: Meter bridge + ballistics
 - YYYY-MM-DD: Insert/send racks

@@ -1564,12 +1564,6 @@ impl InsertEffectKind {
     }
 }
 
-/// State of the floating track-effects window.
-#[derive(Debug, Clone, Copy)]
-struct TrackEffectsWindow {
-    track_id: TrackId,
-}
-
 /// State of the floating per-clip audio window: gain/fades/colour plus the
 /// offline effects.
 #[derive(Debug, Clone)]
@@ -2246,8 +2240,8 @@ struct AppUI {
     midi_clipboard: Vec<MidiClip>,
     /// Floating clip-audio editor, opened from the Arrange **Audio…** button.
     audio_window: Option<ClipAudioWindow>,
-    /// Floating real-time insert editor for one track.
-    track_effects: Option<TrackEffectsWindow>,
+    /// Logic-style insert rack showing every track as a horizontal column.
+    fx_rack_open: bool,
     /// Original insert chain for the current effect-parameter gesture, pushed
     /// as one undo entry when the pointer is released.
     pending_insert_edit: Option<(TrackId, Vec<InsertSlot>)>,
@@ -2371,7 +2365,7 @@ impl AppUI {
             clipboard: Vec::new(),
             midi_clipboard: Vec::new(),
             audio_window: None,
-            track_effects: None,
+            fx_rack_open: false,
             pending_insert_edit: None,
             piano_roll: None,
             piano_roll_preview: None,
@@ -6352,272 +6346,107 @@ impl AppUI {
         self.audio_window = Some(window);
     }
 
-    /// Floating real-time insert editor for one track. Inserts are stored on the
-    /// track, so the same chain works for audio, MIDI and instrument tracks and
-    /// can later be targeted by automation.
-    fn show_track_effects(&mut self, ctx: &egui::Context) {
-        let Some(window) = self.track_effects else {
+    /// Logic-style insert rack: every track is a horizontal column with its
+    /// effect chain underneath.
+    fn show_fx_rack(&mut self, ctx: &egui::Context) {
+        if !self.fx_rack_open {
             return;
-        };
-        let Some(track) = self.project.tracks.get(&window.track_id) else {
-            self.track_effects = None;
-            return;
-        };
-        let track_name = track.name.clone();
-        let track_type = track.track_type;
-        let mut inserts = track.inserts.clone();
+        }
+        let track_ids = self.project.track_order.clone();
         let mut open = true;
-        let mut changed = false;
+        let mut changes: Vec<(TrackId, Vec<InsertSlot>)> = Vec::new();
 
-        egui::Window::new(format!("Track Effects — {}", track_name))
-            .id(egui::Id::new(("track_effects", window.track_id)))
+        egui::Window::new("FX Rack")
+            .id(egui::Id::new("fx_rack"))
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
-            .default_width(430.0)
-            .min_width(360.0)
+            .default_size([1120.0, 640.0])
+            .min_size([620.0, 360.0])
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label("Track:");
-                    ui.label(egui::RichText::new(&track_name).strong());
-                    ui.weak(format!("({})", track_type_label(track_type)));
+                    ui.heading("FX Rack");
+                    ui.weak(
+                        "Press X to toggle. Inserts run before each track fader.",
+                    );
                 });
-                ui.weak(
-                    "Real-time inserts run before the track fader. They are available on \
-                     every track type, and every parameter can be automated later.",
-                );
                 ui.separator();
 
-                if inserts.is_empty() {
-                    ui.weak("No effects yet. Add one below.");
+                if track_ids.is_empty() {
+                    ui.weak("No tracks in this project.");
+                    return;
                 }
 
-                let mut remove = None;
-                let mut move_up = None;
-                let mut move_down = None;
-                let slot_count = inserts.len();
-                for (index, slot) in inserts.iter_mut().enumerate() {
-                    ui.push_id(index, |ui| {
-                        egui::Frame::group(ui.style()).show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new(format!("{}", index + 1)).strong());
-                                let current = slot
-                                    .effect
-                                    .as_ref()
-                                    .map(InsertEffectKind::from_effect);
-                                let mut selected = current;
-                                egui::ComboBox::from_id_salt("kind")
-                                    .selected_text(
-                                        current.map_or("Empty", InsertEffectKind::label),
-                                    )
-                                    .width(130.0)
-                                    .show_ui(ui, |ui| {
-                                        for kind in InsertEffectKind::ALL {
-                                            ui.selectable_value(
-                                                &mut selected,
-                                                Some(kind),
-                                                kind.label(),
-                                            );
-                                        }
+                egui::ScrollArea::both()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.horizontal_top(|ui| {
+                            for track_id in &track_ids {
+                                let Some(track) =
+                                    self.project.tracks.get(track_id)
+                                else {
+                                    continue;
+                                };
+                                let track_name = track.name.clone();
+                                let track_type = track.track_type;
+                                let color = egui::Color32::from_rgb(
+                                    track.color.0,
+                                    track.color.1,
+                                    track.color.2,
+                                );
+                                let mut inserts = track.inserts.clone();
+                                ui.push_id(track_id, |ui| {
+                                    ui.vertical(|ui| {
+                                        ui.set_width(220.0);
+                                        egui::Frame::group(ui.style()).show(
+                                            ui,
+                                            |ui| {
+                                                ui.set_width(
+                                                    ui.available_width(),
+                                                );
+                                                ui.horizontal(|ui| {
+                                                    ui.colored_label(
+                                                        color, "■",
+                                                    );
+                                                    ui.add(
+                                                        egui::Label::new(
+                                                            egui::RichText::new(
+                                                                &track_name,
+                                                            )
+                                                            .strong(),
+                                                        )
+                                                        .truncate(),
+                                                    );
+                                                });
+                                                ui.weak(track_type_label(
+                                                    track_type,
+                                                ));
+                                                ui.separator();
+                                                if show_insert_slots(
+                                                    ui,
+                                                    &mut inserts,
+                                                ) {
+                                                    changes.push((
+                                                        *track_id,
+                                                        inserts.clone(),
+                                                    ));
+                                                }
+                                            },
+                                        );
                                     });
-                                if selected != current {
-                                    slot.effect =
-                                        selected.map(InsertEffectKind::default_effect);
-                                    changed = true;
-                                }
-                                changed |= ui.checkbox(&mut slot.enabled, "On").changed();
-                                if ui
-                                    .small_button("↑")
-                                    .on_hover_text("Move effect up")
-                                    .clicked()
-                                    && index > 0
-                                {
-                                    move_up = Some(index);
-                                }
-                                if ui
-                                    .small_button("↓")
-                                    .on_hover_text("Move effect down")
-                                    .clicked()
-                                    && index + 1 < slot_count
-                                {
-                                    move_down = Some(index);
-                                }
-                                if ui.small_button("Remove").clicked() {
-                                    remove = Some(index);
-                                }
-                            });
-
-                            match &mut slot.effect {
-                                Some(TrackEffect::Saturation { drive_db, mix }) => {
-                                    changed |= ui
-                                        .add(
-                                            egui::Slider::new(drive_db, 0.0..=36.0)
-                                                .text("Drive")
-                                                .suffix(" dB"),
-                                        )
-                                        .changed();
-                                    changed |= ui
-                                        .add(
-                                            egui::Slider::new(mix, 0.0..=1.0)
-                                                .text("Effect mix"),
-                                        )
-                                        .changed();
-                                }
-                                Some(TrackEffect::Filter { mode, cutoff }) => {
-                                    ui.horizontal(|ui| {
-                                        ui.label("Type:");
-                                        egui::ComboBox::from_id_salt("filter_mode")
-                                            .selected_text(filter_mode_label(*mode))
-                                            .width(110.0)
-                                            .show_ui(ui, |ui| {
-                                                changed |= ui
-                                                    .selectable_value(
-                                                        mode,
-                                                        FilterMode::LowPass,
-                                                        filter_mode_label(FilterMode::LowPass),
-                                                    )
-                                                    .changed();
-                                                changed |= ui
-                                                    .selectable_value(
-                                                        mode,
-                                                        FilterMode::HighPass,
-                                                        filter_mode_label(FilterMode::HighPass),
-                                                    )
-                                                    .changed();
-                                            });
-                                    });
-                                    changed |= ui
-                                        .add(
-                                            egui::Slider::new(cutoff, 20.0..=20_000.0)
-                                                .logarithmic(true)
-                                                .text("Cutoff")
-                                                .suffix(" Hz"),
-                                        )
-                                        .changed();
-                                }
-                                Some(TrackEffect::BitCrusher {
-                                    bits,
-                                    downsample,
-                                }) => {
-                                    let mut bit_value = *bits as f32;
-                                    if ui
-                                        .add(
-                                            egui::Slider::new(&mut bit_value, 1.0..=24.0)
-                                                .step_by(1.0)
-                                                .text("Bits"),
-                                        )
-                                        .changed()
-                                    {
-                                        *bits = bit_value.round() as u32;
-                                        changed = true;
-                                    }
-                                    let mut hold_value = *downsample as f32;
-                                    if ui
-                                        .add(
-                                            egui::Slider::new(&mut hold_value, 1.0..=64.0)
-                                                .step_by(1.0)
-                                                .text("Sample hold")
-                                                .suffix("×"),
-                                        )
-                                        .changed()
-                                    {
-                                        *downsample = hold_value.round() as u32;
-                                        changed = true;
-                                    }
-                                }
-                                Some(TrackEffect::Tremolo { rate, depth }) => {
-                                    changed |= ui
-                                        .add(
-                                            egui::Slider::new(rate, 0.1..=20.0)
-                                                .logarithmic(true)
-                                                .text("Rate")
-                                                .suffix(" Hz"),
-                                        )
-                                        .changed();
-                                    changed |= ui
-                                        .add(
-                                            egui::Slider::new(depth, 0.0..=1.0)
-                                                .text("Depth"),
-                                        )
-                                        .changed();
-                                }
-                                None => {
-                                    ui.weak("Choose an effect kind above.");
-                                }
-                            }
-
-                            ui.add_space(4.0);
-                            egui::Grid::new("slot_gains")
-                                .num_columns(2)
-                                .spacing([8.0, 4.0])
-                                .show(ui, |ui| {
-                                    ui.label("Input gain");
-                                    changed |= ui
-                                        .add(
-                                            egui::Slider::new(
-                                                &mut slot.input_gain,
-                                                0.0..=2.0,
-                                            )
-                                            .suffix("×"),
-                                        )
-                                        .changed();
-                                    ui.end_row();
-                                    ui.label("Slot mix");
-                                    changed |= ui
-                                        .add(egui::Slider::new(&mut slot.mix, 0.0..=1.0))
-                                        .changed();
-                                    ui.end_row();
-                                    ui.label("Output gain");
-                                    changed |= ui
-                                        .add(
-                                            egui::Slider::new(
-                                                &mut slot.output_gain,
-                                                0.0..=2.0,
-                                            )
-                                            .suffix("×"),
-                                        )
-                                        .changed();
-                                    ui.end_row();
                                 });
+                                ui.add_space(6.0);
+                            }
                         });
                     });
-                    ui.add_space(4.0);
-                }
-
-                if let Some(index) = move_up {
-                    inserts.swap(index, index - 1);
-                    changed = true;
-                }
-                if let Some(index) = move_down {
-                    inserts.swap(index, index + 1);
-                    changed = true;
-                }
-                if let Some(index) = remove {
-                    inserts.remove(index);
-                    changed = true;
-                }
-
-                ui.separator();
-                ui.menu_button("+ Add Effect", |ui| {
-                    for kind in InsertEffectKind::ALL {
-                        if ui.button(kind.label()).clicked() {
-                            inserts.push(InsertSlot::with_effect(kind.default_effect()));
-                            changed = true;
-                            ui.close_menu();
-                        }
-                    }
-                });
-                if !inserts.is_empty() && ui.button("Clear All").clicked() {
-                    inserts.clear();
-                    changed = true;
-                }
             });
 
         if !open {
-            self.track_effects = None;
+            self.fx_rack_open = false;
+            self.commit_pending_insert_edit();
         }
-        if changed {
-            self.apply_track_inserts(window.track_id, inserts);
+        for (track_id, inserts) in changes {
+            self.apply_track_inserts(track_id, inserts);
         }
     }
 
@@ -8851,6 +8680,251 @@ fn track_type_label(track_type: TrackType) -> &'static str {
     }
 }
 
+/// Render one track's insert chain. Used by the FX Rack, where every track is
+/// a column and the slot controls need to stay compact.
+fn show_insert_slots(ui: &mut egui::Ui, inserts: &mut Vec<InsertSlot>) -> bool {
+    let mut changed = false;
+    let mut remove = None;
+    let mut move_up = None;
+    let mut move_down = None;
+    let slot_count = inserts.len();
+
+    if inserts.is_empty() {
+        ui.weak("No inserts");
+    }
+
+    for (index, slot) in inserts.iter_mut().enumerate() {
+        ui.push_id(index, |ui| {
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!("{}", index + 1)).strong(),
+                    );
+                    let current = slot
+                        .effect
+                        .as_ref()
+                        .map(InsertEffectKind::from_effect);
+                    let mut selected = current;
+                    egui::ComboBox::from_id_salt("kind")
+                        .selected_text(
+                            current.map_or("Empty", InsertEffectKind::label),
+                        )
+                        .width(96.0)
+                        .show_ui(ui, |ui| {
+                            for kind in InsertEffectKind::ALL {
+                                ui.selectable_value(
+                                    &mut selected,
+                                    Some(kind),
+                                    kind.label(),
+                                );
+                            }
+                        });
+                    if selected != current {
+                        slot.effect =
+                            selected.map(InsertEffectKind::default_effect);
+                        changed = true;
+                    }
+                    changed |= ui.checkbox(&mut slot.enabled, "On").changed();
+                });
+
+                ui.horizontal(|ui| {
+                    if ui
+                        .small_button("↑")
+                        .on_hover_text("Move effect up")
+                        .clicked()
+                        && index > 0
+                    {
+                        move_up = Some(index);
+                    }
+                    if ui
+                        .small_button("↓")
+                        .on_hover_text("Move effect down")
+                        .clicked()
+                        && index + 1 < slot_count
+                    {
+                        move_down = Some(index);
+                    }
+                    if ui
+                        .small_button("✕")
+                        .on_hover_text("Remove effect")
+                        .clicked()
+                    {
+                        remove = Some(index);
+                    }
+                });
+
+                match &mut slot.effect {
+                    Some(TrackEffect::Saturation { drive_db, mix }) => {
+                        changed |= ui
+                            .add(
+                                egui::Slider::new(drive_db, 0.0..=36.0)
+                                    .text("Drive")
+                                    .suffix(" dB"),
+                            )
+                            .changed();
+                        changed |= ui
+                            .add(
+                                egui::Slider::new(mix, 0.0..=1.0)
+                                    .text("Effect mix"),
+                            )
+                            .changed();
+                    }
+                    Some(TrackEffect::Filter { mode, cutoff }) => {
+                        ui.horizontal(|ui| {
+                            ui.label("Type:");
+                            egui::ComboBox::from_id_salt("filter_mode")
+                                .selected_text(filter_mode_label(*mode))
+                                .width(104.0)
+                                .show_ui(ui, |ui| {
+                                    changed |= ui
+                                        .selectable_value(
+                                            mode,
+                                            FilterMode::LowPass,
+                                            filter_mode_label(FilterMode::LowPass),
+                                        )
+                                        .changed();
+                                    changed |= ui
+                                        .selectable_value(
+                                            mode,
+                                            FilterMode::HighPass,
+                                            filter_mode_label(FilterMode::HighPass),
+                                        )
+                                        .changed();
+                                });
+                        });
+                        changed |= ui
+                            .add(
+                                egui::Slider::new(cutoff, 20.0..=20_000.0)
+                                    .logarithmic(true)
+                                    .text("Cutoff")
+                                    .suffix(" Hz"),
+                            )
+                            .changed();
+                    }
+                    Some(TrackEffect::BitCrusher {
+                        bits,
+                        downsample,
+                    }) => {
+                        let mut bit_value = *bits as f32;
+                        if ui
+                            .add(
+                                egui::Slider::new(&mut bit_value, 1.0..=24.0)
+                                    .step_by(1.0)
+                                    .text("Bits"),
+                            )
+                            .changed()
+                        {
+                            *bits = bit_value.round() as u32;
+                            changed = true;
+                        }
+                        let mut hold_value = *downsample as f32;
+                        if ui
+                            .add(
+                                egui::Slider::new(
+                                    &mut hold_value,
+                                    1.0..=64.0,
+                                )
+                                .step_by(1.0)
+                                .text("Sample hold")
+                                .suffix("×"),
+                            )
+                            .changed()
+                        {
+                            *downsample = hold_value.round() as u32;
+                            changed = true;
+                        }
+                    }
+                    Some(TrackEffect::Tremolo { rate, depth }) => {
+                        changed |= ui
+                            .add(
+                                egui::Slider::new(rate, 0.1..=20.0)
+                                    .logarithmic(true)
+                                    .text("Rate")
+                                    .suffix(" Hz"),
+                            )
+                            .changed();
+                        changed |= ui
+                            .add(
+                                egui::Slider::new(depth, 0.0..=1.0)
+                                    .text("Depth"),
+                            )
+                            .changed();
+                    }
+                    None => {
+                        ui.weak("Choose an effect kind above.");
+                    }
+                }
+
+                ui.add_space(2.0);
+                egui::Grid::new("slot_gains")
+                    .num_columns(2)
+                    .spacing([6.0, 2.0])
+                    .show(ui, |ui| {
+                        ui.label("In");
+                        changed |= ui
+                            .add(
+                                egui::Slider::new(
+                                    &mut slot.input_gain,
+                                    0.0..=2.0,
+                                )
+                                .suffix("×"),
+                            )
+                            .changed();
+                        ui.end_row();
+                        ui.label("Mix");
+                        changed |= ui
+                            .add(egui::Slider::new(
+                                &mut slot.mix,
+                                0.0..=1.0,
+                            ))
+                            .changed();
+                        ui.end_row();
+                        ui.label("Out");
+                        changed |= ui
+                            .add(
+                                egui::Slider::new(
+                                    &mut slot.output_gain,
+                                    0.0..=2.0,
+                                )
+                                .suffix("×"),
+                            )
+                            .changed();
+                        ui.end_row();
+                    });
+            });
+        });
+        ui.add_space(4.0);
+    }
+
+    if let Some(index) = move_up {
+        inserts.swap(index, index - 1);
+        changed = true;
+    }
+    if let Some(index) = move_down {
+        inserts.swap(index, index + 1);
+        changed = true;
+    }
+    if let Some(index) = remove {
+        inserts.remove(index);
+        changed = true;
+    }
+
+    ui.menu_button("+ Add Effect", |ui| {
+        for kind in InsertEffectKind::ALL {
+            if ui.button(kind.label()).clicked() {
+                inserts.push(InsertSlot::with_effect(kind.default_effect()));
+                changed = true;
+                ui.close_menu();
+            }
+        }
+    });
+    if !inserts.is_empty() && ui.small_button("Clear All").clicked() {
+        inserts.clear();
+        changed = true;
+    }
+    changed
+}
+
 #[derive(Debug, Clone, Copy)]
 struct LoudnessMeasurement {
     integrated_lufs: f32,
@@ -9739,6 +9813,16 @@ impl eframe::App for AppUI {
                         self.piano_roll = Some(PianoRollWindow::new(clip_id, self.snap_mode));
                     }
                 }
+                if ui
+                    .selectable_label(self.fx_rack_open, "FX Rack")
+                    .on_hover_text("Show every track's insert chain (X)")
+                    .clicked()
+                {
+                    if self.fx_rack_open {
+                        self.commit_pending_insert_edit();
+                    }
+                    self.fx_rack_open = !self.fx_rack_open;
+                }
                 ui.separator();
                 ui.label("Snap:");
                 egui::ComboBox::from_id_salt("snap_mode")
@@ -9793,7 +9877,7 @@ impl eframe::App for AppUI {
             let mut add_audio_track = false;
             let mut add_midi_track = false;
             let mut remove_track = None;
-            let mut open_track_effects = None;
+            let mut open_fx_rack = false;
             let mut ghost_changes: Vec<(TrackId, bool)> = Vec::new();
             ui.spacing_mut().item_spacing.y = 0.0;
             let (header_rect, _) = ui.allocate_exact_size(
@@ -9963,31 +10047,6 @@ impl eframe::App for AppUI {
                                     };
                                 }
 
-                                let has_effects = track
-                                    .inserts
-                                    .iter()
-                                    .any(|slot| slot.effect.is_some());
-                                let fx_color = if has_effects {
-                                    egui::Color32::GREEN
-                                } else {
-                                    egui::Color32::GRAY
-                                };
-                                if ui
-                                    .add(
-                                        egui::Button::new(
-                                            egui::RichText::new("FX")
-                                                .color(fx_color),
-                                        )
-                                        .min_size([26.0, 20.0].into()),
-                                    )
-                                    .on_hover_text(
-                                        "Track effects (available on every track type)",
-                                    )
-                                    .clicked()
-                                {
-                                    open_track_effects = Some(*track_id);
-                                }
-
                                 if matches!(
                                     track.track_type,
                                     TrackType::Midi | TrackType::Instrument
@@ -10048,8 +10107,8 @@ impl eframe::App for AppUI {
                         row_response,
                     );
                     row.response.context_menu(|ui| {
-                        if ui.button("Track Effects…").clicked() {
-                            open_track_effects = Some(*track_id);
+                        if ui.button("Show FX Rack").clicked() {
+                            open_fx_rack = true;
                             ui.close_menu();
                         }
                         if matches!(
@@ -10119,8 +10178,8 @@ impl eframe::App for AppUI {
             if let Some(track_id) = remove_track {
                 self.remove_track(track_id);
             }
-            if let Some(track_id) = open_track_effects {
-                self.track_effects = Some(TrackEffectsWindow { track_id });
+            if open_fx_rack {
+                self.fx_rack_open = true;
             }
             self.sync_monitoring();
 
@@ -10862,7 +10921,7 @@ impl eframe::App for AppUI {
         });
 
         self.show_audio_window(ctx);
-        self.show_track_effects(ctx);
+        self.show_fx_rack(ctx);
         self.show_piano_roll(ctx);
         self.show_history_window(ctx);
 
@@ -11006,6 +11065,14 @@ impl AppUI {
         // M: mute or unmute the selected clips
         if ctx.input(|i| i.key_pressed(Key::M)) {
             self.toggle_selected_clips_muted();
+        }
+
+        // X: show or hide the FX Rack
+        if !ctx.wants_keyboard_input() && ctx.input(|i| i.key_pressed(Key::X)) {
+            if self.fx_rack_open {
+                self.commit_pending_insert_edit();
+            }
+            self.fx_rack_open = !self.fx_rack_open;
         }
 
         // Delete/Backspace: remove the selected clip (recoverable via undo).
@@ -11644,7 +11711,7 @@ impl AppUI {
         self.clear_selection();
         self.deleted_from.clear();
         self.audio_window = None;
-        self.track_effects = None;
+        self.fx_rack_open = false;
         self.pending_insert_edit = None;
         self.piano_roll = None;
         self.piano_roll_preview = None;

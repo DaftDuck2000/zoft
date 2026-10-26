@@ -45,8 +45,8 @@ has a G toggle in its header to include or exclude it from ghost notes.
 Toggleable velocity and CC lanes handle per-note dynamics and controller
 automation. Trimming is non-destructive and the piano roll shades trimmed
 regions. Every track type now has a real-time insert chain (saturation, filter,
-bit crusher, tremolo) that runs before the track fader. Instruments, chase
-events, loop takes, MIDI thru, multiple CC lanes and the remaining editing
+bit crusher, tremolo) that runs before the track fader, edited from the
+Logic-style FX Rack (X). Instruments, chase events, loop takes, MIDI thru, multiple CC lanes and the remaining editing
 tools are not implemented yet.
 
 ## Milestone: M2 — MIDI Sequencing (Week 44)
