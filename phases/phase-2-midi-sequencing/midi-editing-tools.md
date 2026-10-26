@@ -12,12 +12,12 @@ MIDI transformation tools: quantize, humanize, transpose, scale conform, legato,
 
 ## Requirements
 
-- [x] Quantize: Notes to grid with strength (0-100%) and tuplet grids; swing pending
+- [x] Quantize: Notes to grid with strength (0-100%), swing and tuplet grids
 - [x] Humanize: Random timing/velocity offset
 - [x] Transpose: Semitones and octave buttons; scale-aware transpose pending
 - [x] Scale Conform: Force notes to scale (major, minor, modes, custom)
 - [x] Legato: Extend notes to next note start (with gap option)
-- [~] Velocity Tools: Scale implemented; compress, expand, curve, randomize pending
+- [x] Velocity Tools: Scale, compress, expand, curve and randomize
 - [x] Note Length: Set fixed length; scale/legato/staccato variants pending
 - [~] Randomize: Pitch, velocity and timing implemented; note density pending
 - [ ] Split Notes: At pitch, at velocity, at channel
@@ -119,14 +119,14 @@ fn velocity_curve(events: &mut [MidiEvent], params: &ToolParams) {
 
 ## Acceptance Criteria
 
-- [~] Quantize with strength/swing works musically
+- [x] Quantize with strength/swing works musically
 - [x] Humanize adds natural variation
 - [x] Transpose preserves chord quality
 - [x] Scale conform maps notes correctly
 - [x] Legato creates smooth transitions
+- [x] Velocity shaping compresses, expands, curves and randomizes dynamics
 - [x] Randomize varies pitch, velocity and timing without changing durations
 - [x] Reverse and mirror transform note positions and pitches
-- [~] Velocity curve shapes dynamics
 - [ ] All tools support preview
 - [x] Batch apply to selection/clip/track/project
 - [x] Each tool = single undo step
@@ -137,6 +137,6 @@ fn velocity_curve(events: &mut [MidiEvent], params: &ToolParams) {
 - 2026-10-26: Added humanize (random timing and velocity), legato (extend toward the next note with an adjustable gap) and fixed note length to the piano-roll MIDI Tools panel. Each tool applies to the open clip as one undo step
 - 2026-10-26: Added Scale Conform with root note and major/minor/mode/pentatonic/blues scales. Notes move to the nearest scale degree while preserving their register
 - 2026-10-26: Added a Transform tool with time reverse, pitch mirror around an adjustable center note, and seeded randomize for pitch, velocity and timing. Note durations are preserved and each action is one undo step
-- YYYY-MM-DD: Velocity tools
+- 2026-10-26: Added quantize swing (0-100%, second grid position moves up to two thirds through the pair) and velocity shaping modes: scale, compress toward 64, expand away from 64, gamma curve and seeded randomize
 - YYYY-MM-DD: Split/Join/Mirror
 - YYYY-MM-DD: Tool panel UI + presets

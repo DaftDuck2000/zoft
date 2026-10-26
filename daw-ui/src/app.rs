@@ -576,8 +576,15 @@ fn piano_roll_new_note_length(
     }
 }
 
-/// Move note starts toward a grid, preserving each note's duration.
-fn quantize_midi_notes(notes: &mut [PianoRollNote], grid_ticks: u64, strength: f32) {
+/// Move note starts toward a grid, preserving each note's duration. Swing
+/// delays every second grid position, with 100% placing it two thirds of the
+/// way through the pair.
+fn quantize_midi_notes(
+    notes: &mut [PianoRollNote],
+    grid_ticks: u64,
+    strength: f32,
+    swing: f32,
+) {
     if grid_ticks <= 1 {
         return;
     }
@@ -585,8 +592,15 @@ fn quantize_midi_notes(notes: &mut [PianoRollNote], grid_ticks: u64, strength: f
     if strength <= 0.0 {
         return;
     }
+    let swing = swing.clamp(0.0, 1.0);
     for note in notes {
-        let target = ((note.start + grid_ticks / 2) / grid_ticks) * grid_ticks;
+        let grid_index = (note.start + grid_ticks / 2) / grid_ticks;
+        let mut target = grid_index * grid_ticks;
+        if grid_index % 2 == 1 {
+            target = target.saturating_add(
+                (swing * grid_ticks as f32 / 3.0).round() as u64,
+            );
+        }
         let duration = note.end.saturating_sub(note.start).max(1);
         let start = (note.start as f64
             + (target as f64 - note.start as f64) * strength as f64)
@@ -613,6 +627,46 @@ fn scale_midi_velocities(notes: &mut [PianoRollNote], factor: f32) {
     }
     for note in notes {
         note.velocity = (note.velocity as f32 * factor).round().clamp(1.0, 127.0) as u8;
+    }
+}
+
+/// Pull velocities toward the middle of the MIDI range. `amount` is 0..1.
+fn compress_midi_velocities(notes: &mut [PianoRollNote], amount: f32) {
+    let amount = amount.clamp(0.0, 1.0);
+    if amount <= 0.0 {
+        return;
+    }
+    for note in notes {
+        let velocity = 64.0 + (note.velocity as f32 - 64.0) * (1.0 - amount);
+        note.velocity = velocity.round().clamp(1.0, 127.0) as u8;
+    }
+}
+
+/// Push velocities away from the middle of the MIDI range. `amount` is 0..1.
+fn expand_midi_velocities(notes: &mut [PianoRollNote], amount: f32) {
+    let amount = amount.clamp(0.0, 1.0);
+    if amount <= 0.0 {
+        return;
+    }
+    for note in notes {
+        let velocity = 64.0 + (note.velocity as f32 - 64.0) * (1.0 + amount);
+        note.velocity = velocity.round().clamp(1.0, 127.0) as u8;
+    }
+}
+
+/// Shape velocities with a gamma curve. Negative values darken soft notes;
+/// positive values brighten them.
+fn curve_midi_velocities(notes: &mut [PianoRollNote], curve: f32) {
+    let curve = curve.clamp(-1.0, 1.0);
+    if curve.abs() < 1e-4 {
+        return;
+    }
+    let exponent = 2f32.powf(-2.0 * curve);
+    for note in notes {
+        let normalized = note.velocity as f32 / 127.0;
+        note.velocity = (normalized.powf(exponent) * 127.0)
+            .round()
+            .clamp(1.0, 127.0) as u8;
     }
 }
 
@@ -1719,16 +1773,61 @@ impl ScaleType {
     }
 }
 
+/// Velocity shaping algorithms available in the Velocity tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VelocityMode {
+    Scale,
+    Compress,
+    Expand,
+    Curve,
+    Randomize,
+}
+
+impl VelocityMode {
+    const ALL: [Self; 5] = [
+        Self::Scale,
+        Self::Compress,
+        Self::Expand,
+        Self::Curve,
+        Self::Randomize,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Scale => "Scale",
+            Self::Compress => "Compress",
+            Self::Expand => "Expand",
+            Self::Curve => "Curve",
+            Self::Randomize => "Randomize",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::Scale => "Multiply every velocity.",
+            Self::Compress => "Pull velocities toward 64.",
+            Self::Expand => "Push velocities away from 64.",
+            Self::Curve => "Lower or raise softer notes.",
+            Self::Randomize => "Add random velocity variation.",
+        }
+    }
+}
+
 /// State of the floating MIDI tools window (quantize, transpose, velocity).
 #[derive(Debug, Clone)]
 struct MidiToolsState {
     visible_tools: BTreeSet<MidiToolTab>,
     quantize_snap: PianoRollSnap,
     quantize_strength: f32,
+    quantize_swing: f32,
     transpose: i32,
     scale_root: u8,
     scale_type: ScaleType,
+    velocity_mode: VelocityMode,
     velocity_factor: f32,
+    velocity_amount: f32,
+    velocity_curve: f32,
+    velocity_random: f32,
     humanize_timing: f32,
     humanize_velocity: f32,
     legato_gap: f32,
@@ -1745,10 +1844,15 @@ impl Default for MidiToolsState {
             visible_tools: BTreeSet::from([MidiToolTab::Quantize]),
             quantize_snap: PianoRollSnap::Beat,
             quantize_strength: 1.0,
+            quantize_swing: 0.0,
             transpose: 0,
             scale_root: 0,
             scale_type: ScaleType::Major,
+            velocity_mode: VelocityMode::Scale,
             velocity_factor: 1.0,
+            velocity_amount: 50.0,
+            velocity_curve: 0.0,
+            velocity_random: 0.0,
             humanize_timing: 0.0,
             humanize_velocity: 0.0,
             legato_gap: 0.0,
@@ -6595,6 +6699,14 @@ impl AppUI {
                                     window.tools.quantize_strength =
                                         strength / 100.0;
                                 }
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut window.tools.quantize_swing,
+                                        0.0..=100.0,
+                                    )
+                                    .text("Swing")
+                                    .suffix("%"),
+                                );
                                 if ui
                                     .add_enabled(
                                         window.tools.quantize_snap
@@ -6799,32 +6911,121 @@ impl AppUI {
                                 }
                             }
                             MidiToolTab::Velocity => {
-                                ui.weak("Scale note velocities.");
+                                ui.weak("Shape note velocities.");
                                 ui.checkbox(
                                     &mut window.show_velocity_lane,
                                     "Show velocity lane",
                                 );
-                                let mut velocity_percent =
-                                    window.tools.velocity_factor * 100.0;
-                                if ui
-                                    .add(
-                                        egui::Slider::new(
-                                            &mut velocity_percent,
-                                            0.0..=200.0,
-                                        )
-                                        .text("Scale")
-                                        .suffix("%"),
+                                ui.horizontal(|ui| {
+                                    ui.label("Mode:");
+                                    egui::ComboBox::from_id_salt(
+                                        "piano_roll_velocity_mode",
                                     )
-                                    .changed()
-                                {
-                                    window.tools.velocity_factor =
-                                        velocity_percent / 100.0;
+                                    .selected_text(
+                                        window.tools.velocity_mode.label(),
+                                    )
+                                    .width(96.0)
+                                    .show_ui(ui, |ui| {
+                                        for mode in VelocityMode::ALL {
+                                            ui.selectable_value(
+                                                &mut window.tools.velocity_mode,
+                                                mode,
+                                                mode.label(),
+                                            );
+                                        }
+                                    });
+                                });
+                                ui.weak(
+                                    window.tools.velocity_mode.description(),
+                                );
+                                match window.tools.velocity_mode {
+                                    VelocityMode::Scale => {
+                                        let mut velocity_percent =
+                                            window.tools.velocity_factor
+                                                * 100.0;
+                                        if ui
+                                            .add(
+                                                egui::Slider::new(
+                                                    &mut velocity_percent,
+                                                    0.0..=200.0,
+                                                )
+                                                .text("Scale")
+                                                .suffix("%"),
+                                            )
+                                            .changed()
+                                        {
+                                            window.tools.velocity_factor =
+                                                velocity_percent / 100.0;
+                                        }
+                                    }
+                                    VelocityMode::Compress => {
+                                        ui.add(
+                                            egui::Slider::new(
+                                                &mut window
+                                                    .tools
+                                                    .velocity_amount,
+                                                0.0..=100.0,
+                                            )
+                                            .text("Amount")
+                                            .suffix("%"),
+                                        );
+                                    }
+                                    VelocityMode::Expand => {
+                                        ui.add(
+                                            egui::Slider::new(
+                                                &mut window
+                                                    .tools
+                                                    .velocity_amount,
+                                                0.0..=100.0,
+                                            )
+                                            .text("Amount")
+                                            .suffix("%"),
+                                        );
+                                    }
+                                    VelocityMode::Curve => {
+                                        ui.add(
+                                            egui::Slider::new(
+                                                &mut window
+                                                    .tools
+                                                    .velocity_curve,
+                                                -100.0..=100.0,
+                                            )
+                                            .text("Curve"),
+                                        );
+                                    }
+                                    VelocityMode::Randomize => {
+                                        ui.add(
+                                            egui::Slider::new(
+                                                &mut window
+                                                    .tools
+                                                    .velocity_random,
+                                                0.0..=64.0,
+                                            )
+                                            .text("Amount")
+                                            .step_by(1.0),
+                                        );
+                                    }
                                 }
-                                if ui
-                                    .add_enabled(
+                                let can_apply = match window.tools.velocity_mode {
+                                    VelocityMode::Scale => {
                                         (window.tools.velocity_factor - 1.0)
                                             .abs()
-                                            > 1e-3,
+                                            > 1e-3
+                                    }
+                                    VelocityMode::Compress
+                                    | VelocityMode::Expand => {
+                                        window.tools.velocity_amount > 0.0
+                                    }
+                                    VelocityMode::Curve => {
+                                        window.tools.velocity_curve.abs() > 0.1
+                                    }
+                                    VelocityMode::Randomize => {
+                                        window.tools.velocity_random > 0.0
+                                    }
+                                };
+                                if ui
+                                    .add_enabled(
+                                        can_apply,
                                         egui::Button::new("Apply Velocity"),
                                     )
                                     .clicked()
@@ -7825,10 +8026,11 @@ impl AppUI {
         if do_quantize {
             let grid = window.tools.quantize_snap.ticks(beats_per_bar);
             let strength = window.tools.quantize_strength;
+            let swing = window.tools.quantize_swing / 100.0;
             self.apply_midi_note_edit_to_clips(
                 vec![window.clip_id],
                 "Quantize MIDI",
-                |notes| quantize_midi_notes(notes, grid, strength),
+                |notes| quantize_midi_notes(notes, grid, strength, swing),
             );
             window.initialized = false;
         }
@@ -7852,11 +8054,38 @@ impl AppUI {
             window.initialized = false;
         }
         if do_velocity {
+            let mode = window.tools.velocity_mode;
             let factor = window.tools.velocity_factor;
+            let amount = (window.tools.velocity_amount / 100.0).clamp(0.0, 1.0);
+            let curve = (window.tools.velocity_curve / 100.0).clamp(-1.0, 1.0);
+            let random = window.tools.velocity_random.round().clamp(0.0, 64.0) as u8;
+            let seed = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos() as u64)
+                .unwrap_or(1);
+            let label = match mode {
+                VelocityMode::Scale => "Scale MIDI velocity",
+                VelocityMode::Compress => "Compress MIDI velocity",
+                VelocityMode::Expand => "Expand MIDI velocity",
+                VelocityMode::Curve => "Curve MIDI velocity",
+                VelocityMode::Randomize => "Randomize MIDI velocity",
+            };
             self.apply_midi_note_edit_to_clips(
                 vec![window.clip_id],
-                "Scale MIDI velocity",
-                |notes| scale_midi_velocities(notes, factor),
+                label,
+                |notes| match mode {
+                    VelocityMode::Scale => scale_midi_velocities(notes, factor),
+                    VelocityMode::Compress => {
+                        compress_midi_velocities(notes, amount)
+                    }
+                    VelocityMode::Expand => {
+                        expand_midi_velocities(notes, amount)
+                    }
+                    VelocityMode::Curve => curve_midi_velocities(notes, curve),
+                    VelocityMode::Randomize => {
+                        randomize_midi_notes(notes, 0, random, 0, seed)
+                    }
+                },
             );
             window.initialized = false;
         }
@@ -12234,6 +12463,7 @@ mod tests {
         write_piano_roll_notes, write_wav_f32, write_wav_range, write_wav_range_with_envelope,
         fit_piano_roll_view, piano_roll_new_note_length, midi_trim_end, midi_trim_start,
         split_midi_clip_at_tick, quantize_midi_notes, scale_midi_velocities,
+        compress_midi_velocities, expand_midi_velocities, curve_midi_velocities,
         transpose_midi_notes, scale_conform_midi_notes, velocity_color, notes_in_marquee,
         midi_clip_cc_points, write_midi_cc_points, humanize_midi_notes, legato_midi_notes,
         set_midi_note_length, reverse_midi_notes, mirror_midi_notes, randomize_midi_notes,
@@ -13255,15 +13485,58 @@ mod tests {
             velocity: 100,
             channel: 0,
         }];
-        quantize_midi_notes(&mut notes, 240, 1.0);
+        quantize_midi_notes(&mut notes, 240, 1.0, 0.0);
         assert_eq!(notes[0].start, 0);
         assert_eq!(notes[0].end, 300);
 
         notes[0].start = 100;
         notes[0].end = 400;
-        quantize_midi_notes(&mut notes, 240, 0.5);
+        quantize_midi_notes(&mut notes, 240, 0.5, 0.0);
         assert_eq!(notes[0].start, 50);
         assert_eq!(notes[0].end, 350);
+    }
+
+    #[test]
+    fn midi_quantize_swing_delays_offbeat_positions() {
+        let make = || {
+            vec![
+                PianoRollNote {
+                    start: 100,
+                    end: 340,
+                    pitch: 60,
+                    velocity: 100,
+                    channel: 0,
+                },
+                PianoRollNote {
+                    start: 500,
+                    end: 740,
+                    pitch: 62,
+                    velocity: 100,
+                    channel: 0,
+                },
+                PianoRollNote {
+                    start: 1000,
+                    end: 1240,
+                    pitch: 64,
+                    velocity: 100,
+                    channel: 0,
+                },
+            ]
+        };
+
+        let mut notes = make();
+        quantize_midi_notes(&mut notes, 480, 1.0, 1.0);
+        assert_eq!(
+            notes.iter().map(|note| note.start).collect::<Vec<_>>(),
+            vec![0, 640, 960]
+        );
+
+        let mut notes = make();
+        quantize_midi_notes(&mut notes, 480, 1.0, 0.5);
+        assert_eq!(
+            notes.iter().map(|note| note.start).collect::<Vec<_>>(),
+            vec![0, 560, 960]
+        );
     }
 
     #[test]
@@ -13295,6 +13568,55 @@ mod tests {
         assert_eq!(notes[0].velocity, 127);
         scale_midi_velocities(&mut notes, 0.0);
         assert_eq!(notes[0].velocity, 1);
+    }
+
+    #[test]
+    fn velocity_shaping_modes_compress_expand_and_curve() {
+        let make = || {
+            vec![
+                PianoRollNote {
+                    start: 0,
+                    end: 240,
+                    pitch: 60,
+                    velocity: 100,
+                    channel: 0,
+                },
+                PianoRollNote {
+                    start: 240,
+                    end: 480,
+                    pitch: 64,
+                    velocity: 20,
+                    channel: 0,
+                },
+            ]
+        };
+
+        let mut notes = make();
+        compress_midi_velocities(&mut notes, 1.0);
+        assert_eq!(
+            notes.iter().map(|note| note.velocity).collect::<Vec<_>>(),
+            vec![64, 64]
+        );
+
+        let mut notes = make();
+        expand_midi_velocities(&mut notes, 1.0);
+        assert_eq!(
+            notes.iter().map(|note| note.velocity).collect::<Vec<_>>(),
+            vec![127, 1]
+        );
+
+        let mut notes = make();
+        curve_midi_velocities(&mut notes, 1.0);
+        assert!(notes[0].velocity > 100);
+        assert!(notes[1].velocity > 20);
+        for note in &notes {
+            assert_eq!(note.end - note.start, 240);
+        }
+
+        let mut notes = make();
+        curve_midi_velocities(&mut notes, -1.0);
+        assert!(notes[0].velocity < 100);
+        assert!(notes[1].velocity < 20);
     }
 
     #[test]
