@@ -39,7 +39,8 @@ swing, transpose, scale conform, velocity shaping (scale, compress, expand,
 curve and randomize), humanize, legato, fixed note length, note join, split at
 the playhead, reverse, pitch mirror and randomize (pitch, velocity, timing and
 density), with a Tools… menu to choose which tool sections are visible. The
-piano roll has a bar/beat ruler and a draggable playhead line.
+piano roll has a bar/beat ruler and a draggable playhead line, plus toggleable
+ghost notes from other clips on the same track.
 Toggleable velocity and CC lanes handle per-note dynamics and controller
 automation. Trimming is non-destructive and the piano roll shades trimmed
 regions. Every track type now has a real-time insert chain (saturation, filter,

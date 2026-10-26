@@ -846,6 +846,56 @@ fn thin_midi_notes(notes: &mut Vec<PianoRollNote>, keep: f32, seed: u64) {
     notes.retain(|_| humanize_random(&mut state) < keep);
 }
 
+/// Build the dimmed notes from other MIDI clips on the same track, mapped into
+/// the current clip's content coordinates.
+fn ghost_notes_for_clip(
+    project: &Project,
+    clip_id: ClipId,
+    length: u64,
+) -> Vec<PianoRollNote> {
+    let Some(clip) = project.midi_clips.get(clip_id) else {
+        return Vec::new();
+    };
+    let Some(track) = project.track_order.iter().find_map(|id| {
+        project
+            .tracks
+            .get(id)
+            .filter(|track| track.midi_clips.contains(&clip_id))
+    }) else {
+        return Vec::new();
+    };
+    let mut ghosts = Vec::new();
+    for other_id in &track.midi_clips {
+        if *other_id == clip_id {
+            continue;
+        }
+        let Some(other) = project.midi_clips.get(*other_id) else {
+            continue;
+        };
+        for note in midi_clip_content_notes(other) {
+            let timeline_tick = other.timeline_position.tick as i64
+                + note.start as i64
+                - other.content_offset as i64;
+            let content_tick = timeline_tick
+                - clip.timeline_position.tick as i64
+                + clip.content_offset as i64;
+            let duration = note.end.saturating_sub(note.start).max(1);
+            let end_tick = content_tick + duration as i64;
+            if end_tick <= 0 || content_tick >= length as i64 {
+                continue;
+            }
+            let start = content_tick.max(0) as u64;
+            let end = end_tick.max(start as i64 + 1) as u64;
+            ghosts.push(PianoRollNote {
+                start,
+                end,
+                ..note
+            });
+        }
+    }
+    ghosts
+}
+
 /// Snap resolution in ticks used for MIDI clip trimming in the arrange view.
 fn timeline_snap_ticks(snap: SnapMode, beats_per_bar: u64) -> u64 {
     match snap {
@@ -1683,6 +1733,7 @@ struct PianoRollWindow {
     cc_controller: u8,
     show_velocity_lane: bool,
     show_cc_lane: bool,
+    show_ghost_notes: bool,
     /// Clip snapshot while drawing control-change points.
     cc_drag_before: Option<MidiClip>,
 }
@@ -1709,6 +1760,7 @@ impl PianoRollWindow {
             cc_controller: 1,
             show_velocity_lane: true,
             show_cc_lane: false,
+            show_ghost_notes: true,
             cc_drag_before: None,
         }
     }
@@ -6611,6 +6663,11 @@ impl AppUI {
             + clip.content_offset as i64;
         let playhead_content_tick =
             (playhead_content >= 0).then_some(playhead_content as u64);
+        let ghost_notes = if window.show_ghost_notes {
+            ghost_notes_for_clip(&self.project, window.clip_id, length)
+        } else {
+            Vec::new()
+        };
         let mut open = true;
         let mut close = false;
         let mut commit = false;
@@ -6649,6 +6706,10 @@ impl AppUI {
                         "content {} · visible {} ticks",
                         length, clip.length
                     ));
+                    ui.checkbox(&mut window.show_ghost_notes, "Ghosts")
+                        .on_hover_text(
+                            "Show notes from other clips on this track",
+                        );
                     ui.separator();
                     ui.label("Snap:");
                     egui::ComboBox::from_id_salt("piano_roll_snap")
@@ -7582,6 +7643,43 @@ impl AppUI {
                 }
                 if let Some(tick) = seek_content_tick {
                     display_playhead_tick = Some(tick);
+                }
+
+                for note in &ghost_notes {
+                    if note.pitch < low || note.pitch > high {
+                        continue;
+                    }
+                    let x0 = x_for_tick(note.start as f64);
+                    let x1 = x_for_tick(note.end as f64);
+                    if x1 < grid.left() || x0 > grid.right() {
+                        continue;
+                    }
+                    let y1 = y_for_pitch(note.pitch as f32);
+                    let y0 = y1 - row_height;
+                    if y1 < grid.top() || y0 > grid.bottom() {
+                        continue;
+                    }
+                    let left = x0.max(grid.left());
+                    let right = x1.max(x0 + 2.0).min(grid.right());
+                    let top = (y0 + 1.0).max(grid.top());
+                    let bottom = (y1 - 1.0).min(grid.bottom()).max(top + 1.0);
+                    let ghost_rect = egui::Rect::from_min_max(
+                        egui::pos2(left, top),
+                        egui::pos2(right.max(left + 1.0), bottom),
+                    );
+                    painter.rect_filled(
+                        ghost_rect,
+                        2.0,
+                        egui::Color32::from_rgba_unmultiplied(150, 165, 190, 55),
+                    );
+                    painter.rect_stroke(
+                        ghost_rect,
+                        2.0,
+                        egui::Stroke::new(
+                            0.5_f32,
+                            egui::Color32::from_rgba_unmultiplied(180, 195, 220, 85),
+                        ),
+                    );
                 }
 
                 let mut note_rects: Vec<(usize, egui::Rect)> =
@@ -12791,6 +12889,7 @@ mod tests {
         midi_clip_cc_points, write_midi_cc_points, humanize_midi_notes, legato_midi_notes,
         set_midi_note_length, reverse_midi_notes, mirror_midi_notes, randomize_midi_notes,
         join_midi_notes, split_midi_notes_at_tick, thin_midi_notes,
+        ghost_notes_for_clip,
         MidiCcPoint, project_from_template, ClipShape, ClipSourceState,
         EditAction, FilterKind, MonitorMode, PianoRollNote, PianoRollSnap, PianoRollWindow,
         SnapMode, Template, TrackShape,
@@ -14188,6 +14287,40 @@ mod tests {
         let before = notes.clone();
         split_midi_notes_at_tick(&mut notes, 960);
         assert_eq!(notes, before);
+    }
+
+    #[test]
+    fn ghost_notes_map_same_track_clips_into_content_coordinates() {
+        let mut project = Project::new("Ghosts");
+        let mut track = daw_core::track::Track::new_midi("Ghost track");
+        let mut current = MidiClip::new(TimelinePos::new(960, 0), 1920);
+        current.content_offset = 480;
+        let current_id = project.midi_clips.insert(current);
+        track.add_midi_clip(current_id);
+
+        let mut other = MidiClip::new(TimelinePos::default(), 1920);
+        other.add_event(MidiEvent::note_on(1200, 0, 60, 100));
+        other.add_event(MidiEvent::note_off(1440, 0, 60, 0));
+        let other_id = project.midi_clips.insert(other);
+        track.add_midi_clip(other_id);
+
+        let mut different_track =
+            daw_core::track::Track::new_midi("Different track");
+        let mut hidden = MidiClip::new(TimelinePos::default(), 1920);
+        hidden.add_event(MidiEvent::note_on(1200, 0, 67, 100));
+        hidden.add_event(MidiEvent::note_off(1440, 0, 67, 0));
+        let hidden_id = project.midi_clips.insert(hidden);
+        different_track.add_midi_clip(hidden_id);
+
+        project.add_track(track);
+        project.add_track(different_track);
+
+        let ghosts = ghost_notes_for_clip(&project, current_id, 1920);
+        assert_eq!(ghosts.len(), 1);
+        assert_eq!(
+            (ghosts[0].start, ghosts[0].end, ghosts[0].pitch),
+            (720, 960, 60)
+        );
     }
 
     #[test]

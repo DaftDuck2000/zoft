@@ -25,7 +25,7 @@ Full-featured piano roll: note entry/selection/editing, velocity lanes, CC lanes
 - [x] Zoom: Ctrl+wheel and +/− buttons; Fit resets the view
 - [x] Scroll: Wheel pans time, Shift+wheel pans pitch, middle-drag pans both
 - [ ] Fit selection, horizontal/vertical scrollbars
-- [ ] Ghost notes: Show notes from other clips on same track (dimmed)
+- [x] Ghost notes: Show notes from other clips on same track (dimmed), toggleable
 - [ ] Scale highlighting: Highlight notes in current scale
 - [ ] Drum mode: Note names instead of piano keys, one-row-per-drum
 
@@ -183,6 +183,7 @@ enum CCEditMode {
 - 2026-10-26: Quantize gained swing, and the Velocity tool gained compress, expand, curve and randomize modes alongside scaling
 - 2026-10-26: Added the project playhead to the piano roll plus a Notes tool for joining same-pitch notes and splitting notes at the playhead
 - 2026-10-26: Added a bar/beat ruler. Clicking or dragging the ruler, or dragging the playhead line anywhere in the grid, seeks the project playhead and pauses playback like the arrange timeline
+- 2026-10-26: Added toggleable ghost notes for other MIDI clips on the same track, mapped into the open clip's content coordinates and drawn dimmed behind the active notes
 - 2026-10-26: Quantize is the default selected tool and the CC lane starts hidden, so the piano roll opens with a clean grid and one focused tool panel
 - YYYY-MM-DD: Pencil/Eraser/Select tools
 - YYYY-MM-DD: Note drag + resize
