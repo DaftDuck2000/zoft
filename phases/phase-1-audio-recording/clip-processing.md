@@ -20,10 +20,10 @@ Offline clip processing: gain, pitch shift, time stretch, reverse, normalize, bi
 - [x] Normalize: Peak to −1 dBFS, per clip
 - [x] LUFS normalize: Integrated loudness target with a sample-peak safety cap
 - [x] Fade in/out render: Bake fades into new file (Bake into Clip effect)
-- [x] Bit Crusher: bit-depth reduction and sample-and-hold decimation
-- [x] Saturation: soft-clip drive with dry/wet mix
-- [x] Filter: low-pass or high-pass cutoff
-- [x] Tremolo: rate and depth modulation
+- [x] Bit Crusher: real-time FX Rack insert (removed from Clip Audio)
+- [x] Saturation: real-time FX Rack insert (removed from Clip Audio)
+- [x] Filter: real-time FX Rack insert (removed from Clip Audio)
+- [x] Tremolo: real-time FX Rack insert (removed from Clip Audio)
 - [x] Consolidate: Merge adjacent clips on same track into one file
 - [ ] Bounce in place: Render clip with inserts/sends to new file
 - [x] Clip Audio window: right-click a clip or use the arrange **Audio…** button; the **Clip** section has gain/fades/colour and the effect list has an Apply button
@@ -67,12 +67,12 @@ Offline clip processing: gain, pitch shift, time stretch, reverse, normalize, bi
   arrange **Audio…** button) to open a floating window. The **Clip** entry at the
   top shows gain, fade in/out and colour, which apply immediately and are
   undoable. The effect list (Normalize, LUFS Normalize, Bake into Clip, Reverse,
-  Pitch Shift, Time Stretch, Bit Crusher, Saturation, Filter, Tremolo,
-  Consolidate) shows the selected effect's parameters as Logic-style rotary
-  knobs and a single **Apply** button. Drag a knob vertically to adjust it, hold
-  Shift for fine control, or double-click to restore its default. The window
-  stays open, so several operations can be applied in sequence. New per-clip
-  controls live here instead of the arrange toolbar.
+  Pitch Shift, Time Stretch, Consolidate) shows the selected effect's parameters
+  as Logic-style rotary knobs and a single **Apply** button. Drag a knob
+  vertically to adjust it, hold Shift for fine control, or double-click to
+  restore its default. The window stays open, so several operations can be
+  applied in sequence. New per-clip controls live here instead of the arrange
+  toolbar.
   With several clips selected, **Apply** runs the chosen effect on every
   selected clip and records a single undo step (Consolidate requires a single
   clip).
@@ -81,12 +81,8 @@ Offline clip processing: gain, pitch shift, time stretch, reverse, normalize, bi
   The output is a new `<name>_process_<uuid>.wav`; the clip then points at it
   with gain reset to 0 dB and fades removed. Undo restores the previous source,
   offset, length, fades and gain via a `Source` entry.
-- **Bit Crusher**: quantizes samples to 1–16 bits and holds them for 1–64
-  frames, producing digital aliasing and crunch.
-- **Saturation**: tanh soft clipping with 0–36 dB drive and a dry/wet mix.
-- **Filter**: first-order low-pass or high-pass with a logarithmic 20 Hz–20 kHz
-  cutoff. The cutoff is clamped below Nyquist on render.
-- **Tremolo**: sine amplitude modulation with 0.1–20 Hz rate and 0–100 % depth.
+- **Bit Crusher, Saturation, Filter and Tremolo** are real-time track inserts
+  in the FX Rack (X). They are no longer offline Clip Audio tools.
 - **Consolidate**: merges the selected clip with the contiguous run of clips
   that touch or overlap it on the same track. The run is rendered through the
   playback mixer at the project sample rate, so clip gain, fades and automatic
@@ -172,6 +168,7 @@ enum NormalizeMode {
 - 2026-10-21: Added Bit Crusher, Saturation, Filter and Tremolo effect processors; renamed the gain/fade bake action to Bake into Clip
 - 2026-10-21: Replaced the effect sliders with Logic-style rotary knobs (vertical drag, Shift fine adjustment, double-click reset)
 - 2026-10-28: Restored right-clicking an audio clip to reopen the Clip Audio tools window. Track effects stay in the FX Rack and are not part of the clip menu
+- 2026-10-28: Removed Bit Crusher, Saturation, Filter and Tremolo from the Clip Audio tool list; they are only available as real-time FX Rack inserts
 - 2026-10-21: Added LUFS Normalize with ITU-R BS.1770 integrated loudness measurement, −30…−6 LUFS target, and a −1 dBFS sample-peak safety cap
 - 2026-10-21: Added Time Stretch modes: Tape varispeed, Elastic (R3 fine), Musical (R3 fine with centre focus)
 - 2026-10-21: Added Consolidate: renders a touching/overlapping run of clips on a track through the playback mixer, preserving gain, fades and automatic crossfades; undo restores the originals

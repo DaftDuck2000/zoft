@@ -1641,6 +1641,10 @@ enum DragMode {
 }
 
 /// Effect selected in the floating audio-effects window.
+/// Tools in the Clip Audio window. The former offline Bit Crusher, Saturation,
+/// Filter and Tremolo variants are retained for compatibility but are no
+/// longer listed; real-time versions live in the FX Rack.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EffectKind {
     Normalize,
@@ -1657,17 +1661,13 @@ enum EffectKind {
 }
 
 impl EffectKind {
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 7] = [
         Self::Normalize,
         Self::LufsNormalize,
         Self::BakeIntoClip,
         Self::Reverse,
         Self::PitchShift,
         Self::TimeStretch,
-        Self::BitCrusher,
-        Self::Saturation,
-        Self::Filter,
-        Self::Tremolo,
         Self::Consolidate,
     ];
 
@@ -2576,7 +2576,6 @@ impl AppUI {
             playback_ready_rx,
             playback_generation: 0,
         };
-
         // Projects loaded from disk may predate stored overviews; generate any
         // that are missing in the background.
         app.spawn_missing_overviews();

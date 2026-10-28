@@ -84,12 +84,12 @@
 - Next: bounce in place (remaining 1.4 processing operation)
 
 **1.4 Clip Processing** - `[~]` In Progress
-- Right-click a clip (or use the arrange **Audio…** button) to open the floating **Clip Audio** window. Its **Clip** section has gain, fade in/out and colour controls that apply immediately and are undoable; the effect list (Normalize, LUFS Normalize, Bake into Clip, Reverse, Pitch Shift, Time Stretch, Bit Crusher, Saturation, Filter, Tremolo, Consolidate) shows Logic-style knobs (drag vertically, hold Shift for fine control, double-click to reset) with a single **Apply** button. When several clips are selected, effect Apply processes all of them and records one undo step
+- Right-click a clip (or use the arrange **Audio…** button) to open the floating **Clip Audio** window. Its **Clip** section has gain, fade in/out and colour controls that apply immediately and are undoable; the tool list (Normalize, LUFS Normalize, Bake into Clip, Reverse, Pitch Shift, Time Stretch, Consolidate) shows Logic-style knobs (drag vertically, hold Shift for fine control, double-click to reset) with a single **Apply** button. When several clips are selected, Apply processes all of them and records one undo step
 - Peak Normalize (to −1 dBFS) is a gain edit and fully undoable
 - LUFS Normalize measures BS.1770 integrated loudness and sets gain to a −30…−6 LUFS target (default −14), capped so sample peaks stay at or below −1 dBFS
 - Consolidate merges the selected clip with touching/overlapping clips on its track into one file, baking in gain, fades and automatic crossfades; undo restores the original clips
 - Bake into Clip bakes the clip's gain and fade envelopes into a new `*_process_<uuid>.wav`, then resets the gain/fades; undo restores them
-- Bit Crusher, Saturation, Filter and Tremolo render creative effects to a new file while preserving clip gain, fades, position and track; all are undoable
+- Bit Crusher, Saturation, Filter and Tremolo are available as real-time track inserts in the FX Rack (X), not as offline Clip Audio tools
 - Reverse renders the clip's visible audio backwards to a new `*_reverse_<uuid>.wav` (original file untouched) and repoints the clip; undoable
 - Pitch shift (±12 semitones) and time stretch (0.5×–2.0×) rendered through Rubber Band R3, with optional formant preservation; Time Stretch offers Tape, Elastic and Musical modes. Clip length follows the rendered audio and undo restores the original source
 - The window stays open, so clip properties and effects can be adjusted in sequence; new clip controls live there instead of the arrange toolbar
