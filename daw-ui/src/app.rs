@@ -1256,6 +1256,34 @@ fn add_sized_wheel_slider_step<'a, Num: egui::emath::Numeric>(
     response
 }
 
+/// Horizontal peak meter used by the FX Rack channel strips.
+fn draw_track_meter(ui: &mut egui::Ui, peak: f32) {
+    let width = ui.available_width().max(1.0);
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(width, 8.0),
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter();
+    painter.rect_filled(rect, 2.0, egui::Color32::from_gray(24));
+    let level = peak.clamp(0.0, 1.0);
+    if level > 0.0 {
+        let filled = egui::Rect::from_min_max(
+            rect.min,
+            egui::pos2(rect.left() + rect.width() * level, rect.bottom()),
+        );
+        let color = if level >= 0.99 {
+            egui::Color32::RED
+        } else if level > 0.8 {
+            egui::Color32::from_rgb(220, 200, 80)
+        } else {
+            egui::Color32::from_rgb(70, 180, 90)
+        };
+        painter.rect_filled(filled, 2.0, color);
+    }
+    let db = 20.0 * peak.max(1e-6).log10();
+    response.on_hover_text(format!("Peak: {:.1} dB", db));
+}
+
 /// Source reference and trimmed range, used by processing operations that
 /// render a new file (the original file is never modified).
 #[derive(Debug, Clone)]
@@ -2426,6 +2454,8 @@ struct AppUI {
     audio_window: Option<ClipAudioWindow>,
     /// Logic-style insert rack showing every track as a horizontal column.
     fx_rack_open: bool,
+    /// Smoothed peak levels shown in the FX Rack, keyed by track.
+    track_meter_levels: HashMap<TrackId, f32>,
     /// Original insert chain for the current effect-parameter gesture, pushed
     /// as one undo entry when the pointer is released.
     pending_insert_edit: Option<(TrackId, Vec<InsertSlot>)>,
@@ -2550,6 +2580,7 @@ impl AppUI {
             midi_clipboard: Vec::new(),
             audio_window: None,
             fx_rack_open: false,
+            track_meter_levels: HashMap::new(),
             pending_insert_edit: None,
             piano_roll: None,
             piano_roll_preview: None,
@@ -6537,6 +6568,27 @@ impl AppUI {
             return;
         }
         let track_ids = self.project.track_order.clone();
+        let engine_meters = self.engine.track_meters();
+        let playing = self.playing;
+        for (index, track_id) in track_ids.iter().enumerate() {
+            let target = if playing {
+                engine_meters
+                    .get(index)
+                    .map(|meter| meter.peak)
+                    .unwrap_or(0.0)
+            } else {
+                0.0
+            };
+            let level = self
+                .track_meter_levels
+                .entry(*track_id)
+                .or_insert(0.0);
+            *level = if target >= *level {
+                target
+            } else {
+                (*level - 0.02).max(0.0)
+            };
+        }
         let mut open = true;
         let mut changes: Vec<(TrackId, Vec<InsertSlot>)> = Vec::new();
         let mut track_changes: Vec<(TrackId, TrackShape, TrackShape, bool)> =
@@ -6714,6 +6766,12 @@ impl AppUI {
                                                         };
                                                     ui.label(pan_text);
                                                 });
+                                                let meter = self
+                                                    .track_meter_levels
+                                                    .get(track_id)
+                                                    .copied()
+                                                    .unwrap_or(0.0);
+                                                draw_track_meter(ui, meter);
                                                 ui.separator();
                                                 if show_insert_slots(
                                                     ui,
@@ -12265,6 +12323,7 @@ impl AppUI {
         self.deleted_from.clear();
         self.audio_window = None;
         self.fx_rack_open = false;
+        self.track_meter_levels.clear();
         self.pending_insert_edit = None;
         self.piano_roll = None;
         self.piano_roll_preview = None;

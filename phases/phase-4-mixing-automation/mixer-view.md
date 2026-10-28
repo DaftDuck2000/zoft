@@ -13,7 +13,7 @@ Full mixer console: channel strips, meter bridge, insert/send racks, routing mat
 ## Requirements
 
 - [~] Channel strips: Name, color, mute/solo, volume fader, pan and inserts implemented; meters, sends and I/O pending
-- [ ] Meter bridge: Peak, RMS, LUFS, true peak, correlation, K-system
+- [~] Meter bridge: Peak/RMS meters in the FX Rack; LUFS, true peak, correlation and K-system pending
 - [~] Insert rack: 8 slots, drag-reorder, bypass, solo, preset
   - [x] Basic per-track insert chain (saturation, filter, bit crusher, tremolo) on every track type
   - [~] FX Rack: horizontal track columns with insert lists, add/remove/reorder/bypass and parameter controls; drag-reorder, solo and presets pending
@@ -131,7 +131,7 @@ struct SoloSystem {
 ## Acceptance Criteria
 
 - [ ] 64+ channel strips at 60 FPS
-- [ ] Meters: Peak/RMS/LUFS/True Peak accurate
+- [~] Meters: Peak/RMS accurate in the FX Rack; LUFS/True Peak pending
 - [ ] Insert/send racks: drag-reorder, bypass, solo
 - [ ] Routing matrix: visual, click to connect
 - [ ] Solo modes work (latch, momentary, additive)
@@ -148,6 +148,7 @@ struct SoloSystem {
 - 2026-10-26: Added equal-power pan to the FX Rack channel strips. Pan is applied in the playback mixer, is undoable and uses a centered unity-gain law
 - 2026-10-26: Added a pan knob to the left track list alongside volume, with live mixer updates while dragging
 - 2026-10-28: FX Rack insert parameters now use Logic-style rotary knobs instead of sliders. Pan is a knob in both the track list and FX Rack, and mouse-wheel adjustment works on knobs as well
+- 2026-10-28: Added live per-track peak/RMS meters to the FX Rack channel strips, with decay when playback stops
 - YYYY-MM-DD: Channel strip UI
 - YYYY-MM-DD: Meter bridge + ballistics
 - YYYY-MM-DD: Insert/send racks

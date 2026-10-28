@@ -3,6 +3,14 @@
 use cpal::{FromSample, Sample, SizedSample};
 use daw_core::clip::Fade;
 use daw_core::track::{FilterMode, InsertSlot, TrackEffect};
+use std::sync::{Arc, Mutex};
+
+/// Latest peak/RMS reading for one track.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct TrackMeter {
+    pub peak: f32,
+    pub rms: f32,
+}
 
 /// A clip prepared for playback: interleaved f32 samples plus timeline
 /// placement and gain/fade settings.
@@ -137,6 +145,8 @@ pub struct PlaybackMixer {
     track_scratch: Vec<f32>,
     /// Scratch buffer holding the dry signal while an effect is blended in.
     effect_dry: Vec<f32>,
+    /// Optional shared peak/RMS readings consumed by the UI meters.
+    meters: Option<Arc<Mutex<Vec<TrackMeter>>>>,
 }
 
 impl PlaybackMixer {
@@ -219,6 +229,7 @@ impl PlaybackMixer {
             effect_states: Vec::new(),
             track_scratch: Vec::new(),
             effect_dry: Vec::new(),
+            meters: None,
         }
     }
 
@@ -284,6 +295,12 @@ impl PlaybackMixer {
 
     pub fn tracks(&self) -> &[PlayableTrack] {
         &self.tracks
+    }
+
+    /// Share a meter buffer that receives one peak/RMS reading per track on
+    /// every mixed block.
+    pub fn set_meters(&mut self, meters: Arc<Mutex<Vec<TrackMeter>>>) {
+        self.meters = Some(meters);
     }
 
     fn rebuild_clip_buckets(&mut self) {
@@ -412,6 +429,15 @@ impl PlaybackMixer {
             // and updating its effect state don't overlap borrows.
             let tracks = std::mem::take(&mut self.tracks);
             let mut states = std::mem::take(&mut self.effect_states);
+            let meter_sink = self.meters.clone();
+            let mut meter_guard = meter_sink
+                .as_ref()
+                .and_then(|meters| meters.lock().ok());
+            if let Some(meters) = meter_guard.as_mut() {
+                if meters.len() < tracks.len() {
+                    meters.resize(tracks.len(), TrackMeter::default());
+                }
+            }
             for (slot, track) in tracks.iter().enumerate() {
                 track_buf.fill(0.0);
                 self.render_bucket(Some(slot), &mut track_buf, frames);
@@ -429,6 +455,9 @@ impl PlaybackMixer {
                 let pan_left = track.pan_left;
                 let pan_right = track.pan_right;
                 let mono_pan = (pan_left + pan_right) * 0.5;
+                let mut peak = 0.0f32;
+                let mut sum_sq = 0.0f32;
+                let mut sample_count = 0usize;
                 for frame in 0..frames {
                     let base = frame * out_ch;
                     for channel in 0..out_ch {
@@ -441,8 +470,21 @@ impl PlaybackMixer {
                         } else {
                             1.0
                         };
-                        out[base + channel] +=
+                        let sample =
                             track_buf[base + channel] * gain * pan;
+                        out[base + channel] += sample;
+                        peak = peak.max(sample.abs());
+                        sum_sq += sample * sample;
+                        sample_count += 1;
+                    }
+                }
+                if let Some(meters) = meter_guard.as_mut() {
+                    if let Some(meter) = meters.get_mut(slot) {
+                        *meter = TrackMeter {
+                            peak,
+                            rms: (sum_sq / sample_count.max(1) as f32)
+                                .sqrt(),
+                        };
                     }
                 }
             }
@@ -1046,6 +1088,28 @@ mod tests {
             .skip(1)
             .step_by(2)
             .all(|sample| sample.abs() < 1e-6));
+    }
+
+    #[test]
+    fn track_meters_report_peak_and_rms() {
+        let meters = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let a = clip(vec![1.0, -0.5, 0.25, 0.0], 0, 0);
+        let mut mixer = PlaybackMixer::new(10, 1, vec![a], 0);
+        mixer.set_tracks(vec![PlayableTrack {
+            index: 0,
+            gain: 1.0,
+            pan_left: 1.0,
+            pan_right: 1.0,
+            effects: Vec::new(),
+        }]);
+        mixer.set_meters(std::sync::Arc::clone(&meters));
+
+        let mut out = [0.0f32; 4];
+        mixer.fill_unclamped(&mut out);
+        let meters = meters.lock().unwrap();
+        assert_eq!(meters.len(), 1);
+        assert!((meters[0].peak - 1.0).abs() < 1e-6);
+        assert!(meters[0].rms > 0.0);
     }
 
     #[test]
