@@ -13,7 +13,7 @@ Offline clip processing: gain, pitch shift, time stretch, reverse, normalize, bi
 ## Requirements
 
 - [x] Clip gain: Apply gain to create new rendered file (combined with fades in the Bake into Clip effect)
-- [x] Pitch shift: Semitone slider with optional formant preservation (Rubber Band R3)
+- [x] Pitch shift: Semitone knob with optional formant preservation (Rubber Band R3)
 - [x] Time stretch: 0.5×–2.0× via Rubber Band R3
 - [x] Time-stretch modes: tape / elastic / musical presets
 - [x] Reverse: Render the clip backwards to a new file (original preserved)
@@ -171,6 +171,7 @@ enum NormalizeMode {
 - 2026-10-21: Bake into Clip (formerly Gain & Fades) bakes clip gain and fade envelopes into a new WAV, resets the clip's gain/fades, and is undoable
 - 2026-10-21: Added Bit Crusher, Saturation, Filter and Tremolo effect processors; renamed the gain/fade bake action to Bake into Clip
 - 2026-10-21: Replaced the effect sliders with Logic-style rotary knobs (vertical drag, Shift fine adjustment, double-click reset)
+- 2026-10-28: Restored right-clicking an audio clip to reopen the Clip Audio tools window. Track effects stay in the FX Rack and are not part of the clip menu
 - 2026-10-21: Added LUFS Normalize with ITU-R BS.1770 integrated loudness measurement, −30…−6 LUFS target, and a −1 dBFS sample-peak safety cap
 - 2026-10-21: Added Time Stretch modes: Tape varispeed, Elastic (R3 fine), Musical (R3 fine with centre focus)
 - 2026-10-21: Added Consolidate: renders a touching/overlapping run of clips on a track through the playback mixer, preserving gain, fades and automatic crossfades; undo restores the originals

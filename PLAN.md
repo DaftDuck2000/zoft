@@ -89,7 +89,7 @@
 
 | ID | Feature | Status | Est. | Actual | Notes |
 |----|---------|--------|------|--------|-------|
-| 4.1 | Mixer View | `[~]` | 3w | | Horizontal FX rack (X) with per-track insert columns, mute/solo, volume and pan; track-list pan faders; meters, sends and routing pending |
+| 4.1 | Mixer View | `[~]` | 3w | | Horizontal FX rack (X) with per-track insert columns, knob-based effect controls, mute/solo, volume and pan; track-list pan knob; meters, sends and routing pending |
 | 4.2 | Bus Routing & Groups | `[ ]` | 2w | | Aux, VCA, folder sums, sidechain |
 | 4.3 | Automation System | `[ ]` | 3w | | Read/Write/Touch/Latch, curves |
 | 4.4 | Bounce & Export | `[ ]` | 2w | | Stems, mixdown, video sync |

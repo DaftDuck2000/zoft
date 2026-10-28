@@ -146,7 +146,8 @@ struct SoloSystem {
 - 2026-10-26: Added the FX Rack (X), a Logic-style window with one horizontal column per track and that track's insert chain underneath. Tracks can be scrolled horizontally; slots can be added, removed, reordered, bypassed and edited in place
 - 2026-10-26: FX Rack columns now include mute/solo and a volume fader. Continuous fader moves merge into one undo entry, and the live mixer is updated immediately while dragging
 - 2026-10-26: Added equal-power pan to the FX Rack channel strips. Pan is applied in the playback mixer, is undoable and uses a centered unity-gain law
-- 2026-10-26: Added a pan slider to the left track list alongside volume, with live mixer updates while dragging
+- 2026-10-26: Added a pan knob to the left track list alongside volume, with live mixer updates while dragging
+- 2026-10-28: FX Rack insert parameters now use Logic-style rotary knobs instead of sliders. Pan is a knob in both the track list and FX Rack, and mouse-wheel adjustment works on knobs as well
 - YYYY-MM-DD: Channel strip UI
 - YYYY-MM-DD: Meter bridge + ballistics
 - YYYY-MM-DD: Insert/send racks

@@ -1214,16 +1214,6 @@ fn add_wheel_slider<'a, Num: egui::emath::Numeric>(
     add_wheel_slider_step(ui, value, range, None, false, build)
 }
 
-/// Add a logarithmic slider that steps by 5% of its logarithmic travel.
-fn add_wheel_slider_log<'a, Num: egui::emath::Numeric>(
-    ui: &mut egui::Ui,
-    value: &'a mut Num,
-    range: std::ops::RangeInclusive<Num>,
-    build: impl FnOnce(egui::Slider<'a>) -> egui::Slider<'a>,
-) -> egui::Response {
-    add_wheel_slider_step(ui, value, range, None, true, build)
-}
-
 /// Add a slider with an explicit wheel step.
 fn add_wheel_slider_step<'a, Num: egui::emath::Numeric>(
     ui: &mut egui::Ui,
@@ -1242,17 +1232,6 @@ fn add_wheel_slider_step<'a, Num: egui::emath::Numeric>(
     }
     ui.data_mut(|data| data.insert_temp(id, response.rect));
     response
-}
-
-/// Add a fixed-size slider that supports wheel adjustment in 5% range steps.
-fn add_sized_wheel_slider<'a, Num: egui::emath::Numeric>(
-    ui: &mut egui::Ui,
-    size: egui::Vec2,
-    value: &'a mut Num,
-    range: std::ops::RangeInclusive<Num>,
-    build: impl FnOnce(egui::Slider<'a>) -> egui::Slider<'a>,
-) -> egui::Response {
-    add_sized_wheel_slider_step(ui, size, value, range, None, false, build)
 }
 
 /// Add a fixed-size slider with an explicit wheel step.
@@ -6706,24 +6685,15 @@ impl AppUI {
                                                     ui.label("Pan");
                                                     let mut pan =
                                                         after.pan.to_linear();
-                                                    let response =
-                                                        add_sized_wheel_slider(
-                                                            ui,
-                                                            egui::vec2(
-                                                                120.0, 18.0,
-                                                            ),
-                                                            &mut pan,
-                                                            -1.0..=1.0,
-                                                            |slider| {
-                                                                slider.show_value(
-                                                                    false,
-                                                                )
-                                                            },
-                                                        )
-                                                        .on_hover_text(
-                                                            "Track pan",
-                                                        );
-                                                    if response.changed() {
+                                                    if compact_knob(
+                                                        ui,
+                                                        &mut pan,
+                                                        -1.0..=1.0,
+                                                        0.0,
+                                                        false,
+                                                    )
+                                                    .changed()
+                                                    {
                                                         after.pan =
                                                             PanLaw::from_linear(
                                                                 pan,
@@ -8842,6 +8812,35 @@ fn paint_knob_arc(
     painter.add(egui::Shape::line(points, stroke));
 }
 
+/// Mouse-wheel adjustment for knobs, matching sliders at 5% per notch.
+fn apply_knob_wheel(
+    ui: &mut egui::Ui,
+    response: &egui::Response,
+    norm: &mut f32,
+) {
+    if !response.hovered() {
+        return;
+    }
+    let steps = slider_wheel_steps(ui);
+    if steps == 0.0 {
+        return;
+    }
+    ui.input_mut(|i| {
+        i.raw_scroll_delta = egui::Vec2::ZERO;
+        i.smooth_scroll_delta = egui::Vec2::ZERO;
+    });
+    let now = ui.input(|i| i.time);
+    let last_id = response.id.with("knob_wheel_time");
+    let last = ui
+        .data(|data| data.get_temp::<f64>(last_id))
+        .unwrap_or(f64::NEG_INFINITY);
+    if now - last < 0.05 {
+        return;
+    }
+    ui.data_mut(|data| data.insert_temp(last_id, now));
+    *norm = (*norm + steps * 0.05).clamp(0.0, 1.0);
+}
+
 /// Logic-style rotary control. Drag vertically to change the value, hold Shift
 /// for fine adjustment, and double-click to return to the default.
 fn knob(
@@ -8871,6 +8870,7 @@ fn knob(
         norm -= response.drag_delta().y / KNOB_DRAG_PIXELS * speed;
         norm = norm.clamp(0.0, 1.0);
     }
+    apply_knob_wheel(ui, &response, &mut norm);
 
     let keyboard_step = if ui.input(|input| input.modifiers.shift) {
         0.005
@@ -9008,6 +9008,129 @@ fn knob(
     ))
 }
 
+/// Compact rotary control used in dense rows such as the track list. The
+/// label and value are supplied by the caller.
+fn compact_knob(
+    ui: &mut egui::Ui,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    default: f32,
+    logarithmic: bool,
+) -> egui::Response {
+    let min = *range.start();
+    let max = *range.end();
+    let default_norm = knob_to_normalized(default, min, max, logarithmic);
+    let mut norm = knob_to_normalized(*value, min, max, logarithmic);
+    let size = 26.0;
+
+    let (rect, mut response) = ui.allocate_exact_size(
+        egui::vec2(size, size),
+        egui::Sense::click_and_drag(),
+    );
+
+    if response.double_clicked() {
+        norm = default_norm;
+    } else if response.dragged_by(egui::PointerButton::Primary) {
+        let fine = ui.input(|input| input.modifiers.shift);
+        let speed = if fine { 0.1 } else { 1.0 };
+        norm -= response.drag_delta().y / 120.0 * speed;
+        norm = norm.clamp(0.0, 1.0);
+    }
+    apply_knob_wheel(ui, &response, &mut norm);
+
+    let old_value = *value;
+    let next = knob_from_normalized(norm, min, max, logarithmic).clamp(min, max);
+    if next != old_value {
+        *value = next;
+        response.mark_changed();
+    }
+    if response.clicked() {
+        response.request_focus();
+    }
+    if response.hovered() || response.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+    }
+
+    let center = rect.center();
+    let radius = size * 0.30;
+    let arc_radius = size * 0.44;
+    let visuals = ui.style().interact(&response).clone();
+    let accent = ui.visuals().selection.bg_fill;
+    let track = ui.visuals().widgets.inactive.bg_stroke.color;
+    let painter = ui.painter();
+
+    paint_knob_arc(
+        painter,
+        center,
+        arc_radius,
+        KNOB_START_ANGLE,
+        KNOB_START_ANGLE + KNOB_SWEEP,
+        egui::Stroke::new(1.5_f32, track),
+    );
+    let arc_origin = if min < 0.0 && max > 0.0 {
+        knob_to_normalized(0.0, min, max, logarithmic)
+    } else {
+        0.0
+    };
+    let (fill_start, fill_end) = if norm >= arc_origin {
+        (
+            KNOB_START_ANGLE + KNOB_SWEEP * arc_origin,
+            KNOB_START_ANGLE + KNOB_SWEEP * norm,
+        )
+    } else {
+        (
+            KNOB_START_ANGLE + KNOB_SWEEP * norm,
+            KNOB_START_ANGLE + KNOB_SWEEP * arc_origin,
+        )
+    };
+    if (fill_end - fill_start).abs() > 0.001 {
+        paint_knob_arc(
+            painter,
+            center,
+            arc_radius,
+            fill_start,
+            fill_end,
+            egui::Stroke::new(2.0_f32, accent),
+        );
+    }
+    painter.circle_filled(center, radius, visuals.bg_fill);
+    painter.circle_stroke(center, radius, visuals.bg_stroke);
+
+    let pointer_angle = KNOB_START_ANGLE + KNOB_SWEEP * norm;
+    let pointer_direction = egui::vec2(pointer_angle.cos(), pointer_angle.sin());
+    painter.line_segment(
+        [
+            center + pointer_direction * (radius * 0.30),
+            center + pointer_direction * (radius * 0.86),
+        ],
+        egui::Stroke::new(1.5_f32, visuals.fg_stroke.color),
+    );
+    painter.circle_filled(center, 1.5, accent);
+
+    response.on_hover_text(
+        "Drag vertically to adjust · Shift for fine · Double-click to reset",
+    )
+}
+
+/// Compact knob with a small label above and value below.
+fn compact_knob_control(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    default: f32,
+    logarithmic: bool,
+    format: impl Fn(f32) -> String,
+) -> egui::Response {
+    ui.vertical(|ui| {
+        ui.label(egui::RichText::new(label).small());
+        let response = compact_knob(ui, value, range, default, logarithmic);
+        ui.label(egui::RichText::new(format(*value)).small());
+        response
+    })
+    .inner
+}
+
 fn format_frequency(value: f32) -> String {
     if value >= 1_000.0 {
         format!("{:.1} kHz", value / 1_000.0)
@@ -9116,22 +9239,28 @@ fn show_insert_slots(ui: &mut egui::Ui, inserts: &mut Vec<InsertSlot>) -> bool {
 
                 match &mut slot.effect {
                     Some(TrackEffect::Saturation { drive_db, mix }) => {
-                        changed |= add_wheel_slider(
-                            ui,
-                            drive_db,
-                            0.0..=36.0,
-                            |slider| {
-                                slider.text("Drive").suffix(" dB")
-                            },
-                        )
-                        .changed();
-                        changed |= add_wheel_slider(
-                            ui,
-                            mix,
-                            0.0..=1.0,
-                            |slider| slider.text("Effect mix"),
-                        )
-                        .changed();
+                        ui.horizontal_top(|ui| {
+                            changed |= knob(
+                                ui,
+                                drive_db,
+                                0.0..=36.0,
+                                12.0,
+                                "Drive",
+                                false,
+                                |value| format!("{:.1} dB", value),
+                            )
+                            .changed();
+                            changed |= knob(
+                                ui,
+                                mix,
+                                0.0..=1.0,
+                                1.0,
+                                "Mix",
+                                false,
+                                |value| format!("{:.0}%", value * 100.0),
+                            )
+                            .changed();
+                        });
                     }
                     Some(TrackEffect::Filter { mode, cutoff }) => {
                         ui.horizontal(|ui| {
@@ -9156,16 +9285,14 @@ fn show_insert_slots(ui: &mut egui::Ui, inserts: &mut Vec<InsertSlot>) -> bool {
                                         .changed();
                                 });
                         });
-                        changed |= add_wheel_slider_log(
+                        changed |= knob(
                             ui,
                             cutoff,
                             20.0..=20_000.0,
-                            |slider| {
-                                slider
-                                    .logarithmic(true)
-                                    .text("Cutoff")
-                                    .suffix(" Hz")
-                            },
+                            8_000.0,
+                            "Cutoff",
+                            true,
+                            format_frequency,
                         )
                         .changed();
                     }
@@ -9173,58 +9300,62 @@ fn show_insert_slots(ui: &mut egui::Ui, inserts: &mut Vec<InsertSlot>) -> bool {
                         bits,
                         downsample,
                     }) => {
-                        let mut bit_value = *bits as f32;
-                        if add_wheel_slider(
-                            ui,
-                            &mut bit_value,
-                            1.0..=24.0,
-                            |slider| {
-                                slider.step_by(1.0).text("Bits")
-                            },
-                        )
-                        .changed()
-                        {
-                            *bits = bit_value.round() as u32;
-                            changed = true;
-                        }
-                        let mut hold_value = *downsample as f32;
-                        if add_wheel_slider(
-                            ui,
-                            &mut hold_value,
-                            1.0..=64.0,
-                            |slider| {
-                                slider
-                                    .step_by(1.0)
-                                    .text("Sample hold")
-                                    .suffix("×")
-                            },
-                        )
-                        .changed()
-                        {
-                            *downsample = hold_value.round() as u32;
-                            changed = true;
-                        }
+                        ui.horizontal_top(|ui| {
+                            let mut bit_value = *bits as f32;
+                            if knob(
+                                ui,
+                                &mut bit_value,
+                                1.0..=24.0,
+                                8.0,
+                                "Bits",
+                                false,
+                                |value| format!("{:.0}", value),
+                            )
+                            .changed()
+                            {
+                                *bits = bit_value.round() as u32;
+                                changed = true;
+                            }
+                            let mut hold_value = *downsample as f32;
+                            if knob(
+                                ui,
+                                &mut hold_value,
+                                1.0..=64.0,
+                                4.0,
+                                "Hold",
+                                false,
+                                |value| format!("{:.0}×", value),
+                            )
+                            .changed()
+                            {
+                                *downsample = hold_value.round() as u32;
+                                changed = true;
+                            }
+                        });
                     }
                     Some(TrackEffect::Tremolo { rate, depth }) => {
-                        changed |= add_wheel_slider_log(
-                            ui,
-                            rate,
-                            0.1..=20.0,
-                            |slider| {
-                                slider
-                                    .logarithmic(true)
-                                    .text("Rate")
-                                    .suffix(" Hz")
-                            },
-                        )
-                        .changed();
-                        changed |= add_wheel_slider(
-                            ui,
-                            depth,
-                            0.0..=1.0,
-                            |slider| slider.text("Depth"),
-                        )
-                        .changed();
+                        ui.horizontal_top(|ui| {
+                            changed |= knob(
+                                ui,
+                                rate,
+                                0.1..=20.0,
+                                5.0,
+                                "Rate",
+                                true,
+                                format_frequency,
+                            )
+                            .changed();
+                            changed |= knob(
+                                ui,
+                                depth,
+                                0.0..=1.0,
+                                0.5,
+                                "Depth",
+                                false,
+                                |value| format!("{:.0}%", value * 100.0),
+                            )
+                            .changed();
+                        });
                     }
                     None => {
                         ui.weak("Choose an effect kind above.");
@@ -9232,38 +9363,38 @@ fn show_insert_slots(ui: &mut egui::Ui, inserts: &mut Vec<InsertSlot>) -> bool {
                 }
 
                 ui.add_space(2.0);
-                egui::Grid::new("slot_gains")
-                    .num_columns(2)
-                    .spacing([6.0, 2.0])
-                    .show(ui, |ui| {
-                        ui.label("In");
-                        changed |= add_wheel_slider(
-                            ui,
-                            &mut slot.input_gain,
-                            0.0..=2.0,
-                            |slider| slider.suffix("×"),
-                        )
-                        .changed();
-                        ui.end_row();
-                        ui.label("Mix");
-                        changed |= add_wheel_slider(
-                            ui,
-                            &mut slot.mix,
-                            0.0..=1.0,
-                            |slider| slider,
-                        )
-                        .changed();
-                        ui.end_row();
-                        ui.label("Out");
-                        changed |= add_wheel_slider(
-                            ui,
-                            &mut slot.output_gain,
-                            0.0..=2.0,
-                            |slider| slider.suffix("×"),
-                        )
-                        .changed();
-                        ui.end_row();
-                    });
+                ui.horizontal_top(|ui| {
+                    changed |= compact_knob_control(
+                        ui,
+                        "In",
+                        &mut slot.input_gain,
+                        0.0..=2.0,
+                        1.0,
+                        false,
+                        |value| format!("{:.2}×", value),
+                    )
+                    .changed();
+                    changed |= compact_knob_control(
+                        ui,
+                        "Mix",
+                        &mut slot.mix,
+                        0.0..=1.0,
+                        1.0,
+                        false,
+                        |value| format!("{:.2}", value),
+                    )
+                    .changed();
+                    changed |= compact_knob_control(
+                        ui,
+                        "Out",
+                        &mut slot.output_gain,
+                        0.0..=2.0,
+                        1.0,
+                        false,
+                        |value| format!("{:.2}×", value),
+                    )
+                    .changed();
+                });
             });
         });
         ui.add_space(4.0);
@@ -10302,7 +10433,7 @@ impl eframe::App for AppUI {
                     row_ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
                     let row = egui::InnerResponse::new(
                         (|ui: &mut egui::Ui| {
-                            let content_height = 20.0 * 3.0 + 2.0 * 2.0;
+                            let content_height = 20.0 + 2.0 + 20.0 + 2.0 + 26.0;
                             ui.add_space(
                                 ((row_rect.height() - content_height) * 0.5)
                                     .max(0.0),
@@ -10477,14 +10608,13 @@ impl eframe::App for AppUI {
                                 ui.add_space(58.0);
                                 ui.label("Pan");
                                 let mut pan = after.pan.to_linear();
-                                if add_sized_wheel_slider(
+                                if compact_knob(
                                     ui,
-                                    egui::vec2(100.0, 18.0),
                                     &mut pan,
                                     -1.0..=1.0,
-                                    |slider| slider.show_value(false),
+                                    0.0,
+                                    false,
                                 )
-                                .on_hover_text("Track pan")
                                 .changed()
                                 {
                                     after.pan = PanLaw::from_linear(pan);
@@ -11129,6 +11259,22 @@ impl eframe::App for AppUI {
                     {
                         self.set_single_midi_selection(*midi_id);
                         self.piano_roll = Some(PianoRollWindow::new(*midi_id, self.snap_mode));
+                    }
+                }
+            }
+            // Right-clicking an audio clip reopens the clip audio-tools window
+            // (reverse, pitch, time stretch, etc.). Track effects live in the
+            // FX Rack and are intentionally not part of this menu.
+            if edit_response.secondary_clicked() {
+                if let Some(pos) = pointer_pos {
+                    if let Some((clip_id, _)) = Self::clip_hit(&clip_rects, pos) {
+                        if !self.selected_clips.contains(&clip_id) {
+                            self.set_single_selection(clip_id);
+                        } else {
+                            self.selected_clip = Some(clip_id);
+                        }
+                        let ids = self.selection_ids();
+                        self.audio_window = Some(ClipAudioWindow::new(ids));
                     }
                 }
             }
