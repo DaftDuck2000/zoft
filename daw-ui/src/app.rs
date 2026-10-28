@@ -10302,7 +10302,7 @@ impl eframe::App for AppUI {
                     row_ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
                     let row = egui::InnerResponse::new(
                         (|ui: &mut egui::Ui| {
-                            let content_height = 20.0 + 4.0 + 20.0;
+                            let content_height = 20.0 * 3.0 + 2.0 * 2.0;
                             ui.add_space(
                                 ((row_rect.height() - content_height) * 0.5)
                                     .max(0.0),
@@ -10454,7 +10454,7 @@ impl eframe::App for AppUI {
                                 ui.label("Vol");
                                 add_sized_wheel_slider_step(
                                     ui,
-                                    egui::vec2(80.0, 18.0),
+                                    egui::vec2(100.0, 18.0),
                                     &mut after.volume,
                                     0.0..=1.5,
                                     Some(0.05),
@@ -10469,11 +10469,17 @@ impl eframe::App for AppUI {
                                     "{:.0}%",
                                     after.volume * 100.0
                                 ));
+                            });
+
+                            // Third line: pan fader, aligned under the volume
+                            // slider. The leading space matches Mon + G.
+                            ui.horizontal(|ui| {
+                                ui.add_space(58.0);
                                 ui.label("Pan");
                                 let mut pan = after.pan.to_linear();
                                 if add_sized_wheel_slider(
                                     ui,
-                                    egui::vec2(64.0, 18.0),
+                                    egui::vec2(100.0, 18.0),
                                     &mut pan,
                                     -1.0..=1.0,
                                     |slider| slider.show_value(false),
