@@ -33,7 +33,7 @@ pub use midi::*;
 use crate::audio_backend::AudioBackend;
 use crate::playback::{
     MetronomeConfig, PlayableClip, PlayableNote, PlayableTrack, PlaybackMixer,
-    TrackMeter,
+    StereoMeter, TrackMeter,
 };
 use anyhow::Result;
 use std::path::PathBuf;
@@ -68,6 +68,8 @@ pub struct AudioEngine {
     playback_tracks: Arc<Mutex<Vec<PlayableTrack>>>,
     /// Latest peak/RMS reading per track, shared with the playback mixer.
     track_meters: Arc<Mutex<Vec<TrackMeter>>>,
+    /// Latest stereo peak/RMS reading for the master output.
+    master_meter: Arc<Mutex<StereoMeter>>,
 }
 
 struct RecordingState {
@@ -98,6 +100,7 @@ impl AudioEngine {
             playback_notes: Arc::new(Mutex::new(Vec::new())),
             playback_tracks: Arc::new(Mutex::new(Vec::new())),
             track_meters: Arc::new(Mutex::new(Vec::new())),
+            master_meter: Arc::new(Mutex::new(StereoMeter::default())),
         })
     }
 
@@ -144,6 +147,7 @@ impl AudioEngine {
             start_frame,
         );
         mixer.set_meters(Arc::clone(&self.track_meters));
+        mixer.set_master_meter(Arc::clone(&self.master_meter));
         if let Some(range) = *self.playback_loop.lock().unwrap() {
             mixer.set_loop_range(Some(range));
         }
@@ -198,6 +202,11 @@ impl AudioEngine {
     /// Latest peak/RMS reading for every track, indexed by track order.
     pub fn track_meters(&self) -> Vec<TrackMeter> {
         self.track_meters.lock().unwrap().clone()
+    }
+
+    /// Latest stereo peak/RMS reading for the summed master output.
+    pub fn master_meter(&self) -> StereoMeter {
+        *self.master_meter.lock().unwrap()
     }
 
     /// Audition a MIDI note through the live sine synth, independent of

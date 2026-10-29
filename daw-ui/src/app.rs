@@ -1257,7 +1257,7 @@ fn add_sized_wheel_slider_step<'a, Num: egui::emath::Numeric>(
 }
 
 /// Horizontal peak meter used by the FX Rack channel strips.
-fn draw_track_meter(ui: &mut egui::Ui, peak: f32) {
+fn draw_track_meter(ui: &mut egui::Ui, peak: f32, hold: f32) {
     let width = ui.available_width().max(1.0);
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(width, 8.0),
@@ -1280,8 +1280,58 @@ fn draw_track_meter(ui: &mut egui::Ui, peak: f32) {
         };
         painter.rect_filled(filled, 2.0, color);
     }
+    let hold = hold.clamp(0.0, 1.0);
+    if hold > 0.01 {
+        let x = rect.left() + rect.width() * hold;
+        painter.line_segment(
+            [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+            egui::Stroke::new(1.5_f32, egui::Color32::WHITE),
+        );
+    }
     let db = 20.0 * peak.max(1e-6).log10();
-    response.on_hover_text(format!("Peak: {:.1} dB", db));
+    let hold_db = 20.0 * hold.max(1e-6).log10();
+    response.on_hover_text(format!(
+        "Peak: {:.1} dB · Hold: {:.1} dB",
+        db, hold_db
+    ));
+}
+
+/// Stereo master meter shown in the FX Rack header.
+fn draw_master_meter(ui: &mut egui::Ui, levels: [f32; 2]) {
+    ui.vertical(|ui| {
+        ui.label(egui::RichText::new("Master").small());
+        for (label, level) in [("L", levels[0]), ("R", levels[1])] {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(label).small());
+                let (rect, response) = ui.allocate_exact_size(
+                    egui::vec2(120.0, 6.0),
+                    egui::Sense::hover(),
+                );
+                let painter = ui.painter();
+                painter.rect_filled(rect, 2.0, egui::Color32::from_gray(24));
+                let level = level.clamp(0.0, 1.0);
+                if level > 0.0 {
+                    let filled = egui::Rect::from_min_max(
+                        rect.min,
+                        egui::pos2(
+                            rect.left() + rect.width() * level,
+                            rect.bottom(),
+                        ),
+                    );
+                    let color = if level >= 0.99 {
+                        egui::Color32::RED
+                    } else if level > 0.8 {
+                        egui::Color32::from_rgb(220, 200, 80)
+                    } else {
+                        egui::Color32::from_rgb(70, 180, 90)
+                    };
+                    painter.rect_filled(filled, 2.0, color);
+                }
+                let db = 20.0 * level.max(1e-6).log10();
+                response.on_hover_text(format!("{}: {:.1} dB", label, db));
+            });
+        }
+    });
 }
 
 /// Source reference and trimmed range, used by processing operations that
@@ -2456,6 +2506,10 @@ struct AppUI {
     fx_rack_open: bool,
     /// Smoothed peak levels shown in the FX Rack, keyed by track.
     track_meter_levels: HashMap<TrackId, f32>,
+    /// Peak-hold ticks for the FX Rack track meters.
+    track_meter_holds: HashMap<TrackId, f32>,
+    /// Smoothed master L/R levels shown in the FX Rack header.
+    master_meter_levels: [f32; 2],
     /// Original insert chain for the current effect-parameter gesture, pushed
     /// as one undo entry when the pointer is released.
     pending_insert_edit: Option<(TrackId, Vec<InsertSlot>)>,
@@ -2581,6 +2635,8 @@ impl AppUI {
             audio_window: None,
             fx_rack_open: false,
             track_meter_levels: HashMap::new(),
+            track_meter_holds: HashMap::new(),
+            master_meter_levels: [0.0, 0.0],
             pending_insert_edit: None,
             piano_roll: None,
             piano_roll_preview: None,
@@ -6588,6 +6644,26 @@ impl AppUI {
             } else {
                 (*level - 0.02).max(0.0)
             };
+            let hold = self
+                .track_meter_holds
+                .entry(*track_id)
+                .or_insert(0.0);
+            *hold = (*hold * 0.995).max(*level);
+        }
+        let master = self.engine.master_meter();
+        let master_targets = if playing {
+            [master.left_peak, master.right_peak]
+        } else {
+            [0.0, 0.0]
+        };
+        for index in 0..2 {
+            self.master_meter_levels[index] = if master_targets[index]
+                >= self.master_meter_levels[index]
+            {
+                master_targets[index]
+            } else {
+                (self.master_meter_levels[index] - 0.02).max(0.0)
+            };
         }
         let mut open = true;
         let mut changes: Vec<(TrackId, Vec<InsertSlot>)> = Vec::new();
@@ -6606,6 +6682,15 @@ impl AppUI {
                     ui.heading("FX Rack");
                     ui.weak(
                         "Press X to toggle. Inserts run before each track fader.",
+                    );
+                    ui.with_layout(
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            draw_master_meter(
+                                ui,
+                                self.master_meter_levels,
+                            );
+                        },
                     );
                 });
                 ui.separator();
@@ -6771,7 +6856,14 @@ impl AppUI {
                                                     .get(track_id)
                                                     .copied()
                                                     .unwrap_or(0.0);
-                                                draw_track_meter(ui, meter);
+                                                let hold = self
+                                                    .track_meter_holds
+                                                    .get(track_id)
+                                                    .copied()
+                                                    .unwrap_or(0.0);
+                                                draw_track_meter(
+                                                    ui, meter, hold,
+                                                );
                                                 ui.separator();
                                                 if show_insert_slots(
                                                     ui,
@@ -12324,6 +12416,8 @@ impl AppUI {
         self.audio_window = None;
         self.fx_rack_open = false;
         self.track_meter_levels.clear();
+        self.track_meter_holds.clear();
+        self.master_meter_levels = [0.0, 0.0];
         self.pending_insert_edit = None;
         self.piano_roll = None;
         self.piano_roll_preview = None;

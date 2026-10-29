@@ -12,6 +12,15 @@ pub struct TrackMeter {
     pub rms: f32,
 }
 
+/// Stereo peak/RMS reading for the master output.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct StereoMeter {
+    pub left_peak: f32,
+    pub right_peak: f32,
+    pub left_rms: f32,
+    pub right_rms: f32,
+}
+
 /// A clip prepared for playback: interleaved f32 samples plus timeline
 /// placement and gain/fade settings.
 #[derive(Clone)]
@@ -147,6 +156,8 @@ pub struct PlaybackMixer {
     effect_dry: Vec<f32>,
     /// Optional shared peak/RMS readings consumed by the UI meters.
     meters: Option<Arc<Mutex<Vec<TrackMeter>>>>,
+    /// Optional shared master-output meter.
+    master_meter: Option<Arc<Mutex<StereoMeter>>>,
 }
 
 impl PlaybackMixer {
@@ -230,6 +241,7 @@ impl PlaybackMixer {
             track_scratch: Vec::new(),
             effect_dry: Vec::new(),
             meters: None,
+            master_meter: None,
         }
     }
 
@@ -301,6 +313,11 @@ impl PlaybackMixer {
     /// every mixed block.
     pub fn set_meters(&mut self, meters: Arc<Mutex<Vec<TrackMeter>>>) {
         self.meters = Some(meters);
+    }
+
+    /// Share a meter buffer for the summed master output.
+    pub fn set_master_meter(&mut self, meter: Arc<Mutex<StereoMeter>>) {
+        self.master_meter = Some(meter);
     }
 
     fn rebuild_clip_buckets(&mut self) {
@@ -501,6 +518,35 @@ impl PlaybackMixer {
                         out[frame * out_ch + channel] += click;
                     }
                 }
+            }
+        }
+
+        if let Some(sink) = &self.master_meter {
+            let mut peaks = [0.0f32; 2];
+            let mut sums = [0.0f32; 2];
+            let mut counts = [0usize; 2];
+            for frame in 0..frames {
+                let base = frame * out_ch;
+                for channel in 0..out_ch {
+                    let index = channel.min(1);
+                    let sample = out[base + channel];
+                    peaks[index] = peaks[index].max(sample.abs());
+                    sums[index] += sample * sample;
+                    counts[index] += 1;
+                }
+            }
+            if out_ch == 1 {
+                peaks[1] = peaks[0];
+                sums[1] = sums[0];
+                counts[1] = counts[0];
+            }
+            if let Ok(mut meter) = sink.lock() {
+                *meter = StereoMeter {
+                    left_peak: peaks[0],
+                    right_peak: peaks[1],
+                    left_rms: (sums[0] / counts[0].max(1) as f32).sqrt(),
+                    right_rms: (sums[1] / counts[1].max(1) as f32).sqrt(),
+                };
             }
         }
 
@@ -1110,6 +1156,29 @@ mod tests {
         assert_eq!(meters.len(), 1);
         assert!((meters[0].peak - 1.0).abs() < 1e-6);
         assert!(meters[0].rms > 0.0);
+    }
+
+    #[test]
+    fn master_meter_reports_stereo_peak() {
+        let meter = std::sync::Arc::new(std::sync::Mutex::new(
+            StereoMeter::default(),
+        ));
+        let a = clip(vec![1.0; 4], 0, 0);
+        let mut mixer = PlaybackMixer::new(10, 2, vec![a], 0);
+        mixer.set_tracks(vec![PlayableTrack {
+            index: 0,
+            gain: 1.0,
+            pan_left: 1.0,
+            pan_right: 0.0,
+            effects: Vec::new(),
+        }]);
+        mixer.set_master_meter(std::sync::Arc::clone(&meter));
+
+        let mut out = [0.0f32; 8];
+        mixer.fill_unclamped(&mut out);
+        let meter = meter.lock().unwrap();
+        assert!((meter.left_peak - 1.0).abs() < 1e-6);
+        assert!(meter.right_peak.abs() < 1e-6);
     }
 
     #[test]
