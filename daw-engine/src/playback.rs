@@ -733,6 +733,8 @@ fn process_effects(
 pub struct LiveMidiSynth {
     sample_rate: u32,
     voices: Vec<LiveVoice>,
+    left_gain: f32,
+    right_gain: f32,
 }
 
 struct LiveVoice {
@@ -749,7 +751,15 @@ impl LiveMidiSynth {
         Self {
             sample_rate: sample_rate.max(1),
             voices: Vec::new(),
+            left_gain: 1.0,
+            right_gain: 1.0,
         }
+    }
+
+    /// Apply the active track's fader and pan gains to live audition notes.
+    pub fn set_gains(&mut self, left: f32, right: f32) {
+        self.left_gain = left.clamp(0.0, 4.0);
+        self.right_gain = right.clamp(0.0, 4.0);
     }
 
     pub fn note_on(&mut self, note: u8, velocity: u8) {
@@ -795,6 +805,9 @@ impl LiveMidiSynth {
         let sample_rate = self.sample_rate.max(1) as f32;
         let attack = (0.005 * sample_rate).max(1.0);
         let release = (0.05 * sample_rate).max(1.0);
+        let left_gain = self.left_gain;
+        let right_gain = self.right_gain;
+        let mono_gain = (left_gain + right_gain) * 0.5;
 
         for frame in 0..frames {
             let base = frame * channels;
@@ -808,7 +821,16 @@ impl LiveMidiSynth {
                 let gain = attack_gain * release_gain * 0.18 * voice.velocity;
                 let sample = voice.phase.sin() * gain;
                 for channel in 0..channels {
-                    out[base + channel] += sample;
+                    let pan = if channels == 1 {
+                        mono_gain
+                    } else if channel == 0 {
+                        left_gain
+                    } else if channel == 1 {
+                        right_gain
+                    } else {
+                        1.0
+                    };
+                    out[base + channel] += sample * pan;
                 }
                 let frequency =
                     440.0 * 2f32.powf((voice.note as f32 - 69.0) / 12.0);
@@ -1269,5 +1291,23 @@ mod tests {
         let mut release = [0.0f32; 200];
         synth.fill(&mut release, 1);
         assert!(release[100..].iter().all(|sample| sample.abs() < 1e-6));
+    }
+
+    #[test]
+    fn live_midi_synth_applies_pan_gains() {
+        let mut synth = LiveMidiSynth::new(1000);
+        synth.set_gains(1.0, 0.0);
+        synth.note_on(69, 127);
+        let mut out = [0.0f32; 200];
+        synth.fill(&mut out, 2);
+        assert!(out
+            .iter()
+            .step_by(2)
+            .any(|sample| sample.abs() > 1e-4));
+        assert!(out
+            .iter()
+            .skip(1)
+            .step_by(2)
+            .all(|sample| sample.abs() < 1e-6));
     }
 }

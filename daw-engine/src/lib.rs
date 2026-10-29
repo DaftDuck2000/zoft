@@ -223,6 +223,11 @@ impl AudioEngine {
         self.backend.all_notes_off();
     }
 
+    /// Apply the active MIDI track's fader/pan to live audition notes.
+    pub fn set_live_midi_gains(&self, left: f32, right: f32) {
+        self.backend.set_live_midi_gains(left, right);
+    }
+
     /// Remove the playback content (output falls silent).
     pub fn clear_playback(&self) {
         self.backend.set_playback_mixer(None);

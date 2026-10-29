@@ -3183,6 +3183,57 @@ impl AppUI {
         })
     }
 
+    /// Track whose fader/pan should shape live MIDI audition. Prefer the armed
+    /// track, then the track containing the open piano-roll clip, then the
+    /// first monitored MIDI/instrument track.
+    fn live_midi_track(&self) -> Option<&Track> {
+        if let Some(track) = self.project.track_order.iter().find_map(|id| {
+            self.project.tracks.get(id).filter(|track| {
+                matches!(track.track_type, TrackType::Midi | TrackType::Instrument)
+                    && track.record_arm
+            })
+        }) {
+            return Some(track);
+        }
+        if let Some(window) = &self.piano_roll {
+            if let Some(track) = self.project.track_order.iter().find_map(|id| {
+                self.project.tracks.get(id).filter(|track| {
+                    track.midi_clips.contains(&window.clip_id)
+                })
+            }) {
+                return Some(track);
+            }
+        }
+        self.project.track_order.iter().find_map(|id| {
+            self.project.tracks.get(id).filter(|track| {
+                matches!(track.track_type, TrackType::Midi | TrackType::Instrument)
+                    && match track.monitor_mode {
+                        MonitorMode::Off => false,
+                        MonitorMode::Auto => {
+                            track.record_arm || self.recording_midi
+                        }
+                        MonitorMode::On => true,
+                    }
+            })
+        })
+    }
+
+    /// Keep the live audition synth in step with the active track's fader/pan.
+    fn sync_live_midi_gains(&mut self) {
+        let any_solo = self.project.tracks.values().any(|track| track.solo);
+        let gains = self
+            .live_midi_track()
+            .map(|track| {
+                let gain = audible_track_gain(track, any_solo).unwrap_or(0.0);
+                (
+                    track.pan.left_gain * gain,
+                    track.pan.right_gain * gain,
+                )
+            })
+            .unwrap_or((1.0, 1.0));
+        self.engine.set_live_midi_gains(gains.0, gains.1);
+    }
+
     fn clear_selection(&mut self) {
         self.selected_clip = None;
         self.selected_clips.clear();
@@ -9960,6 +10011,7 @@ impl eframe::App for AppUI {
 
         // MIDI audition and capture. Events are drained every frame so the
         // live sine synth can respond even when the transport is stopped.
+        self.sync_live_midi_gains();
         self.poll_piano_roll_preview();
         let audition = self.midi_audition_enabled();
         let piano_roll_open =

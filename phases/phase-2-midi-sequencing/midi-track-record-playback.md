@@ -118,7 +118,7 @@ MIDI Thru         Record Buffer      Chase Buffer
 - [x] MIDI keyboard input: ports are listed, one can be selected, and live note/velocity activity is shown
 - [x] Record MIDI → clip appears with correct timing
 - [x] MIDI clip playback through the built-in sine voice
-- [x] Live MIDI notes are audible while recording or monitoring an armed MIDI/instrument track
+- [x] Live MIDI notes are audible while recording or monitoring an armed MIDI/instrument track, and follow that track's fader and pan
 - [x] MIDI note previews render inside clips in the arrange lane
 - [x] MIDI clips can be cropped from either edge; trimming is non-destructive
 - [x] MIDI clips can be dragged in time or onto another MIDI/instrument track
@@ -138,6 +138,7 @@ MIDI Thru         Record Buffer      Chase Buffer
 - 2026-10-23: MIDI keyboard input support started: `daw-engine/src/midi.rs` lists input ports with `midir`; a dedicated MIDI bar auto-connects the first real keyboard (skipping Midi Through), offers a selector + Refresh, and shows live note/velocity activity. Audio/MIDI tracks can be added from the track list
 - 2026-10-24: MIDI recording and basic playback. Armed MIDI tracks capture timestamped note-on/off events into a `MidiClip` (ticks at PPQN 960) on stop; notes keep their offset from the playhead. MIDI blocks render in the arrange lane, can be selected/deleted (undoable) and open a read-only piano-roll view on double-click. Playback pairs note events and renders them with a simple built-in sine voice, honoring mute/solo and track volume. Instruments, chase, loop takes and MIDI thru remain
 - 2026-10-24: Live MIDI audition and arrange note previews. Incoming notes are drained every frame and fed to a dedicated polyphonic sine synth in the output callback, independent of transport playback; MIDI/instrument tracks follow the Off/Auto/On monitor switch, so an armed track is heard while recording. MIDI clips now draw a miniature note lane in the arrange view using the project tempo map, so notes are visible without opening the piano roll. Real-time track inserts (saturation, filter, bit crusher, tremolo) were added to every track type and run before the fader; the old clip right-click effects entry point was removed
+- 2026-10-29: Live MIDI audition now follows the active MIDI/instrument track's fader and pan, so panning a monitored track is audible while playing live as well as during playback
 - 2026-10-24: MIDI clip cropping. Dragging either edge of a MIDI clip in the arrange view trims its visible window using the Arrange snap grid. Trimming is non-destructive: events stay in content coordinates and a `content_offset` marks the visible start, so dragging the edge back out reveals the hidden notes again. The piano roll shades trimmed regions and keeps hidden notes editable
 - 2026-10-24: MIDI clip moving. Dragging a MIDI clip's body moves it in time using the Arrange snap settings (including relative snap), and dropping it on another MIDI/instrument track reattaches it there. Moves are undoable and update playback immediately
 - 2026-10-24: MIDI clip split and duplicate. `S` splits the selected MIDI clip at the playhead into two non-destructive visible windows, and `Ctrl+D` duplicates the clip immediately after its visible span. Both operations are undoable

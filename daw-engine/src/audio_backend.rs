@@ -275,6 +275,8 @@ pub trait AudioBackend: Send + Sync {
     fn note_on(&self, _note: u8, _velocity: u8) {}
     fn note_off(&self, _note: u8) {}
     fn all_notes_off(&self) {}
+    /// Apply the active track's fader/pan to live MIDI audition.
+    fn set_live_midi_gains(&self, _left: f32, _right: f32) {}
     /// Enable or disable live input monitoring.
     fn set_monitoring(&self, _enabled: bool) {}
     /// Whether the input stream is currently open.
@@ -708,6 +710,13 @@ fn stop_input_stream(&self) -> Result<()> {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .all_notes_off();
+    }
+
+    fn set_live_midi_gains(&self, left: f32, right: f32) {
+        self.live_midi
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .set_gains(left, right);
     }
 
     fn set_monitoring(&self, enabled: bool) {
