@@ -261,6 +261,8 @@ fn playable_note(
     note: u8,
     velocity: u8,
     track: u32,
+    pan_left: f32,
+    pan_right: f32,
     to_frame: &impl Fn(u64) -> u64,
 ) -> PlayableNote {
     let start_frame = to_frame(start_tick);
@@ -271,7 +273,16 @@ fn playable_note(
         note,
         velocity: (velocity as f32 / 127.0).clamp(0.0, 1.0),
         track,
+        pan_left,
+        pan_right,
     }
+}
+
+/// Convert a MIDI CC10 pan value (0–127) to equal-power left/right gains.
+fn cc_pan_gains(value: u8) -> (f32, f32) {
+    let pan = (value as f32 / 127.0) * 2.0 - 1.0;
+    let law = PanLaw::from_linear(pan);
+    (law.left_gain, law.right_gain)
 }
 
 /// Whether a MIDI pitch is a black key.
@@ -12134,13 +12145,24 @@ impl AppUI {
                     continue;
                 }
                 let clip_start = clip.timeline_position.tick;
+                let cc_pan = midi_clip_cc_points(clip, 10);
                 for (start, end, note, velocity) in midi_clip_note_spans(clip) {
+                    let content_tick = clip.content_offset.saturating_add(start);
+                    let pan_value = cc_pan
+                        .iter()
+                        .rev()
+                        .find(|point| point.tick <= content_tick)
+                        .map(|point| point.value)
+                        .unwrap_or(64);
+                    let (pan_left, pan_right) = cc_pan_gains(pan_value);
                     notes.push(playable_note(
                         clip_start.saturating_add(start),
                         clip_start.saturating_add(end),
                         note,
                         velocity,
                         track_index as u32,
+                        pan_left,
+                        pan_right,
                         &to_frame,
                     ));
                 }
@@ -13845,6 +13867,7 @@ mod tests {
         knob_from_normalized, knob_to_normalized, load_wav_interleaved,
         load_wav_range_interleaved, loop_range_frames, measure_integrated_loudness,
         merge_continuous_edit, metronome_config, midi_clip_note_spans, midi_clip_notes,
+        cc_pan_gains,
         slider_wheel_value, slider_wheel_value_with_step,
         slider_wheel_log_value,
         midi_clip_content_notes, midi_clips_in_marquee, note_name, processed_file_stem,
@@ -14205,6 +14228,21 @@ mod tests {
         let log_down = slider_wheel_log_value(100.0, 20.0, 20_000.0, -1.0);
         assert!((log_up - 141.25).abs() < 0.1);
         assert!((log_down - 70.79).abs() < 0.1);
+    }
+
+    #[test]
+    fn cc10_pan_maps_left_center_and_right() {
+        let (left, right) = cc_pan_gains(0);
+        assert!(left > 0.0);
+        assert!(right.abs() < 1e-6);
+
+        let (left, right) = cc_pan_gains(64);
+        assert!((left - 1.0).abs() < 0.02);
+        assert!((right - 1.0).abs() < 0.02);
+
+        let (left, right) = cc_pan_gains(127);
+        assert!(left.abs() < 1e-6);
+        assert!(right > 0.0);
     }
 
     #[test]

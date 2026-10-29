@@ -18,7 +18,7 @@ Full-featured piano roll: note entry/selection/editing, velocity lanes, CC lanes
 - [~] Note editing: Drag move and resize implemented; velocity drag pending
 - [x] Note audition: Clicking a note or dragging it to a new pitch plays it
 - [~] Velocity lane: Bar graph per note with drag-to-edit, toggleable; curve tool pending
-- [x] CC lanes: Up to four simultaneous controller lanes (off by default) with add/remove and draw/edit
+- [x] CC lanes: Up to four simultaneous controller lanes (off by default) with add/remove and draw/edit; CC10 Pan drives MIDI note playback
 - [ ] Tool palette: Select, Pencil, Eraser, Mute, Scissors, Glue, Velocity, Line
 - [x] MIDI Tools side panel: quantize, transpose, scale, velocity, note join/split and transform tools for the open clip
 - [x] Playhead: Bar/beat ruler, draggable project playhead line and split-notes-at-playhead action
@@ -182,6 +182,7 @@ enum CCEditMode {
 - 2026-10-26: Added a Transform tool for time reverse, pitch mirror and seeded randomize of pitch, velocity and timing
 - 2026-10-26: Quantize gained swing, and the Velocity tool gained compress, expand, curve and randomize modes alongside scaling
 - 2026-10-29: Added up to four simultaneous CC lanes. The Controllers tool adds/removes lanes, each lane draws and edits its own controller independently, and lane heights adapt to keep the note grid usable
+- 2026-10-29: CC10 Pan events now affect MIDI note playback. Each note uses the latest CC10 value at its start, applied before the track pan
 - 2026-10-26: Added the project playhead to the piano roll plus a Notes tool for joining same-pitch notes and splitting notes at the playhead
 - 2026-10-26: Added a bar/beat ruler. Clicking or dragging the ruler, or dragging the playhead line anywhere in the grid, seeks the project playhead and pauses playback like the arrange timeline
 - 2026-10-26: Added toggleable ghost notes for other MIDI tracks/clips in the project, mapped into the open clip's content coordinates and drawn dimmed behind the active notes like FL Studio's ghost channels
