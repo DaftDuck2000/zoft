@@ -1987,10 +1987,9 @@ struct PianoRollWindow {
     marquee_additive: bool,
     /// Clip snapshot while dragging a velocity bar.
     velocity_drag_before: Option<MidiClip>,
-    /// Selected control-change lane and its visibility.
-    cc_controller: u8,
+    /// Visible control-change lanes, in ascending controller order.
+    cc_lanes: Vec<u8>,
     show_velocity_lane: bool,
-    show_cc_lane: bool,
     show_ghost_notes: bool,
     /// Clip snapshot while drawing control-change points.
     cc_drag_before: Option<MidiClip>,
@@ -2015,9 +2014,8 @@ impl PianoRollWindow {
             marquee: None,
             marquee_additive: false,
             velocity_drag_before: None,
-            cc_controller: 1,
+            cc_lanes: Vec::new(),
             show_velocity_lane: true,
-            show_cc_lane: false,
             show_ghost_notes: true,
             cc_drag_before: None,
         }
@@ -2076,7 +2074,7 @@ impl MidiToolTab {
             Self::Notes => "Notes",
             Self::Transform => "Transform",
             Self::Velocity => "Velocity",
-            Self::Controllers => "CC Lane",
+            Self::Controllers => "CC Lanes",
         }
     }
 }
@@ -7061,13 +7059,19 @@ impl AppUI {
                 } else {
                     0.0
                 };
-                let cc_lane_height = if window.show_cc_lane {
-                    (editor_height * 0.18).clamp(80.0, 160.0)
+                let cc_lane_count = window.cc_lanes.len();
+                let cc_available = (editor_height
+                    - velocity_lane_height
+                    - 120.0)
+                    .max(0.0);
+                let cc_lane_height = if cc_lane_count > 0 {
+                    (cc_available / cc_lane_count as f32).clamp(40.0, 70.0)
                 } else {
                     0.0
                 };
+                let cc_total_height = cc_lane_height * cc_lane_count as f32;
                 let visible_lanes =
-                    window.show_velocity_lane as u8 + window.show_cc_lane as u8;
+                    window.show_velocity_lane as u8 + cc_lane_count as u8;
                 let lane_spacing = 6.0 * visible_lanes as f32;
 
                 ui.horizontal_top(|ui| {
@@ -7546,31 +7550,54 @@ impl AppUI {
                             }
                             MidiToolTab::Controllers => {
                                 ui.weak("Draw controller automation.");
-                                ui.checkbox(
-                                    &mut window.show_cc_lane,
-                                    "Show CC lane",
-                                );
-                                if window.show_cc_lane {
+                                if window.cc_lanes.is_empty() {
+                                    ui.weak("No CC lanes");
+                                }
+                                let mut remove_lane = None;
+                                for (index, controller) in
+                                    window.cc_lanes.iter().enumerate()
+                                {
                                     ui.horizontal(|ui| {
-                                        ui.label("CC:");
-                                        egui::ComboBox::from_id_salt(
-                                            "piano_roll_cc_controller",
-                                        )
-                                        .selected_text(cc_controller_label(
-                                            window.cc_controller,
-                                        ))
-                                        .width(130.0)
-                                        .show_ui(ui, |ui| {
-                                            for (controller, label) in
-                                                CC_CONTROLLERS
+                                        ui.label(format!(
+                                            "CC {} · {}",
+                                            controller,
+                                            cc_controller_label(*controller)
+                                        ));
+                                        if ui
+                                            .small_button("×")
+                                            .on_hover_text("Remove lane")
+                                            .clicked()
+                                        {
+                                            remove_lane = Some(index);
+                                        }
+                                    });
+                                }
+                                if let Some(index) = remove_lane {
+                                    window.cc_lanes.remove(index);
+                                }
+                                if window.cc_lanes.len() < 4 {
+                                    ui.menu_button("+ Add Lane", |ui| {
+                                        for (controller, label) in
+                                            CC_CONTROLLERS
+                                        {
+                                            if window
+                                                .cc_lanes
+                                                .contains(&controller)
                                             {
-                                                ui.selectable_value(
-                                                    &mut window.cc_controller,
-                                                    controller,
-                                                    label,
-                                                );
+                                                continue;
                                             }
-                                        });
+                                            if ui
+                                                .button(format!(
+                                                    "CC {} · {}",
+                                                    controller, label
+                                                ))
+                                                .clicked()
+                                            {
+                                                window.cc_lanes.push(controller);
+                                                window.cc_lanes.sort_unstable();
+                                                ui.close_menu();
+                                            }
+                                        }
                                     });
                                 }
                             }
@@ -7585,7 +7612,7 @@ impl AppUI {
 
                 let grid_height = (editor_height
                     - velocity_lane_height
-                    - cc_lane_height
+                    - cc_total_height
                     - lane_spacing)
                     .max(120.0);
                 let (response, painter) = ui.allocate_painter(
@@ -8568,7 +8595,8 @@ impl AppUI {
                     }
                 }
                 }
-                if window.show_cc_lane {
+                let cc_lanes = window.cc_lanes.clone();
+                for controller in cc_lanes {
                     ui.add_space(6.0);
                     let (cc_response, cc_painter) = ui.allocate_painter(
                         egui::vec2(ui.available_width(), cc_lane_height),
@@ -8580,7 +8608,7 @@ impl AppUI {
                         egui::pos2(grid.right(), cc_rect.bottom()),
                     );
                     let mut cc_points =
-                        midi_clip_cc_points(&clip, window.cc_controller);
+                        midi_clip_cc_points(&clip, controller);
 
                     if cc_response.drag_started_by(egui::PointerButton::Primary) {
                         window.cc_drag_before = Some(clip.clone());
@@ -8607,7 +8635,7 @@ impl AppUI {
                                 {
                                     write_midi_cc_points(
                                         target,
-                                        window.cc_controller,
+                                        controller,
                                         &cc_points,
                                     );
                                 }
@@ -8624,8 +8652,8 @@ impl AppUI {
                         egui::Align2::LEFT_TOP,
                         format!(
                             "CC {} · {}",
-                            window.cc_controller,
-                            cc_controller_label(window.cc_controller)
+                            controller,
+                            cc_controller_label(controller)
                         ),
                         egui::FontId::proportional(9.0),
                         egui::Color32::from_gray(180),

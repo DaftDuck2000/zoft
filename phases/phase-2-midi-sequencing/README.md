@@ -42,11 +42,11 @@ density), with a Tools… menu to choose which tool sections are visible. The
 piano roll has a bar/beat ruler and a draggable playhead line, plus toggleable
 ghost notes from other tracks/clips in the project. Each MIDI/instrument track
 has a G toggle in its header to include or exclude it from ghost notes.
-Toggleable velocity and CC lanes handle per-note dynamics and controller
-automation. Trimming is non-destructive and the piano roll shades trimmed
+Multiple toggleable CC lanes and a velocity lane handle per-note dynamics and
+controller automation. Trimming is non-destructive and the piano roll shades trimmed
 regions. Every track type now has a real-time insert chain (saturation, filter,
 bit crusher, tremolo) that runs before the track fader, edited from the
-Logic-style FX Rack (X). Instruments, chase events, loop takes, MIDI thru, multiple CC lanes and the remaining editing
+Logic-style FX Rack (X). Instruments, chase events, loop takes, MIDI thru and the remaining editing
 tools are not implemented yet.
 
 ## Milestone: M2 — MIDI Sequencing (Week 44)
