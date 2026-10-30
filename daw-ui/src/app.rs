@@ -2274,6 +2274,34 @@ impl PianoRollWindow {
     }
 }
 
+/// Width preset for FX Rack channel columns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MixerColumnWidth {
+    Narrow,
+    Standard,
+    Wide,
+}
+
+impl MixerColumnWidth {
+    const ALL: [Self; 3] = [Self::Narrow, Self::Standard, Self::Wide];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Narrow => "Narrow",
+            Self::Standard => "Standard",
+            Self::Wide => "Wide",
+        }
+    }
+
+    fn pixels(self) -> f32 {
+        match self {
+            Self::Narrow => 170.0,
+            Self::Standard => 220.0,
+            Self::Wide => 300.0,
+        }
+    }
+}
+
 /// Selected MIDI tool shown in the piano-roll side panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum MidiToolTab {
@@ -2751,6 +2779,8 @@ struct AppUI {
     audio_window: Option<ClipAudioWindow>,
     /// Logic-style insert rack showing every track as a horizontal column.
     fx_rack_open: bool,
+    /// Column width preset used by the FX Rack.
+    fx_rack_column_width: MixerColumnWidth,
     /// Smoothed peak levels shown in the FX Rack, keyed by track.
     track_meter_levels: HashMap<TrackId, f32>,
     /// Peak-hold ticks for the FX Rack track meters.
@@ -2890,6 +2920,7 @@ impl AppUI {
             midi_clipboard: Vec::new(),
             audio_window: None,
             fx_rack_open: false,
+            fx_rack_column_width: MixerColumnWidth::Standard,
             track_meter_levels: HashMap::new(),
             track_meter_holds: HashMap::new(),
             master_meter_levels: [0.0, 0.0],
@@ -7020,6 +7051,7 @@ impl AppUI {
             Vec::new();
         let clipboard = self.insert_clipboard.clone();
         let mut copy_chain = None;
+        let column_width = self.fx_rack_column_width.pixels();
 
         egui::Window::new("FX Rack")
             .id(egui::Id::new("fx_rack"))
@@ -7034,6 +7066,20 @@ impl AppUI {
                     ui.weak(
                         "Press X to toggle. Inserts run before each track fader.",
                     );
+                    ui.separator();
+                    ui.label("Columns:");
+                    egui::ComboBox::from_id_salt("fx_rack_column_width")
+                        .selected_text(self.fx_rack_column_width.label())
+                        .width(84.0)
+                        .show_ui(ui, |ui| {
+                            for width in MixerColumnWidth::ALL {
+                                ui.selectable_value(
+                                    &mut self.fx_rack_column_width,
+                                    width,
+                                    width.label(),
+                                );
+                            }
+                        });
                     ui.with_layout(
                         egui::Layout::right_to_left(egui::Align::Center),
                         |ui| {
@@ -7073,7 +7119,7 @@ impl AppUI {
                                 let mut after = before;
                                 ui.push_id(track_id, |ui| {
                                     ui.vertical(|ui| {
-                                        ui.set_width(220.0);
+                                        ui.set_width(column_width);
                                         egui::Frame::group(ui.style()).show(
                                             ui,
                                             |ui| {
