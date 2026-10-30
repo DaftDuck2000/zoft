@@ -10381,9 +10381,6 @@ impl eframe::App for AppUI {
                         ui.colored_label(midi_activity_color, &midi_activity_text);
                     });
                 });
-                ui.separator();
-                ui.label("MIDI In:");
-                ui.colored_label(midi_activity_color, &midi_activity_text);
             });
         });
         if let Some(action) = file_action {
