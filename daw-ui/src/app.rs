@@ -1722,6 +1722,12 @@ enum EditAction {
     AddTrack { track: Track },
     /// Remove a track, remembering its original order for undo.
     RemoveTrack { track: Track, index: usize },
+    /// Reorder a track in the track list.
+    MoveTrack {
+        track_id: TrackId,
+        from_index: usize,
+        to_index: usize,
+    },
     /// Attach a MIDI clip to a track (undo detaches it; data stays in the pool).
     AttachMidi { track: TrackId, clip_id: ClipId },
     /// Detach a MIDI clip from its track (undo reattaches).
@@ -1817,6 +1823,7 @@ impl EditAction {
             }
             EditAction::AddTrack { track } => format!("Add track: {}", track.name),
             EditAction::RemoveTrack { track, .. } => format!("Remove track: {}", track.name),
+            EditAction::MoveTrack { .. } => "Reorder track".to_string(),
             EditAction::TrackInserts { from, to, .. } => {
                 if to.len() > from.len() {
                     "Add track effect".to_string()
@@ -2769,6 +2776,8 @@ struct AppUI {
     drag: Option<ClipDrag>,
     /// In-progress MIDI clip trim drag.
     midi_drag: Option<MidiClipDrag>,
+    /// Track currently being dragged in the track list.
+    track_drag: Option<TrackId>,
     /// Rubber-band selection while dragging empty track space.
     marquee: Option<(egui::Pos2, egui::Pos2)>,
     marquee_additive: bool,
@@ -2914,6 +2923,7 @@ impl AppUI {
             snap_suspended: false,
             drag: None,
             midi_drag: None,
+            track_drag: None,
             marquee: None,
             marquee_additive: false,
             clipboard: Vec::new(),
@@ -3974,6 +3984,14 @@ impl AppUI {
                         self.project.track_order.insert(position, track.id);
                     }
                 }
+            }
+            EditAction::MoveTrack {
+                track_id,
+                from_index,
+                to_index,
+            } => {
+                let index = if forward { *to_index } else { *from_index };
+                self.project.move_track(*track_id, index);
             }
             EditAction::AttachMidi { track, clip_id } => {
                 if let Some(track) = self.project.tracks.get_mut(track) {
@@ -11517,6 +11535,10 @@ impl eframe::App for AppUI {
                 add_midi_track = true;
             }
             let mut track_changes: Vec<(TrackId, TrackShape, TrackShape, bool)> = Vec::new();
+            let track_rows_top = ui.cursor().top();
+            let mut track_drag_started = None;
+            let mut track_drag_current = None;
+            let mut track_drag_stopped: Option<(TrackId, f32)> = None;
             for track_id in &self.project.track_order {
                 if let Some(track) = self.project.tracks.get(track_id) {
                     let before = TrackShape::of(track);
@@ -11546,6 +11568,48 @@ impl eframe::App for AppUI {
 
                             // Top line: track identity and mute/solo/record.
                             ui.horizontal(|ui| {
+                                let handle = ui
+                                    .add(
+                                        egui::Label::new(
+                                            egui::RichText::new("⠿")
+                                                .color(egui::Color32::from_gray(130)),
+                                        )
+                                        .sense(egui::Sense::drag()),
+                                    )
+                                    .on_hover_text("Drag to reorder track");
+                                if handle.hovered() {
+                                    ui.output_mut(|output| {
+                                        output.cursor_icon =
+                                            egui::CursorIcon::Grab;
+                                    });
+                                }
+                                if handle.drag_started() {
+                                    track_drag_started = Some(*track_id);
+                                }
+                                if handle.dragged() {
+                                    ui.output_mut(|output| {
+                                        output.cursor_icon =
+                                            egui::CursorIcon::Grabbing;
+                                    });
+                                    track_drag_current = Some((
+                                        *track_id,
+                                        handle
+                                            .interact_pointer_pos()
+                                            .map(|pos| pos.y),
+                                    ));
+                                }
+                                if handle.drag_stopped() {
+                                    let y = handle
+                                        .interact_pointer_pos()
+                                        .or_else(|| {
+                                            ui.input(|i| i.pointer.latest_pos())
+                                        })
+                                        .map(|pos| pos.y);
+                                    if let Some(y) = y {
+                                        track_drag_stopped =
+                                            Some((*track_id, y));
+                                    }
+                                }
                                 let color = egui::Color32::from_rgb(
                                     track.color.0,
                                     track.color.1,
@@ -11784,6 +11848,54 @@ impl eframe::App for AppUI {
                                 > f32::EPSILON
                                 || after.pan != before.pan);
                         track_changes.push((*track_id, before, after, slider_only));
+                    }
+                }
+            }
+            let track_count = self.project.track_order.len();
+            let track_target_at = |y: f32| -> usize {
+                (((y - track_rows_top) / TRACK_HEIGHT).floor() as i64)
+                    .clamp(0, track_count.saturating_sub(1) as i64)
+                    as usize
+            };
+            let track_drag_was_stopped = track_drag_stopped.is_some();
+            if let Some((track_id, y)) = track_drag_stopped {
+                let from_index = self
+                    .project
+                    .track_order
+                    .iter()
+                    .position(|id| *id == track_id);
+                let to_index = track_target_at(y);
+                if let Some(from_index) = from_index {
+                    if from_index != to_index {
+                        let action = EditAction::MoveTrack {
+                            track_id,
+                            from_index,
+                            to_index,
+                        };
+                        self.apply_action(&action, true);
+                        self.push_undo(action, false);
+                        self.after_edit();
+                    }
+                }
+                self.track_drag = None;
+            } else if let Some(track_id) = track_drag_started {
+                self.track_drag = Some(track_id);
+            }
+            if !track_drag_was_stopped {
+                if let Some((track_id, pointer_y)) = track_drag_current {
+                    self.track_drag = Some(track_id);
+                    if let Some(y) = pointer_y {
+                        let target = track_target_at(y);
+                        let line_y =
+                            track_rows_top + target as f32 * TRACK_HEIGHT;
+                        ui.painter().hline(
+                            ui.max_rect().x_range(),
+                            line_y,
+                            egui::Stroke::new(
+                                2.0_f32,
+                                egui::Color32::from_rgb(120, 170, 240),
+                            ),
+                        );
                     }
                 }
             }
@@ -13579,6 +13691,7 @@ impl AppUI {
         self.midi_clipboard = Vec::new();
         self.drag = None;
         self.midi_drag = None;
+        self.track_drag = None;
         self.recovery_offer = None;
         self.playhead_secs = 0.0;
         self.view_start_secs = 0.0;
@@ -16861,6 +16974,16 @@ mod tests {
         assert!(window.view_low_pitch <= 72.0);
         let visible_pitches = 400.0 / window.pixels_per_semitone;
         assert!(window.view_low_pitch + visible_pitches >= 72.0);
+    }
+
+    #[test]
+    fn track_reorder_description_is_named() {
+        let action = EditAction::MoveTrack {
+            track_id: daw_core::track::TrackId::default(),
+            from_index: 0,
+            to_index: 1,
+        };
+        assert_eq!(action.description(), "Reorder track");
     }
 
     #[test]

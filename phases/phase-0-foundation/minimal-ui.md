@@ -96,6 +96,7 @@ struct UiState {
 - 2026-10-30: MIDI controls moved into a top-bar MIDI menu. The Source selector is a second-level menu, and live note/velocity activity stays visible next to the menu
 - 2026-10-30: Added ruler markers. Shift+M or the + Marker button drops a named marker at the playhead; click a flag to jump there and right-click to delete it. Marker edits are undoable
 - 2026-10-30: Added ◄◄ and ►► transport buttons plus Home/End shortcuts to jump to the project start or end
+- 2026-10-30: Added track reordering. Drag the ⠿ handle at the left of a track header to move it; the new order is undoable
 
 ## Future Tasks (Post-Phase 0)
 
@@ -107,7 +108,7 @@ struct UiState {
 - [ ] **Vertical scroll**: Track list overflow handling
 - [✓] **Loop range UI**: Drag the ruler loop lane or use In/Out at the playhead
 - [x] **Markers UI**: Flag icons on ruler, click to jump
-- [ ] **Track reordering**: Drag tracks to reorder in track list
+- [x] **Track reordering**: Drag tracks to reorder in track list
 - [ ] **Track context menu**: Right-click to add/remove/duplicate tracks
 - [✓] **Track header controls**: M/S/R, monitor mode, volume fader and pan knob
 - [x] **Transport bar enhancements**: Tap tempo, Bars/Time ruler dropdown and ◄◄ | ►► jump buttons
