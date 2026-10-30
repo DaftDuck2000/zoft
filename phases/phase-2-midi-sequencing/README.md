@@ -44,8 +44,9 @@ ghost notes from other tracks/clips in the project. Each MIDI/instrument track
 has a G toggle in its header to include or exclude it from ghost notes.
 Multiple toggleable CC lanes and a velocity lane handle per-note dynamics and
 controller automation, and scale highlighting can tint in-scale rows. Drum mode
-labels every pitch row by note name. The header also has Select/Draw/Erase/Split
-pointer tools and horizontal/vertical scrollbars. MIDI thru echoes filtered
+labels every pitch row by note name. The header also has
+Select/Draw/Erase/Split/Glue/Velocity pointer tools and horizontal/vertical
+scrollbars. MIDI thru echoes filtered
 input to a selected output port. Loop-enabled MIDI recording folds repeated
 passes into the loop range for overdub-style takes. Trimming is non-destructive and the piano
 roll shades trimmed regions. Every track type

@@ -886,6 +886,44 @@ fn randomize_midi_notes(
     }
 }
 
+/// Join one note with the next same-pitch/channel note when the gap is small
+/// enough. Returns whether a join happened.
+fn join_note_with_next(
+    notes: &mut Vec<PianoRollNote>,
+    index: usize,
+    max_gap: u64,
+) -> bool {
+    let Some(target) = notes.get(index).cloned() else {
+        return false;
+    };
+    let mut next: Option<usize> = None;
+    for (candidate_index, candidate) in notes.iter().enumerate() {
+        if candidate_index == index
+            || candidate.pitch != target.pitch
+            || candidate.channel != target.channel
+            || candidate.start < target.end
+        {
+            continue;
+        }
+        if candidate.start.saturating_sub(target.end) > max_gap {
+            continue;
+        }
+        let better = next
+            .map(|current| candidate.start < notes[current].start)
+            .unwrap_or(true);
+        if better {
+            next = Some(candidate_index);
+        }
+    }
+    let Some(next_index) = next else {
+        return false;
+    };
+    let next_end = notes[next_index].end;
+    notes[index].end = notes[index].end.max(next_end);
+    notes.remove(next_index);
+    true
+}
+
 /// Merge adjacent notes with the same pitch and channel. `max_gap` is the
 /// largest silence that may remain inside a joined note.
 fn join_midi_notes(notes: &mut Vec<PianoRollNote>, max_gap: u64) {
@@ -2020,6 +2058,7 @@ impl ClipAudioWindow {
 enum NoteDragMode {
     Move,
     ResizeEnd,
+    Velocity,
 }
 
 /// Pointer tool selected in the piano-roll header.
@@ -2029,10 +2068,19 @@ enum PianoRollTool {
     Draw,
     Erase,
     Split,
+    Glue,
+    Velocity,
 }
 
 impl PianoRollTool {
-    const ALL: [Self; 4] = [Self::Select, Self::Draw, Self::Erase, Self::Split];
+    const ALL: [Self; 6] = [
+        Self::Select,
+        Self::Draw,
+        Self::Erase,
+        Self::Split,
+        Self::Glue,
+        Self::Velocity,
+    ];
 
     fn label(self) -> &'static str {
         match self {
@@ -2040,6 +2088,8 @@ impl PianoRollTool {
             Self::Draw => "Draw",
             Self::Erase => "Erase",
             Self::Split => "Split",
+            Self::Glue => "Glue",
+            Self::Velocity => "Vel",
         }
     }
 
@@ -2051,6 +2101,12 @@ impl PianoRollTool {
             Self::Draw => "Click empty space to add a note",
             Self::Erase => "Click a note to delete it",
             Self::Split => "Click a note to split it at that point",
+            Self::Glue => {
+                "Click a note to join it with the next same-pitch note"
+            }
+            Self::Velocity => {
+                "Drag a note up or down to change its velocity"
+            }
         }
     }
 }
@@ -8599,7 +8655,14 @@ impl AppUI {
                     });
                 } else if let Some(pos) = hover_pos {
                     if response.hovered() {
-                        if window.tool != PianoRollTool::Select {
+                        if window.tool == PianoRollTool::Velocity {
+                            let icon = if hit_test(pos).is_some() {
+                                egui::CursorIcon::ResizeVertical
+                            } else {
+                                egui::CursorIcon::Crosshair
+                            };
+                            ui.output_mut(|output| output.cursor_icon = icon);
+                        } else if window.tool != PianoRollTool::Select {
                             ui.output_mut(|output| {
                                 output.cursor_icon = egui::CursorIcon::Crosshair;
                             });
@@ -8608,6 +8671,9 @@ impl AppUI {
                                 NoteDragMode::Move => egui::CursorIcon::Grab,
                                 NoteDragMode::ResizeEnd => {
                                     egui::CursorIcon::ResizeHorizontal
+                                }
+                                NoteDragMode::Velocity => {
+                                    egui::CursorIcon::ResizeVertical
                                 }
                             };
                             ui.output_mut(|output| output.cursor_icon = icon);
@@ -8725,7 +8791,9 @@ impl AppUI {
                             .unwrap_or(pos);
                         if matches!(
                             window.tool,
-                            PianoRollTool::Erase | PianoRollTool::Split
+                            PianoRollTool::Erase
+                                | PianoRollTool::Split
+                                | PianoRollTool::Glue
                         ) {
                             // These tools act on click; don't start a drag.
                         } else if h_scroll.contains(press_pos)
@@ -8742,7 +8810,10 @@ impl AppUI {
                             window.selected.clear();
                         } else {
                             match hit_test(press_pos) {
-                                Some((index, mode)) => {
+                                Some((index, mut mode)) => {
+                                    if window.tool == PianoRollTool::Velocity {
+                                        mode = NoteDragMode::Velocity;
+                                    }
                                     if modifiers.command || modifiers.shift {
                                         if window.selected.contains(&index) {
                                             window.selected.remove(&index);
@@ -8879,6 +8950,20 @@ impl AppUI {
                                     }
                                     commit = true;
                                 }
+                                NoteDragMode::Velocity => {
+                                    let delta = (current_pitch as i16
+                                        - drag.anchor_pitch as i16)
+                                        * 4;
+                                    for (index, original) in &drag.originals {
+                                        if let Some(note) = window.notes.get_mut(*index) {
+                                            note.velocity = (original.velocity as i16
+                                                + delta)
+                                                .clamp(1, 127)
+                                                as u8;
+                                        }
+                                    }
+                                    commit = true;
+                                }
                             }
                         }
                     }
@@ -8954,6 +9039,23 @@ impl AppUI {
                                         }
                                     }
                                 }
+                                PianoRollTool::Glue => {
+                                    if let Some((index, _)) = hit_test(pos) {
+                                        let gap =
+                                            if snap_ticks > 1 { snap_ticks } else { 0 };
+                                        let before = clip.clone();
+                                        if join_note_with_next(
+                                            &mut window.notes,
+                                            index,
+                                            gap,
+                                        ) {
+                                            undo_before = Some(before);
+                                            window.selected.clear();
+                                            window.drag = None;
+                                            commit = true;
+                                        }
+                                    }
+                                }
                                 PianoRollTool::Draw => {
                                     if let Some((index, _)) = hit_test(pos) {
                                         if modifiers.command || modifiers.shift {
@@ -9002,7 +9104,8 @@ impl AppUI {
                                         commit = true;
                                     }
                                 }
-                                PianoRollTool::Select => {
+                                PianoRollTool::Select
+                                | PianoRollTool::Velocity => {
                                     match hit_test(pos) {
                                         Some((index, _)) => {
                                             if modifiers.command || modifiers.shift {
@@ -14834,7 +14937,7 @@ mod tests {
         transpose_midi_notes, scale_conform_midi_notes, velocity_color, notes_in_marquee,
         midi_clip_cc_points, write_midi_cc_points, humanize_midi_notes, legato_midi_notes,
         set_midi_note_length, reverse_midi_notes, mirror_midi_notes, randomize_midi_notes,
-        join_midi_notes, split_midi_notes_at_tick, thin_midi_notes,
+        join_midi_notes, join_note_with_next, split_midi_notes_at_tick, thin_midi_notes,
         ghost_notes_for_clip,
         MidiCcPoint, project_from_template, ClipShape, ClipSourceState,
         EditAction, FilterKind, MonitorMode, PianoRollNote, PianoRollSnap, PianoRollWindow,
@@ -15222,6 +15325,28 @@ mod tests {
         assert_eq!(midi_cc_value_at(&points, 240, 64), 90);
         assert_eq!(midi_cc_value_at(&points, 500, 64), 90);
         assert_eq!(midi_cc_value_at(&[], 500, 64), 64);
+    }
+
+    #[test]
+    fn glue_tool_joins_only_nearby_same_pitch_notes() {
+        let note = |start, end, pitch| PianoRollNote {
+            start,
+            end,
+            pitch,
+            velocity: 100,
+            channel: 0,
+        };
+        let mut notes = vec![
+            note(0, 240, 60),
+            note(300, 480, 60),
+            note(960, 1200, 60),
+            note(300, 480, 64),
+        ];
+        assert!(join_note_with_next(&mut notes, 0, 120));
+        assert_eq!(notes.len(), 3);
+        assert_eq!((notes[0].start, notes[0].end), (0, 480));
+        assert!(!join_note_with_next(&mut notes, 0, 120));
+        assert_eq!(notes.len(), 3);
     }
 
     #[test]

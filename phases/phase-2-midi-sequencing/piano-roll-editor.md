@@ -19,7 +19,7 @@ Full-featured piano roll: note entry/selection/editing, velocity lanes, CC lanes
 - [x] Note audition: Clicking a note or dragging it to a new pitch plays it
 - [~] Velocity lane: Bar graph per note with drag-to-edit, toggleable; curve tool pending
 - [x] CC lanes: Up to four simultaneous controller lanes (off by default) with add/remove and draw/edit; CC10 Pan, CC7 Volume and CC11 Expression drive MIDI note playback
-- [~] Tool palette: Select, Draw, Erase and Split implemented; Mute, Glue, Velocity and Line pending
+- [~] Tool palette: Select, Draw, Erase, Split, Glue and Velocity implemented; Mute and Line pending
 - [x] MIDI Tools side panel: quantize, transpose, scale, velocity, note join/split and transform tools for the open clip
 - [x] Playhead: Bar/beat ruler, draggable project playhead line and split-notes-at-playhead action
 - [x] Zoom: Ctrl+wheel and +/− buttons; Fit resets the view
@@ -162,6 +162,7 @@ enum CCEditMode {
 - [x] Drum mode shows note names
 - [x] Fit selection frames the selected notes
 - [x] Select, Draw, Erase and Split tools change the pointer behavior
+- [x] Glue joins adjacent same-pitch notes and Velocity drags change note velocity
 - [x] Horizontal and vertical scrollbars show and move the visible window
 - [ ] 60 FPS with 1000+ notes visible
 
@@ -191,6 +192,7 @@ enum CCEditMode {
 - 2026-10-30: Added drum mode. A header toggle replaces the piano keyboard with a labelled note row for every pitch, making drum programming easier
 - 2026-10-30: Added Fit Sel, which frames the current note selection in the piano-roll view
 - 2026-10-30: Added a pointer tool palette with Select, Draw, Erase and Split modes. Draw adds a note with one click, Erase removes a clicked note, and Split divides a clicked note at that tick
+- 2026-10-30: Added Glue and Velocity pointer tools. Glue joins a clicked note with the next same-pitch note within one snap step, and Velocity changes note velocity by dragging vertically
 - 2026-10-30: Added horizontal and vertical scrollbars to the piano-roll grid, with click-to-jump and drag-to-scroll thumbs
 - 2026-10-26: Added the project playhead to the piano roll plus a Notes tool for joining same-pitch notes and splitting notes at the playhead
 - 2026-10-26: Added a bar/beat ruler. Clicking or dragging the ruler, or dragging the playhead line anywhere in the grid, seeks the project playhead and pauses playback like the arrange timeline
