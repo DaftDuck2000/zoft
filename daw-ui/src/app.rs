@@ -2033,6 +2033,8 @@ struct PianoRollWindow {
     show_ghost_notes: bool,
     /// Tint pitch rows that belong to the selected scale.
     show_scale_highlight: bool,
+    /// Show one labelled note row per pitch instead of piano keys.
+    drum_mode: bool,
     /// Clip snapshot while drawing control-change points.
     cc_drag_before: Option<MidiClip>,
 }
@@ -2060,6 +2062,7 @@ impl PianoRollWindow {
             show_velocity_lane: true,
             show_ghost_notes: true,
             show_scale_highlight: false,
+            drum_mode: false,
             cc_drag_before: None,
         }
     }
@@ -7117,6 +7120,10 @@ impl AppUI {
                             PITCH_CLASS_NAMES[window.tools.scale_root as usize],
                             window.tools.scale_type.label()
                         ));
+                    ui.checkbox(&mut window.drum_mode, "Drum")
+                        .on_hover_text(
+                            "Label every pitch row by note name instead of showing piano keys",
+                        );
                     ui.separator();
                     ui.label("Snap:");
                     egui::ComboBox::from_id_salt("piano_roll_snap")
@@ -7900,21 +7907,25 @@ impl AppUI {
                         continue;
                     }
                     let black = is_black_key(pitch);
+                    let drum = window.drum_mode;
                     let in_scale = window.show_scale_highlight
                         && pitch_in_scale(
                             pitch,
                             window.tools.scale_root,
                             window.tools.scale_type.intervals(),
                         );
-                    painter.rect_filled(
-                        row,
-                        0.0,
-                        if black {
-                            egui::Color32::from_gray(24)
+                    let row_color = if drum {
+                        if pitch % 4 == 0 {
+                            egui::Color32::from_gray(34)
                         } else {
-                            egui::Color32::from_gray(36)
-                        },
-                    );
+                            egui::Color32::from_gray(28)
+                        }
+                    } else if black {
+                        egui::Color32::from_gray(24)
+                    } else {
+                        egui::Color32::from_gray(36)
+                    };
+                    painter.rect_filled(row, 0.0, row_color);
                     if in_scale {
                         painter.rect_filled(
                             row,
@@ -7929,7 +7940,13 @@ impl AppUI {
                         egui::pos2(keyboard.left(), y0.max(grid.top())),
                         egui::pos2(keyboard.right(), y1.min(grid.bottom())),
                     );
-                    let key_color = if in_scale {
+                    let key_color = if drum {
+                        if pitch % 4 == 0 {
+                            egui::Color32::from_gray(55)
+                        } else {
+                            egui::Color32::from_gray(38)
+                        }
+                    } else if in_scale {
                         if black {
                             egui::Color32::from_rgb(40, 72, 56)
                         } else {
@@ -7941,13 +7958,15 @@ impl AppUI {
                         egui::Color32::from_gray(205)
                     };
                     painter.rect_filled(key, 0.0, key_color);
-                    if pitch % 12 == 0 {
+                    if drum || pitch % 12 == 0 {
                         painter.text(
                             egui::pos2(keyboard.left() + 2.0, key.center().y),
                             egui::Align2::LEFT_CENTER,
                             note_name(pitch),
                             egui::FontId::monospace(8.0),
-                            if black {
+                            if drum {
+                                egui::Color32::from_gray(210)
+                            } else if black {
                                 egui::Color32::from_gray(230)
                             } else {
                                 egui::Color32::from_gray(20)

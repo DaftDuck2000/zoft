@@ -27,7 +27,7 @@ Full-featured piano roll: note entry/selection/editing, velocity lanes, CC lanes
 - [ ] Fit selection, horizontal/vertical scrollbars
 - [x] Ghost notes: Show notes from other MIDI tracks/clips overlapping the current clip (dimmed), toggleable globally and per track
 - [x] Scale highlighting: Highlight rows in the selected scale, with matching keyboard tint
-- [ ] Drum mode: Note names instead of piano keys, one-row-per-drum
+- [x] Drum mode: Label every pitch row by note name instead of showing piano keys
 
 ## Technical Details
 
@@ -159,7 +159,7 @@ enum CCEditMode {
 - [x] CC lanes: add/edit/delete points across multiple lanes
 - [ ] Ghost notes show other clips
 - [x] Scale highlighting works (major/minor/modes)
-- [ ] Drum mode shows note names
+- [x] Drum mode shows note names
 - [ ] 60 FPS with 1000+ notes visible
 
 ## Progress Log
@@ -185,6 +185,7 @@ enum CCEditMode {
 - 2026-10-29: CC10 Pan events now affect MIDI note playback. Each note uses the latest CC10 value at its start, applied before the track pan
 - 2026-10-30: CC chase and expression. CC10 pan, CC7 volume and CC11 expression are sampled at the seek position for notes already sounding, and CC7/CC11 scale note gain
 - 2026-10-30: Added optional scale highlighting. A header toggle tints in-scale pitch rows and keyboard keys using the root and scale selected in the Scale tool
+- 2026-10-30: Added drum mode. A header toggle replaces the piano keyboard with a labelled note row for every pitch, making drum programming easier
 - 2026-10-26: Added the project playhead to the piano roll plus a Notes tool for joining same-pitch notes and splitting notes at the playhead
 - 2026-10-26: Added a bar/beat ruler. Clicking or dragging the ruler, or dragging the playhead line anywhere in the grid, seeks the project playhead and pauses playback like the arrange timeline
 - 2026-10-26: Added toggleable ghost notes for other MIDI tracks/clips in the project, mapped into the open clip's content coordinates and drawn dimmed behind the active notes like FL Studio's ghost channels
