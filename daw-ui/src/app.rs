@@ -10951,6 +10951,22 @@ impl eframe::App for AppUI {
                 if ui.button(if self.playing { "⏸" } else { "▶" }).clicked() {
                     self.toggle_playback();
                 }
+                if ui
+                    .button("◄◄")
+                    .on_hover_text("Jump to the start (Home)")
+                    .clicked()
+                {
+                    self.pause_transport();
+                    self.playhead_secs = 0.0;
+                }
+                if ui
+                    .button("►►")
+                    .on_hover_text("Jump to the end (End)")
+                    .clicked()
+                {
+                    self.pause_transport();
+                    self.playhead_secs = self.timeline_duration();
+                }
                 ui.separator();
 
                 // Record button (red while a take is recording or armed)
@@ -12625,6 +12641,16 @@ impl AppUI {
         if ctx.input(|i| i.key_pressed(Key::Enter)) {
             self.pause_transport();
             self.playhead_secs = 0.0;
+        }
+
+        // Home / End: jump to the start or end of the project.
+        if ctx.input(|i| i.key_pressed(Key::Home)) {
+            self.pause_transport();
+            self.playhead_secs = 0.0;
+        }
+        if ctx.input(|i| i.key_pressed(Key::End)) {
+            self.pause_transport();
+            self.playhead_secs = self.timeline_duration();
         }
 
         // R: Record (toggle recording)

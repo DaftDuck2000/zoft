@@ -95,6 +95,7 @@ struct UiState {
 - 2026-10-23: Track list rows are height-matched to the arrange lanes; **+A**/**+M** add audio/MIDI tracks and **×** removes a track (both undoable); a dedicated MIDI bar lists inputs, auto-connects the first keyboard, and shows live note/velocity activity with a Refresh button
 - 2026-10-30: MIDI controls moved into a top-bar MIDI menu. The Source selector is a second-level menu, and live note/velocity activity stays visible next to the menu
 - 2026-10-30: Added ruler markers. Shift+M or the + Marker button drops a named marker at the playhead; click a flag to jump there and right-click to delete it. Marker edits are undoable
+- 2026-10-30: Added ◄◄ and ►► transport buttons plus Home/End shortcuts to jump to the project start or end
 
 ## Future Tasks (Post-Phase 0)
 
@@ -109,7 +110,7 @@ struct UiState {
 - [ ] **Track reordering**: Drag tracks to reorder in track list
 - [ ] **Track context menu**: Right-click to add/remove/duplicate tracks
 - [✓] **Track header controls**: M/S/R, monitor mode, volume fader and pan knob
-- [~] **Transport bar enhancements**: Tap tempo and Bars/Time ruler dropdown done; ◄◄ | ►► buttons not yet
+- [x] **Transport bar enhancements**: Tap tempo, Bars/Time ruler dropdown and ◄◄ | ►► jump buttons
 - [✓] **Metronome toggle**: Click toggle; count-in not yet
 - [ ] **Dark/light theme toggle**: User preference (dark default only)
 - [ ] **Window state persistence**: Save/restore panel sizes, window position
