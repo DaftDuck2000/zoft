@@ -1040,6 +1040,42 @@ fn fit_piano_roll_view(window: &mut PianoRollWindow, grid: egui::Rect, length: u
     window.needs_fit = false;
 }
 
+/// Fit the piano-roll view to the current note selection.
+fn fit_piano_roll_selection(window: &mut PianoRollWindow, grid: egui::Rect) {
+    let mut min_start = u64::MAX;
+    let mut max_end = 0u64;
+    let mut min_pitch = 127u8;
+    let mut max_pitch = 0u8;
+    let mut count = 0usize;
+    for index in &window.selected {
+        if let Some(note) = window.notes.get(*index) {
+            min_start = min_start.min(note.start);
+            max_end = max_end.max(note.end);
+            min_pitch = min_pitch.min(note.pitch);
+            max_pitch = max_pitch.max(note.pitch);
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return;
+    }
+
+    let span_ticks = max_end.saturating_sub(min_start).max(1) as f32;
+    let pad_ticks = (span_ticks * 0.05).max(1.0);
+    window.pixels_per_tick =
+        (grid.width() / (span_ticks + pad_ticks * 2.0)).clamp(0.0005, 4.0);
+    window.view_start_tick = (min_start as f64 - pad_ticks as f64).max(0.0);
+
+    let span_pitches = (max_pitch.saturating_sub(min_pitch) + 1).max(1) as f32;
+    window.pixels_per_semitone =
+        (grid.height() / (span_pitches + 2.0)).clamp(4.0, 24.0);
+    let visible = (grid.height() / window.pixels_per_semitone).max(1.0);
+    let center = (min_pitch as f32 + max_pitch as f32) * 0.5;
+    window.view_low_pitch =
+        (center - visible * 0.5).clamp(0.0, (128.0 - visible).max(0.0));
+    window.needs_fit = false;
+}
+
 /// Convert a loop range in seconds to output-device frames. Returns `None`
 /// when looping is off or the range is empty.
 fn loop_range_frames(
@@ -7080,6 +7116,7 @@ impl AppUI {
         let mut select_all = false;
         let mut preview_note: Option<(u8, u8)> = None;
         let mut zoom_request: Option<f32> = None;
+        let mut fit_selection = false;
         let mut do_quantize = false;
         let mut do_transpose = false;
         let mut do_scale = false;
@@ -7136,6 +7173,16 @@ impl AppUI {
                         });
                     if ui.small_button("Fit").clicked() {
                         window.needs_fit = true;
+                    }
+                    if ui
+                        .add_enabled(
+                            !window.selected.is_empty(),
+                            egui::Button::new("Fit Sel"),
+                        )
+                        .on_hover_text("Fit the view to selected notes")
+                        .clicked()
+                    {
+                        fit_selection = true;
                     }
                     if ui.small_button("−").clicked() {
                         zoom_request = Some(1.0 / 1.5);
@@ -7764,7 +7811,9 @@ impl AppUI {
                     )
                     .on_hover_text("Drag to move the playhead");
 
-                if window.needs_fit {
+                if fit_selection {
+                    fit_piano_roll_selection(&mut window, grid);
+                } else if window.needs_fit {
                     fit_piano_roll_view(&mut window, grid, length);
                 }
                 if let Some(factor) = zoom_request {
@@ -13996,6 +14045,7 @@ mod tests {
         tape_stretch_interleaved, timeline_snap_ticks, tremolo, wav_file_info, wav_peak,
         write_piano_roll_notes, write_wav_f32, write_wav_range, write_wav_range_with_envelope,
         fit_piano_roll_view, piano_roll_new_note_length, midi_trim_end, midi_trim_start,
+        fit_piano_roll_selection,
         split_midi_clip_at_tick, quantize_midi_notes, scale_midi_velocities,
         compress_midi_velocities, expand_midi_velocities, curve_midi_velocities,
         transpose_midi_notes, scale_conform_midi_notes, velocity_color, notes_in_marquee,
@@ -15770,6 +15820,48 @@ mod tests {
         assert!(
             window.view_low_pitch + 400.0 / window.pixels_per_semitone >= 72.0
         );
+    }
+
+    #[test]
+    fn piano_roll_fit_selection_frames_selected_notes() {
+        let mut window = PianoRollWindow::new(ClipId::default(), SnapMode::Beat);
+        window.notes = vec![
+            PianoRollNote {
+                start: 0,
+                end: 480,
+                pitch: 60,
+                velocity: 100,
+                channel: 0,
+            },
+            PianoRollNote {
+                start: 960,
+                end: 1440,
+                pitch: 72,
+                velocity: 100,
+                channel: 0,
+            },
+            PianoRollNote {
+                start: 1920,
+                end: 2400,
+                pitch: 48,
+                velocity: 100,
+                channel: 0,
+            },
+        ];
+        window.selected.insert(1);
+        let grid = egui::Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(800.0, 400.0),
+        );
+        fit_piano_roll_selection(&mut window, grid);
+
+        assert!(window.pixels_per_tick > 0.0);
+        assert!(window.view_start_tick <= 960.0);
+        let visible_ticks = 800.0 / window.pixels_per_tick;
+        assert!(window.view_start_tick + visible_ticks as f64 >= 1440.0);
+        assert!(window.view_low_pitch <= 72.0);
+        let visible_pitches = 400.0 / window.pixels_per_semitone;
+        assert!(window.view_low_pitch + visible_pitches >= 72.0);
     }
 
     #[test]
