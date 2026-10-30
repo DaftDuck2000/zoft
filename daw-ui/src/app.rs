@@ -2661,6 +2661,12 @@ struct MidiClipDrag {
     audio_members: Vec<ClipDragMember>,
 }
 
+/// Smoothly slides track rows from their old order to a new one after a drop.
+struct TrackReorderAnim {
+    started: std::time::Instant,
+    old_order: Vec<TrackId>,
+}
+
 /// Decoded mono windows used for sample-accurate rendering at high zoom.
 #[derive(Default)]
 struct DetailCache {
@@ -2778,6 +2784,8 @@ struct AppUI {
     midi_drag: Option<MidiClipDrag>,
     /// Track currently being dragged in the track list.
     track_drag: Option<TrackId>,
+    /// Row-slide animation after a track is reordered.
+    track_reorder_anim: Option<TrackReorderAnim>,
     /// Rubber-band selection while dragging empty track space.
     marquee: Option<(egui::Pos2, egui::Pos2)>,
     marquee_additive: bool,
@@ -2924,6 +2932,7 @@ impl AppUI {
             drag: None,
             midi_drag: None,
             track_drag: None,
+            track_reorder_anim: None,
             marquee: None,
             marquee_additive: false,
             clipboard: Vec::new(),
@@ -11539,7 +11548,17 @@ impl eframe::App for AppUI {
             let mut track_drag_started = None;
             let mut track_drag_current = None;
             let mut track_drag_stopped: Option<(TrackId, f32)> = None;
-            for track_id in &self.project.track_order {
+            let dragging_track = self.track_drag;
+            let reorder_old_order = self
+                .track_reorder_anim
+                .as_ref()
+                .map(|anim| anim.old_order.clone());
+            let reorder_t = self.track_reorder_anim.as_ref().map(|anim| {
+                (anim.started.elapsed().as_secs_f32() / 0.18).clamp(0.0, 1.0)
+            });
+            for (track_index, track_id) in
+                self.project.track_order.iter().enumerate()
+            {
                 if let Some(track) = self.project.tracks.get(track_id) {
                     let before = TrackShape::of(track);
                     let mut after = before;
@@ -11547,10 +11566,54 @@ impl eframe::App for AppUI {
                     // `allocate_ui_with_layout` only advances by the content's
                     // height, which would make the left rows shorter than the
                     // arrange lanes and break vertical alignment.
-                    let (row_rect, row_response) = ui.allocate_exact_size(
+                    let (slot_rect, _) = ui.allocate_exact_size(
                         egui::vec2(ui.available_width(), TRACK_HEIGHT),
                         egui::Sense::hover(),
                     );
+                    let visual_index =
+                        if let (Some(old_order), Some(t)) =
+                            (&reorder_old_order, reorder_t)
+                        {
+                            let old_index = old_order
+                                .iter()
+                                .position(|id| id == track_id)
+                                .unwrap_or(track_index)
+                                as f32;
+                            let new_index = track_index as f32;
+                            let eased = 1.0 - (1.0 - t).powi(3);
+                            old_index + (new_index - old_index) * eased
+                        } else {
+                            track_index as f32
+                        };
+                    let row_rect = egui::Rect::from_min_size(
+                        egui::pos2(
+                            slot_rect.left(),
+                            track_rows_top + visual_index * TRACK_HEIGHT,
+                        ),
+                        slot_rect.size(),
+                    );
+                    let row_response = ui.interact(
+                        row_rect,
+                        ui.id().with(("track_row_hit", *track_id)),
+                        egui::Sense::click(),
+                    );
+                    if dragging_track == Some(*track_id) {
+                        ui.painter().rect_filled(
+                            row_rect.shrink(2.0),
+                            4.0,
+                            egui::Color32::from_rgba_unmultiplied(
+                                90, 140, 220, 35,
+                            ),
+                        );
+                        ui.painter().rect_stroke(
+                            row_rect.shrink(2.0),
+                            4.0,
+                            egui::Stroke::new(
+                                1.0_f32,
+                                egui::Color32::from_rgb(100, 160, 240),
+                            ),
+                        );
+                    }
                     let mut row_ui = ui.new_child(
                         egui::UiBuilder::new()
                             .id_salt(("track_row", *track_id))
@@ -11574,6 +11637,7 @@ impl eframe::App for AppUI {
                                             egui::RichText::new("::")
                                                 .color(egui::Color32::from_gray(130)),
                                         )
+                                        .selectable(false)
                                         .sense(egui::Sense::drag()),
                                     )
                                     .on_hover_text("Drag to reorder track");
@@ -11867,6 +11931,10 @@ impl eframe::App for AppUI {
                 let to_index = track_target_at(y);
                 if let Some(from_index) = from_index {
                     if from_index != to_index {
+                        self.track_reorder_anim = Some(TrackReorderAnim {
+                            started: std::time::Instant::now(),
+                            old_order: self.project.track_order.clone(),
+                        });
                         let action = EditAction::MoveTrack {
                             track_id,
                             from_index,
@@ -11886,8 +11954,13 @@ impl eframe::App for AppUI {
                     self.track_drag = Some(track_id);
                     if let Some(y) = pointer_y {
                         let target = track_target_at(y);
-                        let line_y =
+                        let target_line_y =
                             track_rows_top + target as f32 * TRACK_HEIGHT;
+                        let line_y = ui.ctx().animate_value_with_time(
+                            egui::Id::new("track_reorder_line"),
+                            target_line_y,
+                            0.12,
+                        );
                         ui.painter().hline(
                             ui.max_rect().x_range(),
                             line_y,
@@ -11898,6 +11971,11 @@ impl eframe::App for AppUI {
                         );
                     }
                 }
+            }
+            if reorder_t.map(|t| t >= 1.0).unwrap_or(false)
+                && !track_drag_was_stopped
+            {
+                self.track_reorder_anim = None;
             }
             for (track_id, from, to, merge) in track_changes {
                 if let Some(track) = self.project.tracks.get_mut(&track_id) {
@@ -13692,6 +13770,7 @@ impl AppUI {
         self.drag = None;
         self.midi_drag = None;
         self.track_drag = None;
+        self.track_reorder_anim = None;
         self.recovery_offer = None;
         self.playhead_secs = 0.0;
         self.view_start_secs = 0.0;
