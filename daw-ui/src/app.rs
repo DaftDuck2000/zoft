@@ -650,6 +650,48 @@ fn quantize_midi_notes(
     }
 }
 
+/// Fold a recorded MIDI take into a loop range. Notes are re-timed relative to
+/// the loop start and truncated at the loop boundary so repeated passes
+/// overdub on top of each other.
+fn fold_midi_clip_to_loop(
+    clip: &MidiClip,
+    loop_start_tick: u64,
+    loop_len_ticks: u64,
+    loop_start_sample: u64,
+) -> MidiClip {
+    let mut folded = MidiClip::new(
+        TimelinePos::new(loop_start_tick, loop_start_sample),
+        loop_len_ticks.max(1),
+    );
+    if loop_len_ticks == 0 {
+        return folded;
+    }
+    let take_start = clip.timeline_position.tick;
+    for note in midi_clip_content_notes(clip) {
+        let absolute_start = take_start.saturating_add(note.start);
+        let relative_start = ((absolute_start as i128 - loop_start_tick as i128)
+            .rem_euclid(loop_len_ticks as i128)) as u64;
+        let duration = note.end.saturating_sub(note.start).max(1);
+        let end = relative_start
+            .saturating_add(duration)
+            .min(loop_len_ticks)
+            .max(relative_start.saturating_add(1).min(loop_len_ticks));
+        folded.add_event(MidiEvent::note_on(
+            relative_start,
+            note.channel,
+            note.pitch,
+            note.velocity.max(1),
+        ));
+        folded.add_event(MidiEvent::note_off(
+            end,
+            note.channel,
+            note.pitch,
+            0,
+        ));
+    }
+    folded
+}
+
 /// Quantize a freshly recorded MIDI clip to a grid, preserving durations and
 /// extending the clip if a shifted note ends past the original take.
 fn quantize_recorded_midi_clip(clip: &mut MidiClip, grid_ticks: u64) {
@@ -13339,10 +13381,45 @@ impl AppUI {
                 .sample_to_tick(sample, project_sr)
                 .saturating_sub(start_tick);
             clip.add_event(if event.on {
-                MidiEvent::note_on(tick, 0, event.note, event.velocity.max(1))
+                MidiEvent::note_on(
+                    tick,
+                    event.channel,
+                    event.note,
+                    event.velocity.max(1),
+                )
             } else {
-                MidiEvent::note_off(tick, 0, event.note, 0)
+                MidiEvent::note_off(tick, event.channel, event.note, 0)
             });
+        }
+        // Loop recording folds repeated passes into the loop window, so each
+        // pass overdubs on top of the previous one instead of extending past
+        // the loop end.
+        let loop_len_secs = (self.loop_end_secs - self.loop_start_secs).max(0.0);
+        if self.loop_enabled
+            && loop_len_secs > 0.05
+            && end_secs - start_secs >= loop_len_secs * 0.95
+        {
+            let loop_start_sample =
+                (self.loop_start_secs.max(0.0) * project_sr) as u64;
+            let loop_end_sample =
+                (self.loop_end_secs.max(0.0) * project_sr) as u64;
+            let loop_start_tick = self
+                .project
+                .tempo_map
+                .sample_to_tick(loop_start_sample, project_sr);
+            let loop_end_tick = self
+                .project
+                .tempo_map
+                .sample_to_tick(loop_end_sample, project_sr);
+            let loop_len_ticks = loop_end_tick.saturating_sub(loop_start_tick);
+            if loop_len_ticks > 0 {
+                clip = fold_midi_clip_to_loop(
+                    &clip,
+                    loop_start_tick,
+                    loop_len_ticks,
+                    loop_start_sample,
+                );
+            }
         }
         if self.input_quantize {
             let (numerator, _) = self.time_signature();
@@ -14553,6 +14630,7 @@ mod tests {
         merge_continuous_edit, metronome_config, midi_clip_note_spans, midi_clip_notes,
         cc_pan_gains, midi_cc_value_at, pitch_in_scale,
         quantize_recorded_midi_clip, filter_midi_events,
+        fold_midi_clip_to_loop,
         slider_wheel_value, slider_wheel_value_with_step,
         slider_wheel_log_value,
         midi_clip_content_notes, midi_clips_in_marquee, note_name, processed_file_stem,
@@ -14954,6 +15032,32 @@ mod tests {
         assert_eq!(midi_cc_value_at(&points, 240, 64), 90);
         assert_eq!(midi_cc_value_at(&points, 500, 64), 90);
         assert_eq!(midi_cc_value_at(&[], 500, 64), 64);
+    }
+
+    #[test]
+    fn loop_fold_wraps_repeated_passes_into_the_loop() {
+        let mut clip = MidiClip::new(TimelinePos::new(0, 0), 3840);
+        clip.add_event(MidiEvent::note_on(0, 0, 60, 100));
+        clip.add_event(MidiEvent::note_off(240, 0, 60, 0));
+        clip.add_event(MidiEvent::note_on(1920, 0, 64, 100));
+        clip.add_event(MidiEvent::note_off(2160, 0, 64, 0));
+        let folded = fold_midi_clip_to_loop(&clip, 0, 1920, 0);
+        let notes = midi_clip_content_notes(&folded);
+        assert_eq!(notes.len(), 2);
+        assert_eq!((notes[0].start, notes[0].end, notes[0].pitch), (0, 240, 60));
+        assert_eq!((notes[1].start, notes[1].end, notes[1].pitch), (0, 240, 64));
+        assert_eq!(folded.length, 1920);
+    }
+
+    #[test]
+    fn loop_fold_truncates_notes_at_the_loop_boundary() {
+        let mut clip = MidiClip::new(TimelinePos::new(0, 0), 1920);
+        clip.add_event(MidiEvent::note_on(1800, 0, 67, 100));
+        clip.add_event(MidiEvent::note_off(2100, 0, 67, 0));
+        let folded = fold_midi_clip_to_loop(&clip, 0, 1920, 0);
+        let notes = midi_clip_content_notes(&folded);
+        assert_eq!(notes.len(), 1);
+        assert_eq!((notes[0].start, notes[0].end), (1800, 1920));
     }
 
     #[test]

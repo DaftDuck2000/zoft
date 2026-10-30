@@ -24,7 +24,7 @@ Implement MIDI track: input routing, recording with chase events, loop recording
 - [x] Mixed audio/MIDI selection: both sets can be selected and moved together
 - [x] Live MIDI audition while an armed/monitored MIDI or instrument track is recording
 - [~] Chase events: CC10 pan, CC7 volume and CC11 expression follow the seek position; pitch bend/program/other CC pending
-- [ ] Loop recording: Overdub (merge) or new take (lanes)
+- [~] Loop recording: Overdub folds repeated MIDI passes into the loop; new-take lanes pending
 - [ ] Metronome count-in: Configurable bars before recording
 - [x] MIDI thru: Echo input to the selected output port (for monitoring external gear)
 - [x] MIDI panic: All notes off, clear scheduled playback notes
@@ -130,7 +130,7 @@ MIDI Thru         Record Buffer      Chase Buffer
 - [x] Audio and MIDI selections can be combined and moved together
 - [x] Per-track real-time inserts (saturation, filter, bit crusher, tremolo) apply to audio and MIDI playback
 - [~] Chase sends CC/pitch bend on seek (CC10/CC7/CC11 implemented)
-- [ ] Loop recording: overdub merges, new take creates lane
+- [~] Loop recording: overdub folds repeated passes into the loop; new-take lanes pending
 - [x] MIDI thru echoes to the selected output port
 - [x] Panic sends All Notes Off and clears scheduled MIDI playback
 - [x] Input quantize aligns recorded notes to grid
@@ -150,6 +150,7 @@ MIDI Thru         Record Buffer      Chase Buffer
 - 2026-10-30: Added a MIDI channel filter (All or 1–16). Filtered input is used for both recording and live audition
 - 2026-10-30: Added MIDI thru. The MIDI menu can select an output port and echo filtered input notes to it; Panic sends All Notes Off to the output as well
 - 2026-10-30: MIDI activity is now tracked per channel, so the MIDI menu shows note/velocity activity for the selected input channel instead of every channel
+- 2026-10-30: Loop recording for MIDI. When Loop is enabled and a take spans at least one loop, repeated passes are folded into the loop range so each pass overdubs instead of extending past the loop end. Recorded notes now keep their input channel
 - 2026-10-24: MIDI clip cropping. Dragging either edge of a MIDI clip in the arrange view trims its visible window using the Arrange snap grid. Trimming is non-destructive: events stay in content coordinates and a `content_offset` marks the visible start, so dragging the edge back out reveals the hidden notes again. The piano roll shades trimmed regions and keeps hidden notes editable
 - 2026-10-24: MIDI clip moving. Dragging a MIDI clip's body moves it in time using the Arrange snap settings (including relative snap), and dropping it on another MIDI/instrument track reattaches it there. Moves are undoable and update playback immediately
 - 2026-10-24: MIDI clip split and duplicate. `S` splits the selected MIDI clip at the playhead into two non-destructive visible windows, and `Ctrl+D` duplicates the clip immediately after its visible span. Both operations are undoable

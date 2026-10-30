@@ -46,11 +46,12 @@ Multiple toggleable CC lanes and a velocity lane handle per-note dynamics and
 controller automation, and scale highlighting can tint in-scale rows. Drum mode
 labels every pitch row by note name. The header also has Select/Draw/Erase/Split
 pointer tools and horizontal/vertical scrollbars. MIDI thru echoes filtered
-input to a selected output port. Trimming is non-destructive and the piano
+input to a selected output port. Loop-enabled MIDI recording folds repeated
+passes into the loop range for overdub-style takes. Trimming is non-destructive and the piano
 roll shades trimmed regions. Every track type
 now has a real-time insert chain (saturation, filter, bit crusher, tremolo) that
 runs before the track fader, edited from the Logic-style FX Rack (X).
-Instruments, chase events, loop takes and the remaining editing tools
+Instruments, chase events, new-take lanes and the remaining editing tools
 are not implemented yet.
 
 ## Milestone: M2 — MIDI Sequencing (Week 44)
