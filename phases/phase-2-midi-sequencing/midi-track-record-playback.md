@@ -27,7 +27,7 @@ Implement MIDI track: input routing, recording with chase events, loop recording
 - [ ] Metronome count-in: Configurable bars before recording
 - [ ] MIDI thru: Echo input to output (for monitoring external gear)
 - [x] MIDI panic: All notes off, clear scheduled playback notes
-- [ ] Input quantize: Optional quantization during recording
+- [x] Input quantize: Recorded notes align to the Arrange snap grid when Input Q is enabled
 
 ## Technical Details
 
@@ -131,7 +131,7 @@ MIDI Thru         Record Buffer      Chase Buffer
 - [ ] Loop recording: overdub merges, new take creates lane
 - [ ] MIDI thru echoes to output port
 - [x] Panic sends All Notes Off and clears scheduled MIDI playback
-- [ ] Input quantize aligns recorded notes to grid
+- [x] Input quantize aligns recorded notes to grid
 - [ ] Multi-port input works (multiple hardware devices)
 
 ## Progress Log
@@ -143,8 +143,9 @@ MIDI Thru         Record Buffer      Chase Buffer
 - 2026-10-29: MIDI playback now reads CC10 Pan from clip events; notes are panned by the latest CC10 value at their start
 - 2026-10-30: CC chase for MIDI playback. CC10 pan, CC7 volume and CC11 expression are sampled at the seek position for notes already sounding, so seeking into a CC curve restores the correct state. CC7 and CC11 scale note gain
 - 2026-10-30: Added a MIDI Panic button in the MIDI bar. It clears the live synth and scheduled playback notes to stop hanging MIDI
+- 2026-10-30: Added optional input quantization. With Input Q enabled, recorded notes are aligned to the Arrange snap grid while preserving their durations
 - 2026-10-24: MIDI clip cropping. Dragging either edge of a MIDI clip in the arrange view trims its visible window using the Arrange snap grid. Trimming is non-destructive: events stay in content coordinates and a `content_offset` marks the visible start, so dragging the edge back out reveals the hidden notes again. The piano roll shades trimmed regions and keeps hidden notes editable
 - 2026-10-24: MIDI clip moving. Dragging a MIDI clip's body moves it in time using the Arrange snap settings (including relative snap), and dropping it on another MIDI/instrument track reattaches it there. Moves are undoable and update playback immediately
 - 2026-10-24: MIDI clip split and duplicate. `S` splits the selected MIDI clip at the playhead into two non-destructive visible windows, and `Ctrl+D` duplicates the clip immediately after its visible span. Both operations are undoable
 - 2026-10-24: MIDI clip multi-selection. MIDI clips now use the same selection model as audio: click, Ctrl/Shift+click and marquee selection build a set, with group move, delete, duplicate, copy/paste and mute. Group moves preserve relative time offsets and can shift across MIDI/instrument tracks together. Audio and MIDI selections are no longer exclusive, so a mixed selection can be moved as one group
-- Remaining: instrument/plugin output, full chase events, loop recording modes, MIDI thru, input quantize
+- Remaining: instrument/plugin output, full chase events, loop recording modes, MIDI thru

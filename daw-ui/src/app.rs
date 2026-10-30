@@ -636,6 +636,23 @@ fn quantize_midi_notes(
     }
 }
 
+/// Quantize a freshly recorded MIDI clip to a grid, preserving durations and
+/// extending the clip if a shifted note ends past the original take.
+fn quantize_recorded_midi_clip(clip: &mut MidiClip, grid_ticks: u64) {
+    if grid_ticks <= 1 {
+        return;
+    }
+    let mut notes = midi_clip_content_notes(clip);
+    if notes.is_empty() {
+        return;
+    }
+    quantize_midi_notes(&mut notes, grid_ticks, 1.0, 0.0);
+    if let Some(end) = notes.iter().map(|note| note.end).max() {
+        clip.length = clip.length.max(end);
+    }
+    write_piano_roll_notes(clip, &notes);
+}
+
 /// Transpose notes by a fixed number of semitones, clamping to the MIDI range.
 fn transpose_midi_notes(notes: &mut [PianoRollNote], semitones: i32) {
     if semitones == 0 {
@@ -2488,6 +2505,8 @@ struct AppUI {
     /// Whether live MIDI notes are currently being auditioned through the
     /// output stream's sine synth.
     midi_audition_on: bool,
+    /// Quantize recorded MIDI notes to the Arrange snap grid.
+    input_quantize: bool,
     error_message: Option<String>,
     /// Yellow banner shown when free disk space is low during recording.
     disk_warning: Option<String>,
@@ -2635,6 +2654,7 @@ impl AppUI {
             midi_monitor: None,
             midi_activity: daw_engine::MidiActivity::default(),
             midi_audition_on: false,
+            input_quantize: false,
             error_message: None,
             disk_warning: None,
             last_disk_check: std::time::Instant::now(),
@@ -10544,6 +10564,10 @@ impl eframe::App for AppUI {
                     {
                         self.panic_midi();
                     }
+                    ui.checkbox(&mut self.input_quantize, "Input Q")
+                        .on_hover_text(
+                            "Quantize recorded MIDI notes to the Arrange snap grid",
+                        );
                 }
             });
         });
@@ -12737,6 +12761,14 @@ impl AppUI {
                 MidiEvent::note_off(tick, 0, event.note, 0)
             });
         }
+        if self.input_quantize {
+            let (numerator, _) = self.time_signature();
+            let grid = PianoRollSnap::from_arrange(self.snap_mode)
+                .ticks(numerator.max(1) as u64);
+            if grid > 1 {
+                quantize_recorded_midi_clip(&mut clip, grid);
+            }
+        }
         let clip_id = self.project.midi_clips.insert(clip);
         let action = EditAction::AttachMidi {
             track: track_id,
@@ -13937,6 +13969,7 @@ mod tests {
         load_wav_range_interleaved, loop_range_frames, measure_integrated_loudness,
         merge_continuous_edit, metronome_config, midi_clip_note_spans, midi_clip_notes,
         cc_pan_gains, midi_cc_value_at, pitch_in_scale,
+        quantize_recorded_midi_clip,
         slider_wheel_value, slider_wheel_value_with_step,
         slider_wheel_log_value,
         midi_clip_content_notes, midi_clips_in_marquee, note_name, processed_file_stem,
@@ -14318,6 +14351,17 @@ mod tests {
         assert_eq!(midi_cc_value_at(&points, 240, 64), 90);
         assert_eq!(midi_cc_value_at(&points, 500, 64), 90);
         assert_eq!(midi_cc_value_at(&[], 500, 64), 64);
+    }
+
+    #[test]
+    fn input_quantize_aligns_recorded_note_starts() {
+        let mut clip = MidiClip::new(TimelinePos::default(), 960);
+        clip.add_event(MidiEvent::note_on(100, 0, 60, 100));
+        clip.add_event(MidiEvent::note_off(340, 0, 60, 0));
+        quantize_recorded_midi_clip(&mut clip, 240);
+        let notes = midi_clip_content_notes(&clip);
+        assert_eq!(notes.len(), 1);
+        assert_eq!((notes[0].start, notes[0].end), (0, 240));
     }
 
     #[test]
