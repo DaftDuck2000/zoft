@@ -8032,7 +8032,7 @@ impl AppUI {
                     grid.width()
                 } else {
                     (grid.width() * (visible_ticks / length as f32))
-                        .clamp(24.0, grid.width())
+                        .clamp(24.0_f32.min(grid.width()), grid.width())
                 };
                 let h_travel = (grid.width() - h_thumb_width).max(1.0);
                 let h_scroll_response = ui.interact(
@@ -8060,7 +8060,7 @@ impl AppUI {
                 let v_max = (128.0 - visible_pitches).max(0.0);
                 let v_thumb_height = (grid.height()
                     * (visible_pitches / 128.0))
-                    .clamp(24.0, grid.height());
+                    .clamp(24.0_f32.min(grid.height()), grid.height());
                 let v_travel = (grid.height() - v_thumb_height).max(1.0);
                 let v_scroll_response = ui.interact(
                     v_scroll,
@@ -8974,7 +8974,7 @@ impl AppUI {
                     grid.width()
                 } else {
                     (grid.width() * (visible_ticks / length as f32))
-                        .clamp(24.0, grid.width())
+                        .clamp(24.0_f32.min(grid.width()), grid.width())
                 };
                 let h_travel = (grid.width() - h_thumb_width).max(1.0);
                 let h_fraction = if h_max > 0.0 {
@@ -9001,7 +9001,7 @@ impl AppUI {
 
                 let v_thumb_height = (grid.height()
                     * (visible_pitches / 128.0))
-                    .clamp(24.0, grid.height());
+                    .clamp(24.0_f32.min(grid.height()), grid.height());
                 let v_travel = (grid.height() - v_thumb_height).max(1.0);
                 let v_fraction = if v_max > 0.0 {
                     (window.view_low_pitch / v_max) as f32
@@ -10765,6 +10765,9 @@ impl eframe::App for AppUI {
                         }
                         if changed {
                             self.selected_midi_output = selected;
+                            if self.selected_midi_output.is_none() {
+                                self.midi_thru_enabled = false;
+                            }
                             self.restart_midi_thru();
                             ui.close_menu();
                         }
