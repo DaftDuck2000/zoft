@@ -391,6 +391,20 @@ fn scale_conform_midi_notes(notes: &mut [PianoRollNote], root: u8, intervals: &[
     }
 }
 
+/// Keep only MIDI events from the selected channel, if a filter is set.
+fn filter_midi_events(
+    events: Vec<daw_engine::MidiInputEvent>,
+    channel: Option<u8>,
+) -> Vec<daw_engine::MidiInputEvent> {
+    match channel {
+        Some(channel) => events
+            .into_iter()
+            .filter(|event| event.channel == channel)
+            .collect(),
+        None => events,
+    }
+}
+
 /// One editable note in the piano roll. Unlike the lightweight span tuples used
 /// by the arrange preview, this keeps the MIDI channel and can be written back
 /// into a clip.
@@ -2539,6 +2553,8 @@ struct AppUI {
     selected_input_device: Option<String>,
     midi_inputs: Vec<daw_engine::MidiInputInfo>,
     selected_midi_input: Option<String>,
+    /// Optional MIDI channel filter (0-15). `None` means all channels.
+    midi_input_channel: Option<u8>,
     midi_monitor: Option<daw_engine::MidiMonitor>,
     midi_activity: daw_engine::MidiActivity,
     /// Whether live MIDI notes are currently being auditioned through the
@@ -2692,6 +2708,7 @@ impl AppUI {
             selected_input_device: None,
             midi_inputs,
             selected_midi_input: None,
+            midi_input_channel: None,
             midi_monitor: None,
             midi_activity: daw_engine::MidiActivity::default(),
             midi_audition_on: false,
@@ -10225,7 +10242,10 @@ impl eframe::App for AppUI {
             let _ = self.engine.stop();
         }
         if let Some(monitor) = &self.midi_monitor {
-            let events = monitor.drain_events();
+            let events = filter_midi_events(
+                monitor.drain_events(),
+                self.midi_input_channel,
+            );
             if self.recording_midi {
                 self.midi_captured.extend(events.iter().copied());
             }
@@ -10363,6 +10383,38 @@ impl eframe::App for AppUI {
                         if changed {
                             self.selected_midi_input = selected;
                             self.restart_midi_monitor();
+                            ui.close_menu();
+                        }
+                    });
+                    ui.label(format!(
+                        "Channel: {}",
+                        self.midi_input_channel
+                            .map(|channel| (channel + 1).to_string())
+                            .unwrap_or_else(|| "All".to_string())
+                    ));
+                    ui.menu_button("Channel", |ui| {
+                        let mut selected = self.midi_input_channel;
+                        let mut changed = false;
+                        if ui
+                            .selectable_value(&mut selected, None, "All")
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                        for display in 1..=16u8 {
+                            if ui
+                                .selectable_value(
+                                    &mut selected,
+                                    Some(display - 1),
+                                    format!("{}", display),
+                                )
+                                .changed()
+                            {
+                                changed = true;
+                            }
+                        }
+                        if changed {
+                            self.midi_input_channel = selected;
                             ui.close_menu();
                         }
                     });
@@ -14078,7 +14130,7 @@ mod tests {
         load_wav_range_interleaved, loop_range_frames, measure_integrated_loudness,
         merge_continuous_edit, metronome_config, midi_clip_note_spans, midi_clip_notes,
         cc_pan_gains, midi_cc_value_at, pitch_in_scale,
-        quantize_recorded_midi_clip,
+        quantize_recorded_midi_clip, filter_midi_events,
         slider_wheel_value, slider_wheel_value_with_step,
         slider_wheel_log_value,
         midi_clip_content_notes, midi_clips_in_marquee, note_name, processed_file_stem,
@@ -14440,6 +14492,25 @@ mod tests {
         let log_down = slider_wheel_log_value(100.0, 20.0, 20_000.0, -1.0);
         assert!((log_up - 141.25).abs() < 0.1);
         assert!((log_down - 70.79).abs() < 0.1);
+    }
+
+    #[test]
+    fn midi_channel_filter_keeps_only_selected_channel() {
+        let event = |channel: u8| daw_engine::MidiInputEvent {
+            timestamp_micros: 0,
+            received_at: std::time::Instant::now(),
+            channel,
+            note: 60,
+            velocity: 100,
+            on: true,
+        };
+        let filtered =
+            filter_midi_events(vec![event(0), event(1), event(2)], Some(1));
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].channel, 1);
+
+        let all = filter_midi_events(vec![event(0), event(2)], None);
+        assert_eq!(all.len(), 2);
     }
 
     #[test]

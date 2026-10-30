@@ -22,8 +22,8 @@
 ## Status Notes
 
 MIDI has started: tracks can be added as MIDI tracks, and MIDI input devices
-are enumerated through `midir` with a top-bar MIDI menu (Source submenu,
-Refresh and live note/velocity activity). Armed MIDI tracks record
+are enumerated through `midir` with a top-bar MIDI menu (Source and Channel
+submenus, Refresh and live note/velocity activity). Armed MIDI tracks record
 timestamped notes into clips that render in the arrange lane and play through
 a basic built-in sine voice; live input is auditioned through the same voice
 while recording, and MIDI clips show miniature note previews in the arrange

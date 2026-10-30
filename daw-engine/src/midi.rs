@@ -26,6 +26,7 @@ pub struct MidiInputEvent {
     pub timestamp_micros: u64,
     /// Local arrival time, used to place notes relative to the start of a take.
     pub received_at: std::time::Instant,
+    pub channel: u8,
     pub note: u8,
     pub velocity: u8,
     pub on: bool,
@@ -74,6 +75,7 @@ impl MidiMonitor {
                     return;
                 }
                 let status = message[0] & 0xF0;
+                let channel = message[0] & 0x0F;
                 let note = message[1] & 0x7F;
                 let velocity = message[2] & 0x7F;
                 let is_on = status == 0x90 && velocity > 0;
@@ -86,6 +88,7 @@ impl MidiMonitor {
                         queue.push(MidiInputEvent {
                             timestamp_micros: timestamp,
                             received_at: std::time::Instant::now(),
+                            channel,
                             note,
                             velocity,
                             on: is_on,
