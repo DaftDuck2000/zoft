@@ -10201,6 +10201,9 @@ impl eframe::App for AppUI {
         // live sine synth can respond even when the transport is stopped.
         self.sync_live_midi_gains();
         self.poll_piano_roll_preview();
+        if let Some(activity) = self.midi_monitor.as_ref().map(|m| m.activity()) {
+            self.midi_activity = activity;
+        }
         let audition = self.midi_audition_enabled();
         let piano_roll_open =
             self.piano_roll.is_some() || self.piano_roll_preview.is_some();
@@ -10248,6 +10251,24 @@ impl eframe::App for AppUI {
         // File menu
         let recent_projects = self.recent_projects.clone();
         let mut file_action: Option<FileAction> = None;
+        let midi_active = self.midi_activity.active_notes > 0;
+        let midi_has_note = self.midi_activity.last_note.is_some();
+        let midi_activity_text = match self.midi_activity.last_note {
+            Some(note) if midi_active => format!(
+                "{} vel {}",
+                daw_engine::midi_note_name(note),
+                self.midi_activity.last_velocity
+            ),
+            Some(note) => daw_engine::midi_note_name(note),
+            None => "--".to_string(),
+        };
+        let midi_activity_color = if midi_active {
+            egui::Color32::GREEN
+        } else if midi_has_note {
+            egui::Color32::from_gray(180)
+        } else {
+            egui::Color32::GRAY
+        };
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
@@ -10304,6 +10325,65 @@ impl eframe::App for AppUI {
                         ui.close_menu();
                     }
                 });
+                ui.menu_button("MIDI", |ui| {
+                    ui.label(format!(
+                        "Source: {}",
+                        self.selected_midi_input.as_deref().unwrap_or("None")
+                    ));
+                    ui.menu_button("Source", |ui| {
+                        let mut selected = self.selected_midi_input.clone();
+                        let mut changed = false;
+                        if ui
+                            .selectable_value(&mut selected, None, "None")
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                        if self.midi_inputs.is_empty() {
+                            ui.weak("No MIDI inputs detected");
+                        } else {
+                            for device in &self.midi_inputs {
+                                if ui
+                                    .selectable_value(
+                                        &mut selected,
+                                        Some(device.name.clone()),
+                                        &device.name,
+                                    )
+                                    .changed()
+                                {
+                                    changed = true;
+                                }
+                            }
+                        }
+                        ui.separator();
+                        if ui.button("Refresh").clicked() {
+                            self.refresh_midi_inputs();
+                            ui.close_menu();
+                        }
+                        if changed {
+                            self.selected_midi_input = selected;
+                            self.restart_midi_monitor();
+                            ui.close_menu();
+                        }
+                    });
+                    ui.separator();
+                    if ui.button("Panic").clicked() {
+                        self.panic_midi();
+                        ui.close_menu();
+                    }
+                    ui.checkbox(&mut self.input_quantize, "Input Quantize")
+                        .on_hover_text(
+                            "Quantize recorded MIDI notes to the Arrange snap grid",
+                        );
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.label("Activity:");
+                        ui.colored_label(midi_activity_color, &midi_activity_text);
+                    });
+                });
+                ui.separator();
+                ui.label("MIDI In:");
+                ui.colored_label(midi_activity_color, &midi_activity_text);
             });
         });
         if let Some(action) = file_action {
@@ -10601,84 +10681,6 @@ impl eframe::App for AppUI {
                 }
                 ui.separator();
                 ui.label(format!("Tracks: {}", self.project.track_order.len()));
-            });
-        });
-
-        // MIDI input bar
-        egui::TopBottomPanel::top("midi_bar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("MIDI:");
-                if self.midi_inputs.is_empty() {
-                    ui.weak("No MIDI inputs detected");
-                    if ui.small_button("Refresh").clicked() {
-                        self.refresh_midi_inputs();
-                    }
-                } else {
-                    let mut selected = self.selected_midi_input.clone();
-                    let mut changed = false;
-                    egui::ComboBox::from_id_salt("midi_input")
-                        .selected_text(selected.as_deref().unwrap_or("None"))
-                        .show_ui(ui, |ui| {
-                            if ui.selectable_value(&mut selected, None, "None").changed() {
-                                changed = true;
-                            }
-                            for device in &self.midi_inputs {
-                                if ui
-                                    .selectable_value(
-                                        &mut selected,
-                                        Some(device.name.clone()),
-                                        &device.name,
-                                    )
-                                    .changed()
-                                {
-                                    changed = true;
-                                }
-                            }
-                        });
-                    if changed {
-                        self.selected_midi_input = selected;
-                        self.restart_midi_monitor();
-                    }
-                    if ui.small_button("Refresh").clicked() {
-                        self.refresh_midi_inputs();
-                    }
-                    if let Some(activity) = self.midi_monitor.as_ref().map(|m| m.activity()) {
-                        self.midi_activity = activity;
-                    }
-                    let has_note = self.midi_activity.last_note.is_some();
-                    let active = self.midi_activity.active_notes > 0;
-                    let label = match self.midi_activity.last_note {
-                        Some(note) if active => format!(
-                            "{} vel {}",
-                            daw_engine::midi_note_name(note),
-                            self.midi_activity.last_velocity
-                        ),
-                        Some(note) => daw_engine::midi_note_name(note),
-                        None => "--".to_string(),
-                    };
-                    let color = if active {
-                        egui::Color32::GREEN
-                    } else if has_note {
-                        egui::Color32::from_gray(180)
-                    } else {
-                        egui::Color32::GRAY
-                    };
-                    ui.colored_label(color, label);
-                    ui.separator();
-                    if ui
-                        .small_button("Panic")
-                        .on_hover_text(
-                            "All Notes Off: stop hanging MIDI notes",
-                        )
-                        .clicked()
-                    {
-                        self.panic_midi();
-                    }
-                    ui.checkbox(&mut self.input_quantize, "Input Q")
-                        .on_hover_text(
-                            "Quantize recorded MIDI notes to the Arrange snap grid",
-                        );
-                }
             });
         });
 
