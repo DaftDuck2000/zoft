@@ -10524,7 +10524,11 @@ impl eframe::App for AppUI {
         // live sine synth can respond even when the transport is stopped.
         self.sync_live_midi_gains();
         self.poll_piano_roll_preview();
-        if let Some(activity) = self.midi_monitor.as_ref().map(|m| m.activity()) {
+        if let Some(activity) = self
+            .midi_monitor
+            .as_ref()
+            .map(|m| m.activity_for_channel(self.midi_input_channel))
+        {
             self.midi_activity = activity;
         }
         let audition = self.midi_audition_enabled();

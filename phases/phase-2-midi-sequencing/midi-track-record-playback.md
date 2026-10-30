@@ -15,7 +15,7 @@ Implement MIDI track: input routing, recording with chase events, loop recording
 - [x] MIDI keyboard input support: enumerate input ports with `midir`, choose one in the transport bar, and show live note/velocity activity
 - [x] MIDI track type: extends base track with MIDI-specific fields
 - [~] Input selection: Hardware source selection and channel filter implemented; virtual ports and MIDI from other tracks pending
-- [x] MIDI channel filter: All or channels 1–16
+- [x] MIDI channel filter: All or channels 1–16; activity display follows the filter
 - [x] Record arm: Captures MIDI to new clip on armed track
 - [x] MIDI clip trimming: Drag either edge in the arrange view; hidden notes are preserved
 - [x] MIDI clip moving: Drag the body in time or onto another MIDI/instrument track
@@ -149,6 +149,7 @@ MIDI Thru         Record Buffer      Chase Buffer
 - 2026-10-30: Moved all MIDI options into a top-bar MIDI menu. Source is a second-level menu that opens on hover, with Refresh, Panic, Input Quantize and live activity inside; the current input note remains visible next to the menu
 - 2026-10-30: Added a MIDI channel filter (All or 1–16). Filtered input is used for both recording and live audition
 - 2026-10-30: Added MIDI thru. The MIDI menu can select an output port and echo filtered input notes to it; Panic sends All Notes Off to the output as well
+- 2026-10-30: MIDI activity is now tracked per channel, so the MIDI menu shows note/velocity activity for the selected input channel instead of every channel
 - 2026-10-24: MIDI clip cropping. Dragging either edge of a MIDI clip in the arrange view trims its visible window using the Arrange snap grid. Trimming is non-destructive: events stay in content coordinates and a `content_offset` marks the visible start, so dragging the edge back out reveals the hidden notes again. The piano roll shades trimmed regions and keeps hidden notes editable
 - 2026-10-24: MIDI clip moving. Dragging a MIDI clip's body moves it in time using the Arrange snap settings (including relative snap), and dropping it on another MIDI/instrument track reattaches it there. Moves are undoable and update playback immediately
 - 2026-10-24: MIDI clip split and duplicate. `S` splits the selected MIDI clip at the playhead into two non-destructive visible windows, and `Ctrl+D` duplicates the clip immediately after its visible span. Both operations are undoable

@@ -128,10 +128,34 @@ impl Drop for MidiThru {
     }
 }
 
+/// Update one activity snapshot from a MIDI status byte.
+fn record_activity(
+    activity: &mut MidiActivity,
+    status: u8,
+    note: u8,
+    velocity: u8,
+) {
+    match status {
+        0x90 if velocity > 0 => {
+            activity.last_note = Some(note);
+            activity.last_velocity = velocity;
+            activity.notes_seen = activity.notes_seen.saturating_add(1);
+            activity.active_notes = activity.active_notes.saturating_add(1);
+        }
+        0x80 | 0x90 => {
+            activity.last_note = Some(note);
+            activity.last_velocity = 0;
+            activity.active_notes = activity.active_notes.saturating_sub(1);
+        }
+        _ => {}
+    }
+}
+
 /// Open a MIDI input port and track note activity from it. Dropping the
 /// monitor closes the port.
 pub struct MidiMonitor {
     shared: Arc<Mutex<MidiActivity>>,
+    channels: Arc<Mutex<[MidiActivity; 16]>>,
     events: Arc<Mutex<Vec<MidiInputEvent>>>,
     connection: Option<midir::MidiInputConnection<()>>,
 }
@@ -147,6 +171,8 @@ impl MidiMonitor {
 
         let shared = Arc::new(Mutex::new(MidiActivity::default()));
         let state = Arc::clone(&shared);
+        let channels = Arc::new(Mutex::new([MidiActivity::default(); 16]));
+        let channel_state = Arc::clone(&channels);
         let events = Arc::new(Mutex::new(Vec::<MidiInputEvent>::new()));
         let event_queue = Arc::clone(&events);
         let connection = input.connect(
@@ -177,22 +203,13 @@ impl MidiMonitor {
                         });
                     }
                 }
-                let Ok(mut activity) = state.lock() else {
-                    return;
-                };
-                match status {
-                    0x90 if velocity > 0 => {
-                        activity.last_note = Some(note);
-                        activity.last_velocity = velocity;
-                        activity.notes_seen = activity.notes_seen.saturating_add(1);
-                        activity.active_notes = activity.active_notes.saturating_add(1);
+                if let Ok(mut activity) = state.lock() {
+                    record_activity(&mut activity, status, note, velocity);
+                }
+                if let Ok(mut channels) = channel_state.lock() {
+                    if let Some(activity) = channels.get_mut(channel as usize) {
+                        record_activity(activity, status, note, velocity);
                     }
-                    0x80 | 0x90 => {
-                        activity.last_note = Some(note);
-                        activity.last_velocity = 0;
-                        activity.active_notes = activity.active_notes.saturating_sub(1);
-                    }
-                    _ => {}
                 }
             },
             (),
@@ -201,6 +218,7 @@ impl MidiMonitor {
 
         Ok(Self {
             shared,
+            channels,
             events,
             connection: Some(connection),
         })
@@ -220,6 +238,18 @@ impl MidiMonitor {
             .lock()
             .map(|activity| *activity)
             .unwrap_or_default()
+    }
+
+    /// Snapshot activity for one MIDI channel, or all channels when `None`.
+    pub fn activity_for_channel(&self, channel: Option<u8>) -> MidiActivity {
+        match channel {
+            Some(channel) if channel < 16 => self
+                .channels
+                .lock()
+                .map(|channels| channels[channel as usize])
+                .unwrap_or_default(),
+            _ => self.activity(),
+        }
     }
 }
 
@@ -243,6 +273,18 @@ pub fn midi_note_name(note: u8) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn activity_tracks_note_on_and_off() {
+        let mut activity = MidiActivity::default();
+        record_activity(&mut activity, 0x90, 60, 100);
+        assert_eq!(activity.last_note, Some(60));
+        assert_eq!(activity.last_velocity, 100);
+        assert_eq!(activity.active_notes, 1);
+        record_activity(&mut activity, 0x80, 60, 0);
+        assert_eq!(activity.active_notes, 0);
+        assert_eq!(activity.last_velocity, 0);
+    }
 
     #[test]
     fn note_names_use_scientific_pitch() {
