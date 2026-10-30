@@ -13356,6 +13356,7 @@ impl AppUI {
             return;
         }
         let end_secs = self.playhead_secs.max(start_secs + 0.05);
+        let recorded_secs = started_at.elapsed().as_secs_f64();
         let project_sr = self.project.sample_rate.max(1) as f64;
         let start_sample = (start_secs.max(0.0) * project_sr) as u64;
         let end_sample = (end_secs.max(0.0) * project_sr) as u64;
@@ -13397,7 +13398,7 @@ impl AppUI {
         let loop_len_secs = (self.loop_end_secs - self.loop_start_secs).max(0.0);
         if self.loop_enabled
             && loop_len_secs > 0.05
-            && end_secs - start_secs >= loop_len_secs * 0.95
+            && recorded_secs >= loop_len_secs * 0.95
         {
             let loop_start_sample =
                 (self.loop_start_secs.max(0.0) * project_sr) as u64;
