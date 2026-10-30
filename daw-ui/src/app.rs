@@ -3209,6 +3209,14 @@ impl AppUI {
         })
     }
 
+    /// Stop all hanging MIDI notes and clear scheduled playback notes.
+    fn panic_midi(&mut self) {
+        self.engine.all_notes_off();
+        self.engine.set_playback_notes(Vec::new());
+        self.piano_roll_preview = None;
+        self.midi_activity = daw_engine::MidiActivity::default();
+    }
+
     /// Track whose fader/pan should shape live MIDI audition. Prefer the armed
     /// track, then the track containing the open piano-roll clip, then the
     /// first monitored MIDI/instrument track.
@@ -10526,6 +10534,16 @@ impl eframe::App for AppUI {
                         egui::Color32::GRAY
                     };
                     ui.colored_label(color, label);
+                    ui.separator();
+                    if ui
+                        .small_button("Panic")
+                        .on_hover_text(
+                            "All Notes Off: stop hanging MIDI notes",
+                        )
+                        .clicked()
+                    {
+                        self.panic_midi();
+                    }
                 }
             });
         });

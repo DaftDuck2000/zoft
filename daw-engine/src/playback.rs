@@ -1387,4 +1387,15 @@ mod tests {
             .step_by(2)
             .all(|sample| sample.abs() < 1e-6));
     }
+
+    #[test]
+    fn live_midi_synth_all_notes_off_silences_everything() {
+        let mut synth = LiveMidiSynth::new(1000);
+        synth.note_on(60, 127);
+        synth.note_on(67, 127);
+        synth.all_notes_off();
+        let mut out = [0.0f32; 100];
+        synth.fill(&mut out, 1);
+        assert!(out.iter().all(|sample| sample.abs() < 1e-6));
+    }
 }
