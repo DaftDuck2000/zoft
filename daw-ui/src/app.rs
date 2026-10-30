@@ -2014,6 +2014,8 @@ struct PianoRollWindow {
     cc_lanes: Vec<u8>,
     show_velocity_lane: bool,
     show_ghost_notes: bool,
+    /// Tint pitch rows that belong to the selected scale.
+    show_scale_highlight: bool,
     /// Clip snapshot while drawing control-change points.
     cc_drag_before: Option<MidiClip>,
 }
@@ -2040,6 +2042,7 @@ impl PianoRollWindow {
             cc_lanes: Vec::new(),
             show_velocity_lane: true,
             show_ghost_notes: true,
+            show_scale_highlight: false,
             cc_drag_before: None,
         }
     }
@@ -7080,6 +7083,12 @@ impl AppUI {
                         .on_hover_text(
                             "Show notes from other tracks/clips as timing references",
                         );
+                    ui.checkbox(&mut window.show_scale_highlight, "Scale")
+                        .on_hover_text(format!(
+                            "Highlight rows in {} {}",
+                            PITCH_CLASS_NAMES[window.tools.scale_root as usize],
+                            window.tools.scale_type.label()
+                        ));
                     ui.separator();
                     ui.label("Snap:");
                     egui::ComboBox::from_id_salt("piano_roll_snap")
@@ -7863,6 +7872,12 @@ impl AppUI {
                         continue;
                     }
                     let black = is_black_key(pitch);
+                    let in_scale = window.show_scale_highlight
+                        && pitch_in_scale(
+                            pitch,
+                            window.tools.scale_root,
+                            window.tools.scale_type.intervals(),
+                        );
                     painter.rect_filled(
                         row,
                         0.0,
@@ -7872,20 +7887,32 @@ impl AppUI {
                             egui::Color32::from_gray(36)
                         },
                     );
+                    if in_scale {
+                        painter.rect_filled(
+                            row,
+                            0.0,
+                            egui::Color32::from_rgba_unmultiplied(
+                                80, 180, 120, 22,
+                            ),
+                        );
+                    }
 
                     let key = egui::Rect::from_min_max(
                         egui::pos2(keyboard.left(), y0.max(grid.top())),
                         egui::pos2(keyboard.right(), y1.min(grid.bottom())),
                     );
-                    painter.rect_filled(
-                        key,
-                        0.0,
+                    let key_color = if in_scale {
                         if black {
-                            egui::Color32::from_gray(18)
+                            egui::Color32::from_rgb(40, 72, 56)
                         } else {
-                            egui::Color32::from_gray(205)
-                        },
-                    );
+                            egui::Color32::from_rgb(188, 224, 202)
+                        }
+                    } else if black {
+                        egui::Color32::from_gray(18)
+                    } else {
+                        egui::Color32::from_gray(205)
+                    };
+                    painter.rect_filled(key, 0.0, key_color);
                     if pitch % 12 == 0 {
                         painter.text(
                             egui::pos2(keyboard.left() + 2.0, key.center().y),
@@ -13891,7 +13918,7 @@ mod tests {
         knob_from_normalized, knob_to_normalized, load_wav_interleaved,
         load_wav_range_interleaved, loop_range_frames, measure_integrated_loudness,
         merge_continuous_edit, metronome_config, midi_clip_note_spans, midi_clip_notes,
-        cc_pan_gains, midi_cc_value_at,
+        cc_pan_gains, midi_cc_value_at, pitch_in_scale,
         slider_wheel_value, slider_wheel_value_with_step,
         slider_wheel_log_value,
         midi_clip_content_notes, midi_clips_in_marquee, note_name, processed_file_stem,
@@ -14273,6 +14300,19 @@ mod tests {
         assert_eq!(midi_cc_value_at(&points, 240, 64), 90);
         assert_eq!(midi_cc_value_at(&points, 500, 64), 90);
         assert_eq!(midi_cc_value_at(&[], 500, 64), 64);
+    }
+
+    #[test]
+    fn pitch_in_scale_matches_major_and_minor() {
+        let major = [0, 2, 4, 5, 7, 9, 11];
+        assert!(pitch_in_scale(60, 0, &major));
+        assert!(!pitch_in_scale(61, 0, &major));
+        assert!(pitch_in_scale(72, 0, &major));
+
+        let minor = [0, 2, 3, 5, 7, 8, 10];
+        assert!(pitch_in_scale(60, 0, &minor));
+        assert!(pitch_in_scale(63, 0, &minor));
+        assert!(!pitch_in_scale(64, 0, &minor));
     }
 
     #[test]
