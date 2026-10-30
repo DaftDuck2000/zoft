@@ -71,6 +71,8 @@ pub struct PlayableNote {
     /// Per-note pan gains from CC10, applied before the track pan.
     pub pan_left: f32,
     pub pan_right: f32,
+    /// Per-note gain from CC7 volume and CC11 expression.
+    pub gain: f32,
 }
 
 /// One built-in effect in a track's insert chain, prepared for playback.
@@ -612,7 +614,8 @@ impl PlaybackMixer {
         if pos < note.start_frame || pos >= note.end_frame {
             return;
         }
-        let sample = midi_note_sample(note, pos, self.out_sample_rate);
+        let sample =
+            midi_note_sample(note, pos, self.out_sample_rate) * note.gain.clamp(0.0, 1.0);
         if sample != 0.0 {
             let pan_left = note.pan_left;
             let pan_right = note.pan_right;
@@ -1072,6 +1075,7 @@ mod tests {
             track: 0,
             pan_left: 1.0,
             pan_right: 1.0,
+            gain: 1.0,
         }]);
 
         let mut out = [0.0f32; 40];
@@ -1284,6 +1288,7 @@ mod tests {
             track: 0,
             pan_left: 1.0,
             pan_right: 0.0,
+            gain: 1.0,
         }]);
 
         let mut out = [0.0f32; 200];
@@ -1300,6 +1305,32 @@ mod tests {
     }
 
     #[test]
+    fn midi_note_gain_scales_the_voice() {
+        let note = |gain: f32| PlayableNote {
+            start_frame: 0,
+            end_frame: 100,
+            note: 69,
+            velocity: 1.0,
+            track: 0,
+            pan_left: 1.0,
+            pan_right: 1.0,
+            gain,
+        };
+        let mut full_mixer = PlaybackMixer::new(1000, 1, Vec::new(), 0);
+        full_mixer.set_midi_notes(vec![note(1.0)]);
+        let mut quiet_mixer = PlaybackMixer::new(1000, 1, Vec::new(), 0);
+        quiet_mixer.set_midi_notes(vec![note(0.5)]);
+
+        let mut full = [0.0f32; 100];
+        let mut quiet = [0.0f32; 100];
+        full_mixer.fill_unclamped(&mut full);
+        quiet_mixer.fill_unclamped(&mut quiet);
+        for (loud, soft) in full.iter().zip(quiet.iter()) {
+            assert!((loud * 0.5 - soft).abs() < 1e-4);
+        }
+    }
+
+    #[test]
     fn midi_notes_follow_their_track_fader() {
         let mut mixer = PlaybackMixer::new(1000, 1, Vec::new(), 0);
         mixer.set_midi_notes(vec![PlayableNote {
@@ -1310,6 +1341,7 @@ mod tests {
             track: 0,
             pan_left: 1.0,
             pan_right: 1.0,
+            gain: 1.0,
         }]);
         mixer.set_tracks(vec![PlayableTrack {
             index: 0,

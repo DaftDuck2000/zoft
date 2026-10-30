@@ -22,7 +22,7 @@ Implement MIDI track: input routing, recording with chase events, loop recording
 - [x] MIDI multi-selection: click, Ctrl/Shift+click, marquee selection, group move/delete/duplicate/copy/paste/mute
 - [x] Mixed audio/MIDI selection: both sets can be selected and moved together
 - [x] Live MIDI audition while an armed/monitored MIDI or instrument track is recording
-- [ ] Chase events: Send pending CC/pitch bend/program change on seek/play
+- [~] Chase events: CC10 pan, CC7 volume and CC11 expression follow the seek position; pitch bend/program/other CC pending
 - [ ] Loop recording: Overdub (merge) or new take (lanes)
 - [ ] Metronome count-in: Configurable bars before recording
 - [ ] MIDI thru: Echo input to output (for monitoring external gear)
@@ -127,7 +127,7 @@ MIDI Thru         Record Buffer      Chase Buffer
 - [x] MIDI clips support the same multi-selection and group editing as audio clips
 - [x] Audio and MIDI selections can be combined and moved together
 - [x] Per-track real-time inserts (saturation, filter, bit crusher, tremolo) apply to audio and MIDI playback
-- [ ] Chase sends CC/pitch bend on seek
+- [~] Chase sends CC/pitch bend on seek (CC10/CC7/CC11 implemented)
 - [ ] Loop recording: overdub merges, new take creates lane
 - [ ] MIDI thru echoes to output port
 - [ ] Panic sends All Notes Off + Reset Controllers
@@ -141,6 +141,7 @@ MIDI Thru         Record Buffer      Chase Buffer
 - 2026-10-24: Live MIDI audition and arrange note previews. Incoming notes are drained every frame and fed to a dedicated polyphonic sine synth in the output callback, independent of transport playback; MIDI/instrument tracks follow the Off/Auto/On monitor switch, so an armed track is heard while recording. MIDI clips now draw a miniature note lane in the arrange view using the project tempo map, so notes are visible without opening the piano roll. Real-time track inserts (saturation, filter, bit crusher, tremolo) were added to every track type and run before the fader; the old clip right-click effects entry point was removed
 - 2026-10-29: Live MIDI audition now follows the active MIDI/instrument track's fader and pan, so panning a monitored track is audible while playing live as well as during playback
 - 2026-10-29: MIDI playback now reads CC10 Pan from clip events; notes are panned by the latest CC10 value at their start
+- 2026-10-30: CC chase for MIDI playback. CC10 pan, CC7 volume and CC11 expression are sampled at the seek position for notes already sounding, so seeking into a CC curve restores the correct state. CC7 and CC11 scale note gain
 - 2026-10-24: MIDI clip cropping. Dragging either edge of a MIDI clip in the arrange view trims its visible window using the Arrange snap grid. Trimming is non-destructive: events stay in content coordinates and a `content_offset` marks the visible start, so dragging the edge back out reveals the hidden notes again. The piano roll shades trimmed regions and keeps hidden notes editable
 - 2026-10-24: MIDI clip moving. Dragging a MIDI clip's body moves it in time using the Arrange snap settings (including relative snap), and dropping it on another MIDI/instrument track reattaches it there. Moves are undoable and update playback immediately
 - 2026-10-24: MIDI clip split and duplicate. `S` splits the selected MIDI clip at the playhead into two non-destructive visible windows, and `Ctrl+D` duplicates the clip immediately after its visible span. Both operations are undoable

@@ -263,6 +263,7 @@ fn playable_note(
     track: u32,
     pan_left: f32,
     pan_right: f32,
+    gain: f32,
     to_frame: &impl Fn(u64) -> u64,
 ) -> PlayableNote {
     let start_frame = to_frame(start_tick);
@@ -275,7 +276,18 @@ fn playable_note(
         track,
         pan_left,
         pan_right,
+        gain,
     }
+}
+
+/// Latest value at or before `tick`, or `default` when no point exists.
+fn midi_cc_value_at(points: &[MidiCcPoint], tick: u64, default: u8) -> u8 {
+    points
+        .iter()
+        .rev()
+        .find(|point| point.tick <= tick)
+        .map(|point| point.value)
+        .unwrap_or(default)
 }
 
 /// Convert a MIDI CC10 pan value (0–127) to equal-power left/right gains.
@@ -12129,6 +12141,10 @@ impl AppUI {
             let sample = self.project.tempo_map.tick_to_sample(tick, project_sr);
             (sample as f64 * out_rate / project_sr).round() as u64
         };
+        let seek_tick = self.project.tempo_map.sample_to_tick(
+            (self.playhead_secs.max(0.0) * project_sr).round() as u64,
+            project_sr,
+        );
 
         for (track_index, track_id) in self.project.track_order.iter().enumerate() {
             let Some(track) = self.project.tracks.get(track_id) else {
@@ -12145,15 +12161,22 @@ impl AppUI {
                     continue;
                 }
                 let clip_start = clip.timeline_position.tick;
+                let content_seek = (seek_tick as i64
+                    - clip.timeline_position.tick as i64
+                    + clip.content_offset as i64)
+                    .max(0) as u64;
                 let cc_pan = midi_clip_cc_points(clip, 10);
+                let cc_volume = midi_clip_cc_points(clip, 7);
+                let cc_expression = midi_clip_cc_points(clip, 11);
                 for (start, end, note, velocity) in midi_clip_note_spans(clip) {
                     let content_tick = clip.content_offset.saturating_add(start);
-                    let pan_value = cc_pan
-                        .iter()
-                        .rev()
-                        .find(|point| point.tick <= content_tick)
-                        .map(|point| point.value)
-                        .unwrap_or(64);
+                    let sample_tick = content_tick.max(content_seek);
+                    let pan_value = midi_cc_value_at(&cc_pan, sample_tick, 64);
+                    let volume = midi_cc_value_at(&cc_volume, sample_tick, 127);
+                    let expression =
+                        midi_cc_value_at(&cc_expression, sample_tick, 127);
+                    let gain = (volume as f32 / 127.0)
+                        * (expression as f32 / 127.0);
                     let (pan_left, pan_right) = cc_pan_gains(pan_value);
                     notes.push(playable_note(
                         clip_start.saturating_add(start),
@@ -12163,6 +12186,7 @@ impl AppUI {
                         track_index as u32,
                         pan_left,
                         pan_right,
+                        gain,
                         &to_frame,
                     ));
                 }
@@ -13867,7 +13891,7 @@ mod tests {
         knob_from_normalized, knob_to_normalized, load_wav_interleaved,
         load_wav_range_interleaved, loop_range_frames, measure_integrated_loudness,
         merge_continuous_edit, metronome_config, midi_clip_note_spans, midi_clip_notes,
-        cc_pan_gains,
+        cc_pan_gains, midi_cc_value_at,
         slider_wheel_value, slider_wheel_value_with_step,
         slider_wheel_log_value,
         midi_clip_content_notes, midi_clips_in_marquee, note_name, processed_file_stem,
@@ -14228,6 +14252,27 @@ mod tests {
         let log_down = slider_wheel_log_value(100.0, 20.0, 20_000.0, -1.0);
         assert!((log_up - 141.25).abs() < 0.1);
         assert!((log_down - 70.79).abs() < 0.1);
+    }
+
+    #[test]
+    fn midi_cc_value_at_uses_latest_point() {
+        let points = vec![
+            MidiCcPoint {
+                tick: 0,
+                value: 10,
+                channel: 0,
+            },
+            MidiCcPoint {
+                tick: 240,
+                value: 90,
+                channel: 0,
+            },
+        ];
+        assert_eq!(midi_cc_value_at(&points, 0, 64), 10);
+        assert_eq!(midi_cc_value_at(&points, 239, 64), 10);
+        assert_eq!(midi_cc_value_at(&points, 240, 64), 90);
+        assert_eq!(midi_cc_value_at(&points, 500, 64), 90);
+        assert_eq!(midi_cc_value_at(&[], 500, 64), 64);
     }
 
     #[test]
