@@ -96,7 +96,7 @@ struct UiState {
 - 2026-10-30: MIDI controls moved into a top-bar MIDI menu. The Source selector is a second-level menu, and live note/velocity activity stays visible next to the menu
 - 2026-10-30: Added ruler markers. Shift+M or the + Marker button drops a named marker at the playhead; click a flag to jump there and right-click to delete it. Marker edits are undoable
 - 2026-10-30: Added ◄◄ and ►► transport buttons plus Home/End shortcuts to jump to the project start or end
-- 2026-10-30: Added track reordering. Drag the ⠿ handle at the left of a track header to move it; the new order is undoable
+- 2026-10-30: Added track reordering. Drag the :: handle at the left of a track header to move it; the new order is undoable
 
 ## Future Tasks (Post-Phase 0)
 

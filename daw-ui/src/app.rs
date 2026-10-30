@@ -11119,7 +11119,7 @@ impl eframe::App for AppUI {
                     self.toggle_playback();
                 }
                 if ui
-                    .button("◄◄")
+                    .button("|<")
                     .on_hover_text("Jump to the start (Home)")
                     .clicked()
                 {
@@ -11127,7 +11127,7 @@ impl eframe::App for AppUI {
                     self.playhead_secs = 0.0;
                 }
                 if ui
-                    .button("►►")
+                    .button(">|")
                     .on_hover_text("Jump to the end (End)")
                     .clicked()
                 {
@@ -11571,7 +11571,7 @@ impl eframe::App for AppUI {
                                 let handle = ui
                                     .add(
                                         egui::Label::new(
-                                            egui::RichText::new("⠿")
+                                            egui::RichText::new("::")
                                                 .color(egui::Color32::from_gray(130)),
                                         )
                                         .sense(egui::Sense::drag()),
