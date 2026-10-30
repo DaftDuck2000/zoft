@@ -94,6 +94,7 @@ struct UiState {
 - 2026-10-21: Post-phase updates: ruler seek and loop lane, zoom/scroll, loop/In/Out, metronome, tempo/tap, track M/S/R/Mon/volume, Clip Audio window, History panel
 - 2026-10-23: Track list rows are height-matched to the arrange lanes; **+A**/**+M** add audio/MIDI tracks and **×** removes a track (both undoable); a dedicated MIDI bar lists inputs, auto-connects the first keyboard, and shows live note/velocity activity with a Refresh button
 - 2026-10-30: MIDI controls moved into a top-bar MIDI menu. The Source selector is a second-level menu, and live note/velocity activity stays visible next to the menu
+- 2026-10-30: Added ruler markers. Shift+M or the + Marker button drops a named marker at the playhead; click a flag to jump there and right-click to delete it. Marker edits are undoable
 
 ## Future Tasks (Post-Phase 0)
 
@@ -104,7 +105,7 @@ struct UiState {
 - [✓] **Slider mouse wheel**: Wheel over a slider moves it by 5% of its travel; up increases, down decreases
 - [ ] **Vertical scroll**: Track list overflow handling
 - [✓] **Loop range UI**: Drag the ruler loop lane or use In/Out at the playhead
-- [ ] **Markers UI**: Flag icons on ruler, click to jump
+- [x] **Markers UI**: Flag icons on ruler, click to jump
 - [ ] **Track reordering**: Drag tracks to reorder in track list
 - [ ] **Track context menu**: Right-click to add/remove/duplicate tracks
 - [✓] **Track header controls**: M/S/R, monitor mode, volume fader and pan knob

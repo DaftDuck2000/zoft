@@ -3,7 +3,7 @@
 use anyhow::Result;
 use daw_core::audio_pool::AudioFileRef;
 use daw_core::clip::{AudioClip, ClipId, Fade, FadeCurve, MidiClip, MidiEvent, MidiMessage, TimeStretchMode, TimelinePos};
-use daw_core::project::{BitDepth, Color, TempoMap};
+use daw_core::project::{BitDepth, Color, MarkerId, MarkerRegion, TempoMap};
 use daw_core::serialization::ProjectSerialization;
 use daw_core::track::{FilterMode, InsertSlot, MonitorMode, PanLaw, Track, TrackId, TrackEffect, TrackType};
 use daw_core::undo::History;
@@ -1702,6 +1702,10 @@ enum EditAction {
         from: MidiClip,
         to: MidiClip,
     },
+    /// Add a marker region to the ruler.
+    AddMarker { marker: MarkerRegion },
+    /// Remove a marker region from the ruler.
+    RemoveMarker { marker: MarkerRegion },
     /// Several edits applied and undone as one history step.
     Group {
         actions: Vec<EditAction>,
@@ -1788,6 +1792,12 @@ impl EditAction {
             EditAction::DetachMidi { .. } => "Delete MIDI clip".to_string(),
             EditAction::MoveMidi { .. } => "Move MIDI clip".to_string(),
             EditAction::MidiClip { .. } => "Edit MIDI clip".to_string(),
+            EditAction::AddMarker { marker } => {
+                format!("Add marker: {}", marker.name)
+            }
+            EditAction::RemoveMarker { marker } => {
+                format!("Remove marker: {}", marker.name)
+            }
             EditAction::Group { label, .. } => label.clone(),
         }
     }
@@ -3920,6 +3930,36 @@ impl AppUI {
                     } else {
                         from.clone()
                     };
+                }
+            }
+            EditAction::AddMarker { marker } => {
+                if forward {
+                    if !self
+                        .project
+                        .marker_regions
+                        .iter()
+                        .any(|existing| existing.id == marker.id)
+                    {
+                        self.project.marker_regions.push(marker.clone());
+                    }
+                } else {
+                    self.project
+                        .marker_regions
+                        .retain(|existing| existing.id != marker.id);
+                }
+            }
+            EditAction::RemoveMarker { marker } => {
+                if forward {
+                    self.project
+                        .marker_regions
+                        .retain(|existing| existing.id != marker.id);
+                } else if !self
+                    .project
+                    .marker_regions
+                    .iter()
+                    .any(|existing| existing.id == marker.id)
+                {
+                    self.project.marker_regions.push(marker.clone());
                 }
             }
             EditAction::Group { actions, .. } => {
@@ -11027,6 +11067,13 @@ impl eframe::App for AppUI {
                     self.metronome_enabled = !self.metronome_enabled;
                     self.sync_playback_metronome();
                 }
+                if ui
+                    .small_button("+ Marker")
+                    .on_hover_text("Add a marker at the playhead (Shift+M)")
+                    .clicked()
+                {
+                    self.add_marker_at_playhead();
+                }
 
                 ui.separator();
                 ui.label(format!("Project: {}", self.project.name));
@@ -11717,6 +11764,8 @@ impl eframe::App for AppUI {
             };
             let painter = ui.painter();
             let project_sr = self.project.sample_rate.max(1) as f64;
+            let markers = self.project.marker_regions.clone();
+            let mut marker_flags: Vec<(MarkerRegion, egui::Rect, f64)> = Vec::new();
             let track_height = TRACK_HEIGHT;
             let ruler_height = RULER_HEIGHT;
             // Upper part of the ruler is the loop lane (drag to set the loop,
@@ -11820,6 +11869,51 @@ impl eframe::App for AppUI {
                 }
             }
 
+            // ---- Markers ----
+            for marker in &markers {
+                let sample = self
+                    .project
+                    .tempo_map
+                    .tick_to_sample(marker.start_tick, project_sr);
+                let secs = sample as f64 / project_sr;
+                let x = view.x(rect, secs);
+                if x < rect.left() - 8.0 || x > rect.right() + 8.0 {
+                    continue;
+                }
+                let color = egui::Color32::from_rgb(
+                    marker.color.0,
+                    marker.color.1,
+                    marker.color.2,
+                );
+                painter.line_segment(
+                    [
+                        egui::pos2(x, rect.top()),
+                        egui::pos2(x, rect.bottom()),
+                    ],
+                    egui::Stroke::new(1.0_f32, color.gamma_multiply(0.45)),
+                );
+                let flag = egui::Rect::from_min_max(
+                    egui::pos2(x, rect.top() + 1.0),
+                    egui::pos2((x + 78.0).min(rect.right()), rect.top() + 16.0),
+                );
+                painter.rect_filled(
+                    egui::Rect::from_min_max(
+                        egui::pos2(x, rect.top() + 1.0),
+                        egui::pos2(x + 9.0, rect.top() + 16.0),
+                    ),
+                    2.0,
+                    color,
+                );
+                painter.text(
+                    egui::pos2(x + 11.0, rect.top() + 2.0),
+                    egui::Align2::LEFT_TOP,
+                    &marker.name,
+                    egui::FontId::proportional(9.0),
+                    color,
+                );
+                marker_flags.push((marker.clone(), flag, secs));
+            }
+
             // ---- Ruler interaction ----
             // Upper part = loop lane: dragging sets a new loop range (Logic's
             // cycle area). Lower part = seek lane: click/drag places the
@@ -11829,6 +11923,40 @@ impl eframe::App for AppUI {
                 ui.id().with("ruler_seek"),
                 egui::Sense::click_and_drag(),
             );
+
+            // Marker flags sit above the ruler and take click priority.
+            let mut marker_handled = false;
+            let mut marker_seek = None;
+            let mut marker_delete = None;
+            for (marker, flag, secs) in &marker_flags {
+                let response = ui.interact(
+                    *flag,
+                    ui.id().with(("marker_flag", marker.id.0)),
+                    egui::Sense::click(),
+                );
+                if response.clicked() {
+                    marker_seek = Some(*secs);
+                    marker_handled = true;
+                }
+                if response.secondary_clicked() {
+                    marker_delete = Some(marker.clone());
+                    marker_handled = true;
+                }
+                response.on_hover_text(format!(
+                    "{} — click to jump, right-click to delete",
+                    marker.name
+                ));
+            }
+            if let Some(secs) = marker_seek {
+                if self.playing || self.recording {
+                    self.pause_transport();
+                }
+                self.playhead_secs = secs.max(0.0);
+            }
+            if let Some(marker) = marker_delete {
+                self.remove_marker(marker);
+            }
+
             let playhead_x_before = view.x(rect, self.playhead_secs);
             let pointer_on_playhead = pointer_pos
                 .map(|p| (p.x - playhead_x_before).abs() <= 8.0)
@@ -11881,13 +12009,15 @@ impl eframe::App for AppUI {
             }
 
             let dragging_loop = self.loop_drag_anchor_secs.is_some();
-            let seek_pos = if !dragging_loop
+            let seek_pos = if !marker_handled
+                && !dragging_loop
                 && ruler_response.dragged_by(egui::PointerButton::Primary)
             {
                 ruler_response.interact_pointer_pos()
-            } else if ruler_response.clicked() && !pointer_on_playhead {
+            } else if !marker_handled && ruler_response.clicked() && !pointer_on_playhead {
                 ruler_response.interact_pointer_pos()
-            } else if pressed
+            } else if !marker_handled
+                && pressed
                 && ruler_response.hovered()
                 && !pointer_on_playhead
                 && !pointer_in_loop_lane
@@ -12507,8 +12637,11 @@ impl AppUI {
             self.split_selected_clip();
         }
 
-        // M: mute or unmute the selected clips
-        if ctx.input(|i| i.key_pressed(Key::M)) {
+        // Shift+M: add a marker at the playhead. M: mute/unmute the selected
+        // clips.
+        if ctx.input(|i| i.modifiers.shift && i.key_pressed(Key::M)) {
+            self.add_marker_at_playhead();
+        } else if ctx.input(|i| i.key_pressed(Key::M)) {
             self.toggle_selected_clips_muted();
         }
 
@@ -13218,6 +13351,36 @@ impl AppUI {
         };
         track.color = Color::track_color(index);
         let action = EditAction::AddTrack { track };
+        self.apply_action(&action, true);
+        self.push_undo(action, false);
+        self.after_edit();
+    }
+
+    /// Drop a point marker at the playhead.
+    fn add_marker_at_playhead(&mut self) {
+        let project_sr = self.project.sample_rate.max(1) as f64;
+        let sample = (self.playhead_secs.max(0.0) * project_sr) as u64;
+        let tick = self
+            .project
+            .tempo_map
+            .sample_to_tick(sample, project_sr);
+        let name = format!("Marker {}", self.project.marker_regions.len() + 1);
+        let marker = MarkerRegion {
+            id: MarkerId::new(),
+            name,
+            start_tick: tick,
+            end_tick: tick,
+            color: Color(230, 180, 70, 255),
+        };
+        let action = EditAction::AddMarker { marker };
+        self.apply_action(&action, true);
+        self.push_undo(action, false);
+        self.after_edit();
+    }
+
+    /// Remove a marker from the ruler.
+    fn remove_marker(&mut self, marker: MarkerRegion) {
+        let action = EditAction::RemoveMarker { marker };
         self.apply_action(&action, true);
         self.push_undo(action, false);
         self.after_edit();
