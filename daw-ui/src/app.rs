@@ -2592,6 +2592,8 @@ struct AppUI {
     track_meter_holds: HashMap<TrackId, f32>,
     /// Smoothed master L/R levels shown in the FX Rack header.
     master_meter_levels: [f32; 2],
+    /// Insert chain copied from an FX Rack column.
+    insert_clipboard: Option<Vec<InsertSlot>>,
     /// Original insert chain for the current effect-parameter gesture, pushed
     /// as one undo entry when the pointer is released.
     pending_insert_edit: Option<(TrackId, Vec<InsertSlot>)>,
@@ -2720,6 +2722,7 @@ impl AppUI {
             track_meter_levels: HashMap::new(),
             track_meter_holds: HashMap::new(),
             master_meter_levels: [0.0, 0.0],
+            insert_clipboard: None,
             pending_insert_edit: None,
             piano_roll: None,
             piano_roll_preview: None,
@@ -6811,6 +6814,8 @@ impl AppUI {
         let mut changes: Vec<(TrackId, Vec<InsertSlot>)> = Vec::new();
         let mut track_changes: Vec<(TrackId, TrackShape, TrackShape, bool)> =
             Vec::new();
+        let clipboard = self.insert_clipboard.clone();
+        let mut copy_chain = None;
 
         egui::Window::new("FX Rack")
             .id(egui::Id::new("fx_rack"))
@@ -7006,6 +7011,40 @@ impl AppUI {
                                                 draw_track_meter(
                                                     ui, meter, hold,
                                                 );
+                                                ui.horizontal(|ui| {
+                                                    if ui
+                                                        .small_button("Copy FX")
+                                                        .on_hover_text(
+                                                            "Copy this track's insert chain",
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        copy_chain = Some(
+                                                            inserts.clone(),
+                                                        );
+                                                    }
+                                                    if ui
+                                                        .add_enabled(
+                                                            clipboard.is_some(),
+                                                            egui::Button::new(
+                                                                "Paste FX",
+                                                            ),
+                                                        )
+                                                        .on_hover_text(
+                                                            "Replace this track's inserts with the copied chain",
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        if let Some(chain) =
+                                                            &clipboard
+                                                        {
+                                                            changes.push((
+                                                                *track_id,
+                                                                chain.clone(),
+                                                            ));
+                                                        }
+                                                    }
+                                                });
                                                 ui.separator();
                                                 if show_insert_slots(
                                                     ui,
@@ -7044,6 +7083,9 @@ impl AppUI {
         if !open {
             self.fx_rack_open = false;
             self.commit_pending_insert_edit();
+        }
+        if let Some(chain) = copy_chain {
+            self.insert_clipboard = Some(chain);
         }
         for (track_id, from, to, merge) in track_changes {
             if let Some(track) = self.project.tracks.get_mut(&track_id) {

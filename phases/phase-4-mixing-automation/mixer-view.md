@@ -21,7 +21,7 @@ Full mixer console: channel strips, meter bridge, insert/send racks, routing mat
 - [ ] Routing matrix: Visual patchbay for I/O, buses, sidechains
 - [ ] Solo/Mute groups: Exclusive solo, solo safe, mute groups
 - [ ] VCA faders: Control group level, trim automation
-- [ ] Channel strip presets: Save/load strip state
+- [~] Channel strip presets: Copy/paste insert chains implemented; named and persistent presets pending
 - [ ] Mixer layouts: Narrow, wide, custom column visibility
 - [ ] Meter bridge pop-out: Detachable window
 - [ ] Touch/control surface: MCU/HUI protocol support
@@ -150,6 +150,7 @@ struct SoloSystem {
 - 2026-10-28: FX Rack insert parameters now use Logic-style rotary knobs instead of sliders. Pan is a knob in both the track list and FX Rack, and mouse-wheel adjustment works on knobs as well
 - 2026-10-28: Added live per-track peak/RMS meters to the FX Rack channel strips, with decay when playback stops
 - 2026-10-29: Added peak-hold ticks to the track meters and a stereo L/R master meter in the FX Rack header
+- 2026-10-30: Added Copy FX / Paste FX to every FX Rack column, providing a basic insert-chain preset workflow between tracks
 - YYYY-MM-DD: Channel strip UI
 - YYYY-MM-DD: Meter bridge + ballistics
 - YYYY-MM-DD: Insert/send racks
