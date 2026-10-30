@@ -11,6 +11,13 @@ pub struct MidiInputInfo {
     pub name: String,
 }
 
+/// One available MIDI output port.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MidiOutputInfo {
+    pub index: usize,
+    pub name: String,
+}
+
 /// Latest activity seen by a [`MidiMonitor`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MidiActivity {
@@ -44,6 +51,81 @@ pub fn list_midi_inputs() -> Result<Vec<MidiInputInfo>> {
         devices.push(MidiInputInfo { index, name });
     }
     Ok(devices)
+}
+
+/// List the MIDI output ports exposed by the system (ALSA/JACK on Linux).
+pub fn list_midi_outputs() -> Result<Vec<MidiOutputInfo>> {
+    let output = midir::MidiOutput::new("Zoft")
+        .map_err(|e| anyhow::anyhow!("MIDI init failed: {}", e))?;
+    let mut devices = Vec::new();
+    for (index, port) in output.ports().iter().enumerate() {
+        let name = output
+            .port_name(port)
+            .unwrap_or_else(|_| format!("MIDI Output {}", index + 1));
+        devices.push(MidiOutputInfo { index, name });
+    }
+    Ok(devices)
+}
+
+/// Open a MIDI output port for echoing input notes (MIDI thru). Dropping the
+/// connection closes the port.
+pub struct MidiThru {
+    connection: Option<midir::MidiOutputConnection>,
+}
+
+impl MidiThru {
+    pub fn start(port_index: usize) -> Result<Self> {
+        let output = midir::MidiOutput::new("Zoft")
+            .map_err(|e| anyhow::anyhow!("MIDI init failed: {}", e))?;
+        let ports = output.ports();
+        let port = ports.get(port_index).ok_or_else(|| {
+            anyhow::anyhow!("MIDI output {} is not available", port_index + 1)
+        })?;
+        let connection = output
+            .connect(port, "zoft-thru")
+            .map_err(|e| anyhow::anyhow!("Could not open MIDI output: {}", e))?;
+        Ok(Self {
+            connection: Some(connection),
+        })
+    }
+
+    /// Send a note-on or note-off on the given channel.
+    pub fn send_note(
+        &mut self,
+        channel: u8,
+        note: u8,
+        velocity: u8,
+        on: bool,
+    ) -> Result<()> {
+        let status = if on { 0x90 } else { 0x80 } | (channel & 0x0F);
+        let Some(connection) = self.connection.as_mut() else {
+            return Ok(());
+        };
+        connection
+            .send(&[status, note & 0x7F, velocity & 0x7F])
+            .map_err(|e| anyhow::anyhow!("MIDI send failed: {}", e))
+    }
+
+    /// Silence every channel when the transport stops or panic is pressed.
+    pub fn all_notes_off(&mut self) -> Result<()> {
+        let Some(connection) = self.connection.as_mut() else {
+            return Ok(());
+        };
+        for channel in 0..16u8 {
+            connection
+                .send(&[0xB0 | channel, 123, 0])
+                .map_err(|e| anyhow::anyhow!("MIDI send failed: {}", e))?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for MidiThru {
+    fn drop(&mut self) {
+        if let Some(connection) = self.connection.take() {
+            connection.close();
+        }
+    }
 }
 
 /// Open a MIDI input port and track note activity from it. Dropping the

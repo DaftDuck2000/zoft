@@ -1970,6 +1970,39 @@ enum NoteDragMode {
     ResizeEnd,
 }
 
+/// Pointer tool selected in the piano-roll header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PianoRollTool {
+    Select,
+    Draw,
+    Erase,
+    Split,
+}
+
+impl PianoRollTool {
+    const ALL: [Self; 4] = [Self::Select, Self::Draw, Self::Erase, Self::Split];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Select => "Select",
+            Self::Draw => "Draw",
+            Self::Erase => "Erase",
+            Self::Split => "Split",
+        }
+    }
+
+    fn hint(self) -> &'static str {
+        match self {
+            Self::Select => {
+                "Select and drag notes; double-click empty space to add one"
+            }
+            Self::Draw => "Click empty space to add a note",
+            Self::Erase => "Click a note to delete it",
+            Self::Split => "Click a note to split it at that point",
+        }
+    }
+}
+
 /// Snap resolutions available inside the piano roll. Finer than the arrange
 /// grid so drum and bass parts can be placed precisely.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2085,6 +2118,8 @@ struct PianoRollWindow {
     show_scale_highlight: bool,
     /// Show one labelled note row per pitch instead of piano keys.
     drum_mode: bool,
+    /// Active pointer tool.
+    tool: PianoRollTool,
     /// Clip snapshot while drawing control-change points.
     cc_drag_before: Option<MidiClip>,
 }
@@ -2113,6 +2148,7 @@ impl PianoRollWindow {
             show_ghost_notes: true,
             show_scale_highlight: false,
             drum_mode: false,
+            tool: PianoRollTool::Select,
             cc_drag_before: None,
         }
     }
@@ -2557,6 +2593,11 @@ struct AppUI {
     midi_input_channel: Option<u8>,
     midi_monitor: Option<daw_engine::MidiMonitor>,
     midi_activity: daw_engine::MidiActivity,
+    /// Available MIDI output ports for MIDI thru.
+    midi_outputs: Vec<daw_engine::MidiOutputInfo>,
+    selected_midi_output: Option<String>,
+    midi_thru: Option<daw_engine::MidiThru>,
+    midi_thru_enabled: bool,
     /// Whether live MIDI notes are currently being auditioned through the
     /// output stream's sine synth.
     midi_audition_on: bool,
@@ -2665,6 +2706,7 @@ impl AppUI {
     fn new(project: Project, engine: AudioEngine) -> Self {
         let input_devices = engine.input_devices().unwrap_or_default();
         let midi_inputs = daw_engine::list_midi_inputs().unwrap_or_default();
+        let midi_outputs = daw_engine::list_midi_outputs().unwrap_or_default();
         let (waveform_tx, waveform_rx) = mpsc::channel();
 
         // Playback reloads read from disk; keep that off the UI thread.
@@ -2711,6 +2753,10 @@ impl AppUI {
             midi_input_channel: None,
             midi_monitor: None,
             midi_activity: daw_engine::MidiActivity::default(),
+            midi_outputs,
+            selected_midi_output: None,
+            midi_thru: None,
+            midi_thru_enabled: false,
             midi_audition_on: false,
             input_quantize: false,
             error_message: None,
@@ -3294,6 +3340,9 @@ impl AppUI {
         self.engine.set_playback_notes(Vec::new());
         self.piano_roll_preview = None;
         self.midi_activity = daw_engine::MidiActivity::default();
+        if let Some(thru) = self.midi_thru.as_mut() {
+            let _ = thru.all_notes_off();
+        }
     }
 
     /// Track whose fader/pan should shape live MIDI audition. Prefer the armed
@@ -7221,6 +7270,16 @@ impl AppUI {
                             "Label every pitch row by note name instead of showing piano keys",
                         );
                     ui.separator();
+                    for tool in PianoRollTool::ALL {
+                        if ui
+                            .selectable_label(window.tool == tool, tool.label())
+                            .on_hover_text(tool.hint())
+                            .clicked()
+                        {
+                            window.tool = tool;
+                        }
+                    }
+                    ui.separator();
                     ui.label("Snap:");
                     egui::ComboBox::from_id_salt("piano_roll_snap")
                         .selected_text(window.snap.label())
@@ -7850,17 +7909,32 @@ impl AppUI {
 
                 let keyboard_width = 48.0;
                 let ruler_height = 18.0;
+                let scrollbar_size = 8.0;
                 let ruler = egui::Rect::from_min_max(
                     egui::pos2(rect.left() + keyboard_width, rect.top()),
-                    egui::pos2(rect.right(), rect.top() + ruler_height),
+                    egui::pos2(rect.right() - scrollbar_size, rect.top() + ruler_height),
                 );
                 let keyboard = egui::Rect::from_min_max(
                     egui::pos2(rect.left(), rect.top() + ruler_height),
-                    egui::pos2(rect.left() + keyboard_width, rect.bottom()),
+                    egui::pos2(
+                        rect.left() + keyboard_width,
+                        rect.bottom() - scrollbar_size,
+                    ),
                 );
                 let grid = egui::Rect::from_min_max(
                     egui::pos2(rect.left() + keyboard_width, rect.top() + ruler_height),
-                    rect.max,
+                    egui::pos2(
+                        rect.right() - scrollbar_size,
+                        rect.bottom() - scrollbar_size,
+                    ),
+                );
+                let h_scroll = egui::Rect::from_min_max(
+                    egui::pos2(grid.left(), grid.bottom()),
+                    egui::pos2(grid.right(), rect.bottom()),
+                );
+                let v_scroll = egui::Rect::from_min_max(
+                    egui::pos2(grid.right(), grid.top()),
+                    egui::pos2(rect.right(), grid.bottom()),
                 );
                 let ruler_response = ui
                     .interact(
@@ -7949,14 +8023,72 @@ impl AppUI {
                 // Clamp the view to the clip and the MIDI pitch range.
                 let visible_ticks =
                     grid.width() / window.pixels_per_tick.max(0.0001);
-                let max_start = (length as f64 - visible_ticks as f64).max(0.0);
-                window.view_start_tick =
-                    window.view_start_tick.clamp(0.0, max_start);
                 let visible_pitches =
                     (grid.height() / window.pixels_per_semitone.max(1.0)).max(1.0);
+
+                // Horizontal and vertical scrollbars.
+                let h_max = (length as f64 - visible_ticks as f64).max(0.0);
+                let h_thumb_width = if length == 0 {
+                    grid.width()
+                } else {
+                    (grid.width() * (visible_ticks / length as f32))
+                        .clamp(24.0, grid.width())
+                };
+                let h_travel = (grid.width() - h_thumb_width).max(1.0);
+                let h_scroll_response = ui.interact(
+                    h_scroll,
+                    ui.id().with(("piano_roll_h_scroll", window.clip_id)),
+                    egui::Sense::click_and_drag(),
+                );
+                if h_scroll_response.dragged() {
+                    let delta = ui.input(|i| i.pointer.delta());
+                    if h_max > 0.0 {
+                        window.view_start_tick += delta.x as f64
+                            * (h_max / h_travel.max(1.0) as f64);
+                    }
+                } else if h_scroll_response.clicked() {
+                    if let Some(pos) = h_scroll_response.interact_pointer_pos() {
+                        let fraction = ((pos.x - grid.left() - h_thumb_width * 0.5)
+                            / h_travel)
+                            .clamp(0.0, 1.0);
+                        window.view_start_tick = fraction as f64 * h_max;
+                    }
+                }
+                let h_scroll_active =
+                    h_scroll_response.hovered() || h_scroll_response.dragged();
+
+                let v_max = (128.0 - visible_pitches).max(0.0);
+                let v_thumb_height = (grid.height()
+                    * (visible_pitches / 128.0))
+                    .clamp(24.0, grid.height());
+                let v_travel = (grid.height() - v_thumb_height).max(1.0);
+                let v_scroll_response = ui.interact(
+                    v_scroll,
+                    ui.id().with(("piano_roll_v_scroll", window.clip_id)),
+                    egui::Sense::click_and_drag(),
+                );
+                if v_scroll_response.dragged() {
+                    let delta = ui.input(|i| i.pointer.delta());
+                    if v_max > 0.0 {
+                        window.view_low_pitch -= delta.y
+                            * (v_max / v_travel.max(1.0));
+                    }
+                } else if v_scroll_response.clicked() {
+                    if let Some(pos) = v_scroll_response.interact_pointer_pos() {
+                        let fraction = ((pos.y - grid.top() - v_thumb_height * 0.5)
+                            / v_travel)
+                            .clamp(0.0, 1.0);
+                        window.view_low_pitch = (1.0 - fraction) * v_max;
+                    }
+                }
+                let v_scroll_active =
+                    v_scroll_response.hovered() || v_scroll_response.dragged();
+
+                window.view_start_tick =
+                    window.view_start_tick.clamp(0.0, h_max);
                 window.view_low_pitch = window
                     .view_low_pitch
-                    .clamp(0.0, (128.0 - visible_pitches).max(0.0));
+                    .clamp(0.0, v_max);
 
                 let low = window.view_low_pitch.floor().clamp(0.0, 127.0) as u8;
                 let high = (window.view_low_pitch + visible_pitches)
@@ -8385,7 +8517,11 @@ impl AppUI {
                     });
                 } else if let Some(pos) = hover_pos {
                     if response.hovered() {
-                        if let Some((_, mode)) = hit_test(pos) {
+                        if window.tool != PianoRollTool::Select {
+                            ui.output_mut(|output| {
+                                output.cursor_icon = egui::CursorIcon::Crosshair;
+                            });
+                        } else if let Some((_, mode)) = hit_test(pos) {
                             let icon = match mode {
                                 NoteDragMode::Move => egui::CursorIcon::Grab,
                                 NoteDragMode::ResizeEnd => {
@@ -8402,8 +8538,13 @@ impl AppUI {
                 let double_clicked = response.double_clicked();
                 let mut handled_double = false;
 
-                // Double-click empty space adds a note.
-                if double_clicked && !modifiers.command && !modifiers.shift {
+                // Double-click empty space adds a note in Select mode. The
+                // Draw tool adds one with a single click instead.
+                if double_clicked
+                    && window.tool == PianoRollTool::Select
+                    && !modifiers.command
+                    && !modifiers.shift
+                {
                     if let Some(pos) = pointer_pos {
                         if grid.contains(pos)
                             && !playhead_hit(pos)
@@ -8500,7 +8641,16 @@ impl AppUI {
                         let press_pos = ui
                             .input(|i| i.pointer.press_origin())
                             .unwrap_or(pos);
-                        if ruler.contains(press_pos) {
+                        if matches!(
+                            window.tool,
+                            PianoRollTool::Erase | PianoRollTool::Split
+                        ) {
+                            // These tools act on click; don't start a drag.
+                        } else if h_scroll.contains(press_pos)
+                            || v_scroll.contains(press_pos)
+                        {
+                            // Scrollbar drags are handled by their own widgets.
+                        } else if ruler.contains(press_pos) {
                             // Ruler drags seek the playhead; leave the note
                             // selection untouched.
                         } else if playhead_hit(press_pos) {
@@ -8679,25 +8829,120 @@ impl AppUI {
                 if response.clicked() && !double_clicked && !handled_double {
                     if let Some(pos) = response.interact_pointer_pos() {
                         if grid.contains(pos) {
-                            match hit_test(pos) {
-                                Some((index, _)) => {
-                                    if modifiers.command || modifiers.shift {
-                                        if window.selected.contains(&index) {
-                                            window.selected.remove(&index);
-                                        } else {
-                                            window.selected.insert(index);
-                                        }
-                                    } else {
+                            match window.tool {
+                                PianoRollTool::Erase => {
+                                    if let Some((index, _)) = hit_test(pos) {
+                                        undo_before = Some(clip.clone());
+                                        window.notes.remove(index);
                                         window.selected.clear();
-                                        window.selected.insert(index);
-                                    }
-                                    if let Some(note) = window.notes.get(index) {
-                                        preview_note = Some((note.pitch, note.velocity));
+                                        window.drag = None;
+                                        commit = true;
                                     }
                                 }
-                                None => {
-                                    if !modifiers.command && !modifiers.shift {
+                                PianoRollTool::Split => {
+                                    if let Some((index, _)) = hit_test(pos) {
+                                        let tick = snap_tick(tick_at(pos.x));
+                                        let split = window.notes.get(index).and_then(
+                                            |note| {
+                                                (note.start < tick
+                                                    && tick < note.end)
+                                                    .then(|| PianoRollNote {
+                                                        start: tick,
+                                                        end: note.end,
+                                                        pitch: note.pitch,
+                                                        velocity: note.velocity,
+                                                        channel: note.channel,
+                                                    })
+                                            },
+                                        );
+                                        if let Some(split) = split {
+                                            undo_before = Some(clip.clone());
+                                            window.notes[index].end = tick;
+                                            window.notes.push(split);
+                                            window.notes.sort_by_key(|note| {
+                                                (
+                                                    note.start,
+                                                    note.pitch,
+                                                    note.channel,
+                                                )
+                                            });
+                                            window.selected.clear();
+                                            window.drag = None;
+                                            commit = true;
+                                        }
+                                    }
+                                }
+                                PianoRollTool::Draw => {
+                                    if let Some((index, _)) = hit_test(pos) {
+                                        if modifiers.command || modifiers.shift {
+                                            if window.selected.contains(&index) {
+                                                window.selected.remove(&index);
+                                            } else {
+                                                window.selected.insert(index);
+                                            }
+                                        } else {
+                                            window.selected.clear();
+                                            window.selected.insert(index);
+                                        }
+                                        if let Some(note) = window.notes.get(index) {
+                                            preview_note =
+                                                Some((note.pitch, note.velocity));
+                                        }
+                                    } else if clip.length > 0 {
+                                        let start = snap_tick(tick_at(pos.x))
+                                            .min(length.saturating_sub(1));
+                                        let wanted = piano_roll_new_note_length(
+                                            window.snap,
+                                            snap_ticks,
+                                            window.last_length,
+                                        );
+                                        window.last_length = wanted;
+                                        let end = start
+                                            .saturating_add(wanted)
+                                            .min(length)
+                                            .max(start + 1);
+                                        let note = PianoRollNote {
+                                            start,
+                                            end,
+                                            pitch: pitch_at(pos.y),
+                                            velocity: 100,
+                                            channel: 0,
+                                        };
+                                        undo_before = Some(clip.clone());
+                                        window.notes.push(note);
+                                        let index = window.notes.len() - 1;
                                         window.selected.clear();
+                                        window.selected.insert(index);
+                                        preview_note = Some((
+                                            window.notes[index].pitch,
+                                            window.notes[index].velocity,
+                                        ));
+                                        commit = true;
+                                    }
+                                }
+                                PianoRollTool::Select => {
+                                    match hit_test(pos) {
+                                        Some((index, _)) => {
+                                            if modifiers.command || modifiers.shift {
+                                                if window.selected.contains(&index) {
+                                                    window.selected.remove(&index);
+                                                } else {
+                                                    window.selected.insert(index);
+                                                }
+                                            } else {
+                                                window.selected.clear();
+                                                window.selected.insert(index);
+                                            }
+                                            if let Some(note) = window.notes.get(index) {
+                                                preview_note =
+                                                    Some((note.pitch, note.velocity));
+                                            }
+                                        }
+                                        None => {
+                                            if !modifiers.command && !modifiers.shift {
+                                                window.selected.clear();
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -8721,6 +8966,67 @@ impl AppUI {
                         ),
                     );
                 }
+
+                // Scrollbar tracks and thumbs.
+                painter.rect_filled(h_scroll, 2.0, egui::Color32::from_gray(20));
+                painter.rect_filled(v_scroll, 2.0, egui::Color32::from_gray(20));
+                let h_thumb_width = if length == 0 {
+                    grid.width()
+                } else {
+                    (grid.width() * (visible_ticks / length as f32))
+                        .clamp(24.0, grid.width())
+                };
+                let h_travel = (grid.width() - h_thumb_width).max(1.0);
+                let h_fraction = if h_max > 0.0 {
+                    (window.view_start_tick / h_max) as f32
+                } else {
+                    0.0
+                };
+                let h_thumb = egui::Rect::from_min_size(
+                    egui::pos2(
+                        grid.left() + h_fraction * h_travel,
+                        h_scroll.top() + 1.0,
+                    ),
+                    egui::vec2(h_thumb_width, (h_scroll.height() - 2.0).max(1.0)),
+                );
+                painter.rect_filled(
+                    h_thumb,
+                    3.0,
+                    if h_scroll_active {
+                        egui::Color32::from_gray(150)
+                    } else {
+                        egui::Color32::from_gray(90)
+                    },
+                );
+
+                let v_thumb_height = (grid.height()
+                    * (visible_pitches / 128.0))
+                    .clamp(24.0, grid.height());
+                let v_travel = (grid.height() - v_thumb_height).max(1.0);
+                let v_fraction = if v_max > 0.0 {
+                    (window.view_low_pitch / v_max) as f32
+                } else {
+                    0.0
+                };
+                let v_thumb = egui::Rect::from_min_size(
+                    egui::pos2(
+                        v_scroll.left() + 1.0,
+                        grid.top() + (1.0 - v_fraction) * v_travel,
+                    ),
+                    egui::vec2(
+                        (v_scroll.width() - 2.0).max(1.0),
+                        v_thumb_height,
+                    ),
+                );
+                painter.rect_filled(
+                    v_thumb,
+                    3.0,
+                    if v_scroll_active {
+                        egui::Color32::from_gray(150)
+                    } else {
+                        egui::Color32::from_gray(90)
+                    },
+                );
                 if window.show_velocity_lane {
                     ui.add_space(6.0);
                     let (vel_response, vel_painter) = ui.allocate_painter(
@@ -10250,6 +10556,7 @@ impl eframe::App for AppUI {
                 self.midi_captured.extend(events.iter().copied());
             }
             for event in &events {
+                self.send_midi_thru(event);
                 if event.on {
                     if audition {
                         self.engine.note_on(event.note, event.velocity.max(1));
@@ -10418,6 +10725,61 @@ impl eframe::App for AppUI {
                             ui.close_menu();
                         }
                     });
+                    ui.label(format!(
+                        "Output: {}",
+                        self.selected_midi_output.as_deref().unwrap_or("None")
+                    ));
+                    ui.menu_button("Output", |ui| {
+                        let mut selected = self.selected_midi_output.clone();
+                        let mut changed = false;
+                        if ui
+                            .selectable_value(&mut selected, None, "None")
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                        if self.midi_outputs.is_empty() {
+                            ui.weak("No MIDI outputs detected");
+                        } else {
+                            for device in &self.midi_outputs {
+                                if ui
+                                    .selectable_value(
+                                        &mut selected,
+                                        Some(device.name.clone()),
+                                        &device.name,
+                                    )
+                                    .changed()
+                                {
+                                    changed = true;
+                                }
+                            }
+                        }
+                        ui.separator();
+                        if ui.button("Refresh").clicked() {
+                            self.refresh_midi_outputs();
+                            ui.close_menu();
+                        }
+                        if changed {
+                            self.selected_midi_output = selected;
+                            self.restart_midi_thru();
+                            ui.close_menu();
+                        }
+                    });
+                    if ui
+                        .add_enabled(
+                            self.selected_midi_output.is_some(),
+                            egui::Checkbox::new(
+                                &mut self.midi_thru_enabled,
+                                "MIDI Thru",
+                            ),
+                        )
+                        .on_hover_text(
+                            "Echo input notes to the selected MIDI output",
+                        )
+                        .changed()
+                    {
+                        self.restart_midi_thru();
+                    }
                     ui.separator();
                     if ui.button("Panic").clicked() {
                         self.panic_midi();
@@ -12748,6 +13110,55 @@ impl AppUI {
         }
     }
 
+    /// Re-enumerate MIDI outputs, closing MIDI thru if its port disappeared.
+    fn refresh_midi_outputs(&mut self) {
+        self.midi_outputs = daw_engine::list_midi_outputs().unwrap_or_default();
+        if let Some(selected) = &self.selected_midi_output {
+            if !self.midi_outputs.iter().any(|device| &device.name == selected) {
+                self.selected_midi_output = None;
+                self.midi_thru = None;
+                self.midi_thru_enabled = false;
+            }
+        }
+    }
+
+    /// Open (or close) the MIDI thru connection for the selected output.
+    fn restart_midi_thru(&mut self) {
+        self.midi_thru = None;
+        if !self.midi_thru_enabled {
+            return;
+        }
+        let Some(name) = self.selected_midi_output.clone() else {
+            return;
+        };
+        let Some(device) = self.midi_outputs.iter().find(|device| device.name == name) else {
+            return;
+        };
+        match daw_engine::MidiThru::start(device.index) {
+            Ok(thru) => self.midi_thru = Some(thru),
+            Err(e) => {
+                self.error_message =
+                    Some(format!("Could not open MIDI output: {}", e));
+                self.midi_thru_enabled = false;
+            }
+        }
+    }
+
+    /// Echo one captured input event to the selected MIDI output.
+    fn send_midi_thru(&mut self, event: &daw_engine::MidiInputEvent) {
+        if !self.midi_thru_enabled {
+            return;
+        }
+        if let Some(thru) = self.midi_thru.as_mut() {
+            let _ = thru.send_note(
+                event.channel,
+                event.note,
+                event.velocity,
+                event.on,
+            );
+        }
+    }
+
     /// Add a new audio or MIDI track as one undoable step.
     fn add_track(&mut self, midi: bool) {
         let index = self.project.track_order.len();
@@ -12854,7 +13265,7 @@ impl AppUI {
         if self.midi_monitor.is_none() {
             self.pending_record_track = None;
             self.error_message =
-                Some("No MIDI input selected. Choose one in the MIDI bar.".to_string());
+                Some("No MIDI input selected. Choose one in the MIDI menu.".to_string());
             return;
         }
         // Drop any notes that arrived before the take started.
@@ -12879,7 +13290,11 @@ impl AppUI {
             return;
         };
         if let Some(monitor) = &self.midi_monitor {
-            self.midi_captured.extend(monitor.drain_events());
+            let events = filter_midi_events(
+                monitor.drain_events(),
+                self.midi_input_channel,
+            );
+            self.midi_captured.extend(events);
         }
         let events = std::mem::take(&mut self.midi_captured);
         let started_at = self
